@@ -1,0 +1,19 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Archivos de entorno y credenciales
+.env
+
+# Datos locales de Docker / Postgres
+postgres_data/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
