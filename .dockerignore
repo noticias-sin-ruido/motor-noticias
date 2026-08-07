@@ -1,0 +1,55 @@
+# Entorno virtual y cache
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Git y metadatos
+.git
+.gitignore
+.github/
+
+# Documentación y archivos que el código no ejecuta
+README.md
+*.pdf
+*.html
+
+# Variables de entorno (se inyectan en runtime)
+.env
+.env.example
+
+# IDE / Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos del SO
+.DS_Store
+Thumbs.db
+
+# Logs y datos locales
+*.log
+logs/
+
+# Docker (evita que copie archivos de Docker innecesarios)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Tests y datos de desarrollo
+tests/
+test_data/
+*.db
+*.sqlite
+
+# Node (si hay frontend en otra carpeta)
+node_modules/
+dist/
+build/

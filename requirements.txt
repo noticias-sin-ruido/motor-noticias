@@ -19,8 +19,14 @@ alembic>=1.13.1
 # INGESTA & EXTRACCIÓN DE NOTICIAS
 # ==========================================
 feedparser>=6.0.11
-trafilatura>=2.0.0
+beautifulsoup4>=4.12.3
 httpx>=0.27.0
+tenacity>=8.2.3
+
+# Reservados para medios futuros que no traigan contenido completo en el RSS
+# (content:encoded) y requieran extraer el artículo directamente de su página.
+# Sin uso activo en la Fase 2 actual.
+trafilatura>=2.0.0
 newspaper4k>=0.9.6
 
 # ==========================================

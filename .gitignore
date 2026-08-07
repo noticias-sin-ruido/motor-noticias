@@ -1,19 +1,18 @@
 # Entornos virtuales
 venv/
 .venv/
-env/
 
 # Cache de Python
 __pycache__/
 *.py[cod]
-*$py.class
 
-# Archivos de entorno y credenciales
+# Variables de entorno locales
 .env
 
-# Datos locales de Docker / Postgres
-postgres_data/
-
-# Archivos del sistema
+# Archivos de SO o editores
 .DS_Store
-Thumbs.db
+.vscode/
+.idea/
+
+# Orquestación (si alguien la crea por error localmente)
+docker-compose*.yml
