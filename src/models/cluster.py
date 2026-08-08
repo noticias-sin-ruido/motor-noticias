@@ -17,7 +17,11 @@ class Cluster(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     titulo_evento: str = Field(index=True)
     fecha_creacion: datetime = Field(default_factory=datetime.utcnow)
-    estado: str = Field(default="abierto", index=True)  # "abierto" | "procesado"
+    # "abierto"    -> sigue aceptando noticias nuevas
+    # "procesado"  -> cerrado con cobertura suficiente, listo para sintetizar
+    # "descartado" -> cerrado sin alcanzar el mínimo de medios distintos:
+    #                 sin dos voces no hay enfoques editoriales que comparar
+    estado: str = Field(default="abierto", index=True)
 
     noticias: List["Noticia"] = Relationship(back_populates="cluster")
     sintesis: List["Sintesis"] = Relationship(back_populates="cluster")

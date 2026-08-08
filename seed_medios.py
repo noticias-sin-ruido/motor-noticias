@@ -28,16 +28,34 @@ MEDIOS = [
         "feed_rss": "https://www.cronista.com/files/rss/news.xml",
     },
     {
-        "nombre": "Clarín",
-        "url_base": "https://www.clarin.com",
-        "feed_rss": "https://www.clarin.com/rss/lo-ultimo/",
-    },
-    {
         "nombre": "TN",
         "url_base": "https://tn.com.ar",
         "feed_rss": "https://tn.com.ar/feed/",
     },
+    # --- Farandula / espectaculos ---
+    {
+        "nombre": "Revista Gente",
+        # El feed se sirve desde gente.com.ar pero los articulos viven en
+        # revistagente.com (redireccion del propio medio).
+        "url_base": "https://www.revistagente.com",
+        "feed_rss": "https://www.gente.com.ar/feed/",
+    },
+    {
+        "nombre": "Revista Paparazzi",
+        "url_base": "https://www.paparazzi.com.ar",
+        "feed_rss": "https://www.paparazzi.com.ar/feed/",
+    },
+    {
+        "nombre": "Ciudad Magazine",
+        # Arc XP: el parametro ?outputType=xml es obligatorio, sin el da 404.
+        "url_base": "https://www.ciudad.com.ar",
+        "feed_rss": "https://www.ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml",
+    },
 ]
+
+# Clarin quedo fuera del line-up: su RSS (feed general y los 5 feeds por
+# seccion probados) no trae content:encoded, solo description corta -- ver
+# specs/change_logs.md, Fase 2.
 
 
 def main() -> int:

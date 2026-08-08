@@ -10,9 +10,10 @@ if TYPE_CHECKING:
     from .cluster import Cluster
 
 # Dimensión del vector de embedding.
-#   384 -> modelos tipo "all-MiniLM-L6-v2" (sentence-transformers, más liviano).
-#   768 -> modelos tipo "all-mpnet-base-v2" (mayor precisión, más costo).
-# Ajustar según el modelo que se use en la fase de vectorización.
+# Modelo elegido: "paraphrase-multilingual-MiniLM-L12-v2" (384 dims) —
+# multilingüe, necesario porque las noticias son en español y los modelos
+# tipo "all-MiniLM-L6-v2" están entrenados esencialmente en inglés.
+# Alternativa equivalente de 384 dims: "intfloat/multilingual-e5-small".
 EMBEDDING_DIM = 384
 
 

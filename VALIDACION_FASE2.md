@@ -29,15 +29,23 @@ Los valores por defecto de `DATABASE_URL` ya coinciden con las credenciales del 
 pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-## 4. Levantar la API
+## 4. Aplicar el esquema con Alembic
+
+```powershell
+alembic upgrade head
+```
+
+Crea las 4 tablas, sus índices y la columna `Vector(384)` de `Noticia.embedding` (algo que SQLite en los tests nunca prueba). **Es obligatorio**: `init_db()` ya no crea tablas — solo habilita la extensión `vector` y falla con un mensaje claro si este paso falta.
+
+## 5. Levantar la API
 
 ```powershell
 uvicorn src.main:app --reload
 ```
 
-Esto corre `init_db()` contra Postgres real: habilita la extensión `vector` y crea las tablas, incluida la columna `Vector(384)` de `Noticia.embedding` (algo que SQLite en los tests nunca prueba). No debería tirar ningún error al arrancar.
+No debería tirar ningún error al arrancar.
 
-## 5. Seed de medios
+## 6. Seed de medios
 
 En otra terminal:
 
@@ -48,11 +56,11 @@ python seed_medios.py
 
 Crea los 4 medios: La Nación, Clarín, TN, El Cronista.
 
-## 6. Correr la ingesta real
+## 7. Correr la ingesta real
 
 ```powershell
 curl http://localhost:8000/
-curl http://localhost:8000/test-db
+curl http://localhost:8000/clusters
 curl -X POST http://localhost:8000/ingest
 ```
 
@@ -62,7 +70,7 @@ curl -X POST http://localhost:8000/ingest
 
 ---
 
-## 7. Consultas de verificación en la base de datos
+## 8. Consultas de verificación en la base de datos
 
 ```powershell
 docker exec -it sin_ruido_db psql -U usuario -d sin_ruido
@@ -147,7 +155,7 @@ SELECT nombre, feed_rss, activo FROM medio;
 
 ---
 
-## 8. Volver a correr la ingesta para probar la deduplicación
+## 9. Volver a correr la ingesta para probar la deduplicación
 
 ```powershell
 curl -X POST http://localhost:8000/ingest
@@ -157,7 +165,7 @@ Corré `POST /ingest` una segunda vez sin cambios: los `nuevas` deberían bajar 
 
 ---
 
-## 9. Apagar el entorno
+## 10. Apagar el entorno
 
 Los datos quedan persistidos en el volumen `sin_ruido_pgdata` para la próxima vez:
 

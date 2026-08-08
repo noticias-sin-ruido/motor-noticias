@@ -1,8 +1,8 @@
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 from .config import settings
 
@@ -39,14 +39,18 @@ def get_engine() -> Engine:
 
 def init_db() -> None:
     """
-    Inicializa la base de datos:
+    Prepara la base de datos para que la aplicación pueda arrancar:
       1. Habilita la extensión `pgvector` si aún no existe.
-      2. Crea todas las tablas definidas en los modelos SQLModel (si no existen).
+      2. Verifica que el esquema haya sido migrado con Alembic.
+
+    Las tablas **no** se crean acá. El esquema lo gestiona Alembic
+    (`alembic upgrade head`): si se usara `SQLModel.metadata.create_all()`,
+    las tablas nuevas se crearían por fuera del control de Alembic y los
+    cambios sobre tablas existentes (ALTER) nunca se aplicarían, quedando
+    el esquema real y las migraciones en estados distintos.
     """
     # Se importa acá adentro (y no al principio del archivo) para evitar
-    # importaciones circulares entre database.py y los modelos, y para
-    # asegurar que todos los modelos queden registrados en SQLModel.metadata
-    # antes de crear las tablas.
+    # importaciones circulares entre database.py y los modelos.
     from . import models  # noqa: F401
 
     engine = get_engine()
@@ -54,7 +58,11 @@ def init_db() -> None:
     with engine.begin() as connection:
         connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
 
-    SQLModel.metadata.create_all(engine)
+    if not inspect(engine).has_table("alembic_version"):
+        raise RuntimeError(
+            "La base de datos no tiene el esquema aplicado. Ejecutá:\n"
+            "    alembic upgrade head"
+        )
 
 
 def get_session():
