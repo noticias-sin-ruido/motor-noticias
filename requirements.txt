@@ -33,7 +33,12 @@ newspaper4k>=0.9.6
 # VECTORIZACIÓN, NLP & CLUSTERING
 # ==========================================
 sentence-transformers>=2.6.0
+# spaCy se usa para NER en el preproceso de la síntesis (Fase 4). El modelo en
+# español NO viene con la librería y hay que bajarlo aparte, después de instalar
+# estos requirements:
+#     python -m spacy download es_core_news_md
 spacy>=3.8.0
+# scikit-learn se usa para el TF-IDF del preproceso (Fase 4).
 scikit-learn>=1.5.0
 numpy>=1.26.4
 fastembed>=0.2.0

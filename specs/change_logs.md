@@ -164,9 +164,86 @@ Se usó `AgglomerativeClustering` para las simulaciones offline de calibración,
 
 ---
 
-## Fase 3 — Análisis pendiente: exclusión por género y umbrales por tópico
+## Fase 3 — Cierre del análisis: fusión de clusters y reparto de responsabilidades con Fase 4
 
-Debate abierto el 8/8/2026, **con recomendación pero sin implementar**. Se retoma cuando Fase 4 permita juzgar calidad por las síntesis generadas y no por los títulos.
+Resuelto el 8/8/2026 sobre una segunda corrida de datos reales. **Las dos recomendaciones del análisis anterior quedaron descartadas** y el problema de fondo resultó ser otro. El análisis original se conserva más abajo porque la corrección solo se entiende con él a la vista.
+
+### La corrida
+191 noticias nuevas (840 en total, 64 clusters, 185 agrupadas). El día trajo dos muertes de alta cobertura — Jorge Messi y Leandro Rud — que resultaron un caso de prueba mucho más exigente que el anterior.
+
+### ❌ Descartado: exclusión por género
+De 185 noticias agrupadas, la lista de segmentos propuesta (`columnistas`, `cocina`, `opinion`, `lifestyle`…) atrapa **3**, y 1 de los 14 clusters de un solo medio. El motivo es que **el segmento de URL identifica el tópico, no el género**: Ciudad Magazine publica recetas bajo `espectaculos` y La Nación entrevistas de psicología bajo `sociedad`. Los falsos positivos reales quedaban todos afuera (dos recetas distintas, dos entrevistas a Gabriel Rolón, el cronograma de las Leonas junto al de los Leones, dos cotizaciones del dólar, el horario y el canal de River-Tigre).
+
+Además el único cluster multi-medio que la lista tocaría es el de la crisis con Brasil, y le sacaría justo la columna de opinión que mejor explicaba el conflicto.
+
+**Y no hace falta**: los cinco casos son de un solo medio, así que `MIN_MEDIOS_CLUSTER` ya los descarta. El periodismo de servicio y la opinión no se replican entre medios, se autofiltran. La regla que ya existía cubre el problema que esta lista venía a resolver.
+
+### ❌ Descartado: umbrales por tópico
+Los dos falsos positivos multi-medio entraron con similitudes de **0.8420** (el blob de la crisis con Brasil) y **0.8857** (la muerte de Ignomiriello colada entre dos notas sobre Tagliafico). Pero hay clusters correctos cuyo peor miembro está en **0.8173** (los mensajes de despedida a Messi). **Los rangos se superponen: ningún umbral los separa**, ni global ni por tópico.
+
+Y se cayó el ejemplo que sostenía la idea: el análisis anterior decía que deportes necesitaba un umbral *más bajo* por el caso Unión-Lanús (0.6462). Acá deportes produjo un falso positivo a 0.8857. Bajarle el umbral lo empeoraría.
+
+### 🔴 El problema real: el algoritmo nunca fusionaba clusters
+La muerte de Jorge Messi dejó **68 noticias repartidas en 20 clusters**. Al medir las similitudes entre centroides aparecieron **146 pares de clusters coexistentes por encima del umbral 0.75** — o sea que, según su propia regla, deberían haber sido uno solo:
+
+```
+0.9484  "Murió Jorge Messi, el padre de Lionel Messi: tenía 68 años"
+        "Murió Jorge Messi, el padre de Lionel, a los 68 años"
+0.9193  "La fuerte carta de Chiqui Tapia tras la muerte de Jorge Messi"
+        "La carta de Claudio 'Chiqui' Tapia por la muerte de Jorge Messi"
+```
+
+La causa está en `_mejor_match()`: devuelve el mejor candidato **global** entre centroides de clusters y noticias sueltas. Si llega una noticia que matchea un cluster existente a 0.85 pero hay una suelta casi idéntica a 0.99, gana la suelta y nace un cluster paralelo. Nada volvía a unirlos.
+
+El daño era concreto: el caso Chiqui Tapia partió un hecho de 4 medios en un cluster publicable de 2 medios y otro de 1 medio que se **descartaba**. Se perdía cobertura real por un artefacto del orden de evaluación.
+
+### El reparto de responsabilidades entre clustering y Fase 4
+Antes de elegir un umbral de fusión se replanteó la pregunta de fondo, y eso cambió el diseño:
+
+> Un cluster grande no es un problema si Fase 4 puede separarlo. Si 27 notas hablan de la misma muerte pero 3 cuentan cómo fue, 3 quién era y 3 qué harán, esa separación es por **ángulo**, y distinguir ángulos es leer los textos — que es exactamente lo que hace el modelo de síntesis.
+
+Esto resolvió el callejón sin salida del umbral. La similitud coseno mide **de qué habla** un texto, no **qué ángulo toma**: "cómo murió Jorge Messi" y "qué hará la AFA" comparten vocabulario casi idéntico. Por eso los rangos de aciertos y errores se superponen y ningún umbral los separa. El número no puede hacer ese trabajo; un LLM que lee los artículos sí.
+
+De ahí el reparto que queda fijado:
+
+| | Unidad | Optimiza | Herramienta |
+|---|---|---|---|
+| **Clustering** | el hecho y su cobertura | no perder cobertura (recall) | embeddings |
+| **Fase 4** | el ángulo | precisión editorial | el modelo leyendo |
+
+Un cluster amplio y limpio es **mejor** materia prima que varios fragmentos: le entrega al modelo las coberturas de todos los medios juntas, que es lo que permite comparar enfoques. Los 20 clusters fragmentados eran el problema; uno de 46 noticias con 5 medios es la solución, siempre que Fase 4 lo desagregue.
+
+Esto además disuelve la disyuntiva "¿la unidad es el evento o la historia?", que era una elección forzada por pedirle al clustering un trabajo que no puede hacer. **El clustering agrupa el hecho; la síntesis define el evento.**
+
+Verificado antes de cerrarlo: el modelo **ya soporta N síntesis por cluster** sin migración — `Sintesis.cluster_id` es una FK sin `unique` y `Cluster.sintesis` ya está declarado como `List["Sintesis"]`.
+
+### Consecuencia: el mínimo de 2 medios se evalúa por ángulo
+Si el cluster deja de ser lo que se publica, contar medios sobre el cluster deja de proteger. Ejemplo real: el ángulo *"la carta que Jorge Messi le escribió al Barcelona"* lo cubrió **solo TN** (2 notas). Hoy queda como cluster suelto de 1 medio y se descarta bien; una vez absorbido por el cluster grande, el conteo a nivel cluster da 5 y pasaría el filtro, publicando una síntesis de una sola voz.
+
+La regla no se borra, se aplica en dos niveles:
+
+- **cluster con ≥ `MIN_MEDIOS_CLUSTER` medios** → condición *necesaria*: justifica gastar una llamada al modelo. Se queda en `cerrar_clusters_vencidos()` como pre-filtro barato, porque si el cluster entero tiene un solo medio ningún ángulo adentro puede tener dos.
+- **ángulo con ≥ `MIN_MEDIOS_CLUSTER` medios** → condición *suficiente*: esto sí se publica. Lo evalúa Fase 4, y descarta el ángulo, no el cluster.
+
+### La fusión: dos intentos y una lección repetida
+La primera implementación fusionaba de a pares, tomando el par más parecido y **recalculando el centroide** después de cada unión. Sobre datos reales se comió 46 noticias en un solo cluster: reprodujo exactamente el **encadenamiento** que el centroide vino a evitar a nivel de noticia, ahora a nivel de cluster.
+
+La segunda decide todos los pares contra la **misma foto de centroides** (union-find, sin recalcular dentro de la vuelta). Baja de 10 fusiones a 6 y el cluster mayor de 46 a 27 — pero al medir el punto fijo se vio que **converge igual al mismo resultado** en 3-4 corridas. El criterio del centroide es intrínsecamente inestable: fusionar mueve el centroide y habilita la fusión siguiente.
+
+Con el reparto de responsabilidades ya definido, esa inestabilidad dejó de ser un problema: el destino —el cluster amplio— es el que queremos. Así que la función **itera hasta el punto fijo dentro de la misma llamada**. Queda idempotente y el pipeline termina siempre en el mismo estado, en vez de consolidar de a poco a lo largo de varias corridas del scheduler y depender de cuántas alcanzaron a ejecutarse antes del cierre.
+
+**Resultado medido:** 27 clusters → **17**, en una sola llamada (10 fusiones, la segunda pasada da 0). El mayor quedó en **46 noticias de 5 medios y las 46 mencionan a Messi — cero intrusos**. Los otros hechos (Enner Valencia, Simeone, Almada, el dólar, los desalojos) quedaron cada uno por su lado.
+
+Sobrevive el cluster más viejo, para que fusionar no estire el plazo de cierre. Solo se tocan clusters abiertos: los cerrados ya pudieron haberse publicado.
+
+### Reversibilidad
+Se validó explícitamente antes de implementar, porque el diseño de Fase 4 se apoya en esto: **nada de esto toca el esquema**. Pasar de una síntesis por cluster a N —o volver atrás— no necesita migración. `UMBRAL_FUSION_CLUSTERS = 1.01` desactiva la fusión de hecho (el coseno nunca supera 1), el filtro por ángulo vive dentro del servicio de síntesis, y los clusters son reconstruibles en segundos porque los embeddings quedan persistidos en las noticias. Lo único no reversible desde este repo son las síntesis ya entregadas por webhook al backend del producto — de ahí que la entrega se diseñe con idempotencia.
+
+---
+
+## Fase 3 — Análisis previo: exclusión por género y umbrales por tópico (descartado)
+
+Debate del 8/8/2026, **descartado por la sección anterior**. Se conserva porque documenta qué se evaluó y en qué se falló al leer los datos: la intuición sobre farándula se corrigió acá, y la de deportes se corrigió después, en sentido contrario al que decía esta misma sección.
 
 ### El disparador
 ¿Conviene detectar el tópico de cada noticia y usar un umbral de agrupación distinto según el tópico? La intuición inicial era: farándula más laxa (más ambigua), economía más rigurosa.
@@ -189,14 +266,236 @@ Sobre economía la intuición se confirma. **Sobre farándula los datos dicen lo
 
 Si algo, espectáculos necesitaría un umbral **más alto**. El que sí necesitaría uno más bajo es **deportes**: el mismo partido Unión-Lanús quedó en 0.6462 porque un medio destaca los goles y el otro el marcador.
 
-### Recomendación (en este orden)
-1. **Exclusión por género, primero.** Sacar del agrupamiento los segmentos que no reportan eventos: `columnistas`, `opinion`, `cocina`, `recetas`, `horoscopo`, `lifestyle`. Ataca directo lo que falla, es una lista de segmentos en vez de una segunda superficie de calibración, y de paso baja el gasto de Gemini en Fase 4 al no sintetizar lo que no lo merece.
-2. **Umbrales por tópico, solo si después sigue haciendo falta** — calibrados con más datos y esperando que `deportes` baje y `espectaculos` suba, no al revés.
-3. **Esperar a Fase 4 para calibrar.** Hoy la calidad se juzga mirando títulos; con síntesis generadas se ve cuál mezcla dos hechos. Calibrar N umbrales con 5-15 clusters por tópico es mucho riesgo de sobreajuste.
+### Recomendación (en este orden) — ⚠️ ninguna se implementó
+1. ~~**Exclusión por género, primero.** Sacar del agrupamiento los segmentos que no reportan eventos: `columnistas`, `opinion`, `cocina`, `recetas`, `horoscopo`, `lifestyle`.~~ **Descartada:** el segmento identifica el tópico, no el género, y `MIN_MEDIOS_CLUSTER` ya cubría el problema.
+2. ~~**Umbrales por tópico, solo si después sigue haciendo falta** — esperando que `deportes` baje y `espectaculos` suba.~~ **Descartada:** los rangos de aciertos y errores se superponen, y deportes resultó necesitar lo contrario de lo que dice acá.
+3. **Esperar a Fase 4 para calibrar.** Lo único que sobrevivió, aunque por una razón más fuerte que la prevista: no es que convenga esperar a Fase 4 para elegir mejor el umbral, es que **la separación por ángulo no es un problema de umbral** y le corresponde a Fase 4 hacerla leyendo los textos.
+
+### Lección de método
+Las dos recomendaciones se apoyaban en clusters de una sola corrida. Con una segunda corrida —y con dos muertes de alta cobertura, que estresan el agrupamiento mucho más que un día común— las dos se cayeron, y apareció un problema estructural que ninguna de las dos habría tocado. Es la segunda vez en el proyecto que un diagnóstico sobre una sola observación resulta equivocado; la primera fue Clarín y sus horóscopos.
 
 ---
 
 ## Fase 4 — Síntesis Neutra con IA (diseño cerrado, implementación pendiente)
+
+### La unidad de publicación es el ángulo, no el cluster
+Decidido al cerrar Fase 3 (ver arriba, "Reparto de responsabilidades"). El clustering entrega **el hecho y toda su cobertura**; Fase 4 lee ese material y lo separa en **ángulos**, emitiendo una síntesis por ángulo. Un cluster puede producir N síntesis, y el modelo ya lo soporta sin migración (`Sintesis.cluster_id` es una FK sin `unique`).
+
+Dos consecuencias directas para la implementación:
+- **El filtro de cobertura se evalúa por ángulo.** `MIN_MEDIOS_CLUSTER` sobre el cluster queda como pre-filtro barato (condición necesaria: evita gastar una llamada al modelo en algo que nunca va a publicar), pero el que decide qué se publica es el conteo de medios distintos **dentro del ángulo**. Se descarta el ángulo, no el cluster.
+- **Hay que definir qué se le manda al modelo.** Un cluster puede traer decenas de artículos (medido: 46). Con `título + EMBEDDING_CHARS_CUERPO` son unos pocos miles de tokens; con el cuerpo completo, decenas de miles. Pendiente de decidir al implementar.
+
+### El cálculo señala, el modelo juzga
+Antes de llamar a Gemini se calcula evidencia sobre el cluster (`services/preprocessing.py`): el núcleo compartido, el vocabulario propio de cada medio vía TF-IDF, y qué entidades menciona en exclusiva o calla habiéndolas dicho otro. Esa evidencia entra al prompt junto con los cuerpos.
+
+**No reemplaza al modelo, lo apunta.** Se evaluó que la comparativa saliera calculada y que Gemini solo la redactara, y se descartó: el cálculo no distingue *"omitió el nombre de la denunciante"* (decisión editorial grave) de *"omitió Instagram"* (un posteo incrustado). Esa distinción es criterio. El reparto queda igual que en Fase 3 — el cálculo aporta recall, el modelo aporta juicio:
+
+| | Hace | No hace |
+|---|---|---|
+| TF-IDF + spaCy | señala candidatos: qué mirar | decidir qué importa |
+| Gemini | verifica contra el cuerpo, juzga y redacta | descubrir las diferencias desde cero |
+
+Por eso **se manda el cuerpo completo** y no un extracto: el texto es lo que permite verificar la pista. La evidencia sin el cuerpo es una afirmación que hay que creer; con el cuerpo es una hipótesis contrastable. El prompt dice explícitamente que las señales son pistas a verificar y pide citar la frase que respalda cada afirmación, para que la salida sea auditable.
+
+**Que funcionó, medido sobre datos reales** (cluster de la vuelta de Messi a Rosario, 3 medios): Ciudad Magazine → `celia cuccittini, historia amor, esfuerzo` (la familia); Paparazzi → `mega operativo, a qué hora llega` (el espectáculo); TN → `helicóptero, operativo seguridad, traslado` (la logística). Tres encuadres distintos del mismo hecho, detectados contando palabras.
+
+**Que hubo que corregir, y por qué importa:**
+- **El IDF tiene que salir del corpus completo, no del cluster.** Con 3 documentos no hay forma de saber qué palabra es rara: ajustándolo dentro del cluster, los "términos distintivos" daban `no, le, pero, estaba`. Con el IDF de las 840 noticias, `matanza, virrey, juvenil, hermana`.
+- **Las entidades hay que unificar entre medios, no dentro de cada uno.** NER devolvió `Lara Agustina Ledesma` en un medio y `Iara Agustina Ledesma` (errata de etiquetado) en otro. Unificando por medio, el sistema informaba que el segundo medio *omitía* un nombre que en realidad había publicado. Un falso omitido en una nota sobre abuso sexual no es un detalle: se unifica con un vocabulario común a todos los medios.
+- **La forma canónica es la más mencionada, no la más larga.** Los epígrafes en mayúsculas dejan variantes basura (`THIAGO MEDINA Y EL`) que ganaban por longitud y pasaban a representar a la entidad.
+- **Filtrar autorreferencias del medio y plataformas.** El pie de página de Ciudad ("seguinos en el canal de WhatsApp") salía como su rasgo más distintivo.
+- **`es_core_news_md` en vez de `sm`.** El chico confundía nombres (`Iara` por `Lara`) y etiquetaba verbos como entidades.
+
+**Costo medido** sobre 21 clusters publicables reales: 68.534 tokens de entrada por corrida completa, o sea **US$0,007 a 0,021**. El tope de `SINTESIS_NOTAS_POR_MEDIO` es lo que lo sostiene: el cluster más grande tenía 63 noticias y se mandan 10 (2 por medio). Se acota **por medio y no en total** a propósito — un recorte global se llevaría puesto al medio que publicó una sola nota, y quedarse sin un medio es quedarse sin comparativa.
+
+### Esquema: `Sintesis` es el ángulo, y las noticias que lo respaldan van en tabla
+Migración `979689aeb928`. `Sintesis` suma `titulo_angulo` (lo que ve el usuario), los campos de entrega, y una tabla intermedia `SintesisNoticia`.
+
+**Por qué tabla y no una lista de ids en JSON.** La relación es genuinamente muchos-a-muchos: un minuto a minuto respalda el hecho y las reacciones a la vez, y cada ángulo se apoya en varias notas. Pero la razón de fondo es que **de ahí sale la regla que decide qué se publica**: un ángulo necesita `MIN_MEDIOS_CLUSTER` medios distintos, y eso es un `count(distinct medio_id)` sobre el join. Con ids sueltos en un JSON habría que traer todo a memoria para contarlo y nada garantizaría que las noticias referenciadas existan.
+
+**El autogenerado de Alembic estaba mal y había que corregirlo.** Agregaba `titulo_angulo`, `enviado_backend` e `intentos_envio` como `NOT NULL` sin `server_default`: contra una base que ya tuviera síntesis, PostgreSQL no puede completar una columna `NOT NULL` sin saber con qué, y la migración falla. Se agregó `server_default` y se lo quita en el mismo `upgrade()`, para que el esquema quede igual al modelo (que define esos valores por defecto en Python). Probado de las dos formas contra una base temporal: desde cero, y con una fila preexistente que quedó correctamente completada. Es exactamente el caso que `mission.md` advierte al pedir revisar siempre el autogenerado.
+
+### Se publica al alcanzar 2 medios, no al cerrar el cluster
+Medido sobre 51 clusters publicables reales:
+
+| | |
+|---|---|
+| Del 1er al 2do medio | mediana **1,33 h** · p90 4,40 h · máx 6,96 h |
+| Clusters que nunca suman un 3er medio | **38 de 51 (75%)** |
+| Re-síntesis si se publica al llegar a 2 medios | **16** en total (0,31 por cluster) |
+| Ventana en que llega el último medio | mediana 1,97 h · máx 6,02 h |
+
+Esperar el cierre significaba publicar a las ~13 h (1,33 h hasta ser publicable + 12 h de ventana), que para un producto de noticias es no llegar. Publicar temprano cuesta 16 llamadas extra sobre 51 clusters — centavos a los precios medidos.
+
+**El disparador de la re-síntesis es el medio, no la noticia**: gatillar por nota nueva daría 97 re-síntesis contra 16 por medio nuevo, y sin ganar nada — una segunda nota de TN sobre un hecho que TN ya cubrió no aporta un enfoque distinto. El cluster de Messi tiene 63 noticias y 5 medios: por nota serían ~60 llamadas, por medio 3.
+
+**Consecuencia sobre el cierre:** `cerrar_clusters_vencidos()` deja de ser la puerta de la publicación. `procesado` cambia de sentido — de *"listo para sintetizar"* a *"cerrado, ya no cambia"*. `descartado` sigue igual: nunca llegó a 2 medios y nunca publicó nada.
+
+### La descomposición en ángulos se congela en la primera síntesis
+Las re-síntesis reciben los ángulos ya existentes en el prompt y solo pueden **actualizar su contenido o agregar uno nuevo**; nunca re-partir lo ya publicado.
+
+El motivo no es de integridad interna: el cluster no cambia y todos los ángulos siguen apuntando a él pase lo que pase. **Es de identidad ante el consumidor.** El backend del producto guarda cada síntesis con likes y comentarios encima; si la v2 renombra y reparte distinto, esos likes quedan colgando de un ítem que ya no existe, y el backend no tiene cómo mapear v1 a v2.
+
+De acá sale además la clave que faltaba: **`Sintesis.id` es el identificador estable del webhook**. El contrato con el backend pasa a ser "mismo id, actualizá; id nuevo, insertá", que cierra el cabo suelto de la idempotencia (antes quedaba "a resolver por el backend", sin darles con qué resolverlo). Por lo mismo, re-sintetizar es un `UPDATE` sobre la fila existente y no un borrar-e-insertar, que además perdería `enviado_backend` y volvería a empujar lo ya entregado.
+
+El costo es que la primera descomposición se decide con material de 2 medios y quedamos atados a ella. Es un precio bajo: en el 75% de los casos no hay segunda pasada, y un ítem que se renombra solo es peor de cara al usuario que un recorte algo imperfecto.
+
+### El intervalo de ingesta se queda en 15 minutos
+Se evaluó agrandarlo a 30-45 min, porque la mayoría de las ingestas trae duplicados y porque dos medios que caen en la misma pasada se resuelven con una síntesis en vez de síntesis + re-síntesis. El efecto existe, pero se satura enseguida:
+
+| Intervalo | Re-síntesis que se ahorran | Latencia extra por publicación |
+|---|---|---|
+| 15 min (actual) | 4 de 16 | — |
+| 30 min | 6 de 16 | +8 min |
+| 45 / 60 min | 6 de 16 | +15 / +22 min |
+| 90 min | 8 de 16 | +38 min |
+
+**El hueco mediano entre dos medios que cubren el mismo hecho es de 90 minutos**: los medios no se copian en minutos sino en horas, así que ningún intervalo razonable colapsa la mayoría de las re-síntesis. Pasar de 15 a 30 min ahorra 2 llamadas (fracciones de centavo) a cambio de 8 minutos de demora en **cada** publicación — lo mismo que acabábamos de rechazar al descartar esperar el cierre.
+
+**Un ratio alto de duplicados no es desperdicio**: deduplicar es un lookup indexado por `guid`, y lo único que escala con la frecuencia es el reagrupamiento, medido en 3,6 s por corrida (unos 6 minutos de CPU por día). Lo que compra pollear seguido es latencia de detección, que sí vale.
+
+Descartado también el riesgo de perder noticias por rotación del feed: La Nación publica 6,5 notas/h y su ventana de ~100 items tarda 15 h en renovarse.
+
+### Qué dispara la síntesis
+Dos condiciones, y hacen falta las dos:
+
+1. **Llegaron noticias desde el último intento**, vía `Cluster.noticias_al_sintetizar` (migraciones `98c48e2dc7b1` y `faa5d6fc466e`). Es la guarda contra el reintento infinito: **no alcanza con mirar si el cluster ya tiene síntesis**, porque si ningún ángulo llegó al mínimo de medios no se crea ninguna fila y el cluster sería indistinguible de uno nunca intentado.
+2. **Las noticias todavía sin ángulo cubren `MIN_MEDIOS_CLUSTER` medios.** Este es el disparador real, y sale del join de `SintesisNoticia`.
+
+La marca **cuenta noticias, no medios**, y eso corrige el diseño anterior. Contar medios evitaba 97 re-síntesis y las dejaba en 16, pero se comía este caso: si TN y La Nación ya están en el cluster y los dos publican después sobre los homenajes de la AFA, eso es un ángulo nuevo con dos medios y perfectamente publicable, pero el conteo de medios sigue en 2 y no dispara nada. Contando noticias se detecta, y la condición 2 evita igualmente disparar cuando el material nuevo viene de un solo medio (con una sola voz no hay ángulo publicable).
+
+El agujero apareció al responder "¿cuándo se fusionaría un cluster?", no escribiendo el servicio — enumerar los escenarios antes de codificar es lo que lo destapó.
+
+### La fragmentación se corrige en la asignación, no en la fusión
+Al enumerar las fallas de Fase 4 apareció que `fusionar_clusters_duplicados()` **crashea** si el cluster absorbido ya tiene síntesis: SQLAlchemy intenta dejar `sintesis.cluster_id` en NULL sobre una columna que no lo admite. Verificado. Y como se publica a la ~1,3 h mientras la fusión corre cada 15 min, iba a dispararse seguido — justo en los eventos de cobertura alta, que son los que fragmentan.
+
+Buscando la causa se encontró que el problema no estaba en la fusión sino un paso antes. `_mejor_match()` devolvía el mejor candidato **global** entre centroides y noticias sueltas, así que una suelta casi idéntica le ganaba a un cluster que ya era match válido:
+
+```
+Cluster A existe (la muerte). Llega una nota de Ciudad:
+   centroide de A          -> 0.87   (por encima del umbral: pertenecía a A)
+   nota suelta de Paparazzi -> 0.96
+Ganaba la suelta => nacía un cluster paralelo describiendo el mismo hecho.
+```
+
+**Ahora un cluster que supera el umbral le gana a cualquier suelta.** Es la lectura literal de lo que el umbral significa. Se había evaluado en Fase 3 y descartado porque en ese momento la granularidad elegida era "solo duplicados"; esa decisión quedó superada cuando el cluster pasó a buscar cobertura y la separación por ángulo pasó a Fase 4, así que el motivo del descarte ya no existía.
+
+**Medido sobre las 368 noticias del día de mayor cobertura:**
+
+| | Mejor candidato global | Gana el cluster |
+|---|---|---|
+| Clusters | 50 | **26** |
+| Publicables | 37 | 16 |
+| Cluster mayor | 9 noticias | 82 |
+| Noticias agrupadas | 144 | 141 |
+| **Pares a fusionar después** | **19** | **0** |
+
+**Sin encadenamiento: las 82 noticias del cluster mayor eran todas del mismo hecho, cero intrusos.** El centroide de un grupo grande y coherente es un atractor estable y ningún tema ajeno le llega a 0.75 — la misma propiedad que en Fase 3 evitó el encadenamiento, ahora jugando a favor.
+
+Los publicables bajan de 37 a 16 pero no se pierde cobertura (144 contra 141 noticias agrupadas): de esos 37, una decena eran fragmentos de la misma muerte. El peso se desplaza a Fase 4, que ahora tiene que separar de verdad ese cluster en ángulos — antes la fragmentación funcionaba como red involuntaria.
+
+### La fusión queda como red de seguridad, y como canario
+No se eliminó, aunque sus disparos medidos sean cero. Queda un hueco angosto: cuando una noticia se empareja con una suelta para crear un cluster, **la suelta entra sin que se revise si ella misma pertenecía a un cluster existente** (solo pasa si viene después en el orden de evaluación; si viniera antes, ya se habría ido sola). Requiere una combinación puntual de orden y geometría y no se observó ninguna vez, pero si muerde produce dos publicaciones duplicadas empujadas al backend, que es difícil de retractar. Una función que no se dispara no cuesta nada; un duplicado publicado sí.
+
+Además sirve de **canario**: si los logs muestran fusiones frecuentes, lo que están diciendo es que la regla de asignación se rompió.
+
+**Las síntesis se mudan al superviviente, no se borran.** Su id es la clave de idempotencia del webhook: borrarlas dejaría al backend con ítems huérfanos con sus likes encima. El superviviente hereda además la marca `noticias_al_sintetizar` más alta del par — como el cluster fusionado tiene más noticias que sus partes, la marca queda por debajo del total y eso dispara la re-síntesis sobre el material ya unificado.
+
+### Modelo elegido: `gemini-3.5-flash-lite`, con el razonamiento apagado
+Optimizado para alto volumen y bajo costo, con **salida estructurada soportada**, que es lo que este servicio necesita. Los límites de tokens (1M de entrada) sobran holgadamente: nuestros prompts miden ~8.000.
+
+**El razonamiento (*thinking*) se acota con `thinking_level`, no con `thinking_budget`.** Los tokens de razonamiento **se facturan como salida**, y la salida es ~80% del costo de esta fase, así que dejarlo en automático podía multiplicar la cuenta sin que se note. La tarea además es de extracción con esquema fijo —leer, verificar pistas y completar campos—, no de razonamiento abierto.
+
+El primer intento fue `thinking_budget = 0` (documentado como "0 = DISABLED" en el SDK) y **el modelo lo rechaza con un 400 `INVALID_ARGUMENT`**, sin decir qué argumento. Se aisló probando la config de a una pieza contra la API real:
+
+| Config | Resultado |
+|---|---|
+| llamada pelada / solo `temperature` | OK |
+| **`thinking_budget=0`** | **400 INVALID_ARGUMENT** |
+| `thinking_budget=-1` | OK |
+| `thinking_level="LOW"` | OK |
+| `response_schema` con `Optional[int]` | OK |
+
+Y midiendo el gasto por nivel: **MINIMAL y LOW consumen 0 tokens de razonamiento**, MEDIUM 349 y HIGH 448. Queda en `LOW`: no cuesta nada en las tareas simples y deja margen para escalar cuando el caso lo pide.
+
+Lección de método: el 400 era genérico y el SDK documenta el `0` como válido. Aislar la config pieza por pieza contra la API costó tres llamadas de fracciones de centavo y evitó adivinar.
+
+**Dos palancas de costo que quedan disponibles y hoy no hacen falta**: la Batch API (para trabajo no urgente, y esto no lo es) y el caché de contexto. El caché no rinde acá porque la parte repetida del prompt es la instrucción, ~1.000 de 8.000 tokens, y la entrada ya es la parte barata.
+
+### `synthesis.py`: qué hace y qué decide
+- **Salida estructurada.** El esquema de la respuesta se le pasa a Gemini como `response_schema`, así que el JSON es válido por construcción y casi toda la familia de fallos de formato desaparece de raíz, en vez de pedirlo en prosa y parsear a la esperanza.
+- **El filtro de cobertura va sobre el ángulo.** Un ángulo nuevo se publica solo si sus noticias cubren `MIN_MEDIOS_CLUSTER` medios distintos. A los ángulos que ya existen no se les aplica ni se les quitan noticias: ya se publicaron, y del otro lado tienen lectores encima. Si el modelo devuelve un ángulo existente con menos notas, se **suman** las nuevas en vez de reemplazar.
+- **Un `id_existente` que no corresponde al cluster es alucinación** y se trata como ángulo nuevo.
+- **Los índices de notas inventados se descartan**; si un ángulo queda sin notas válidas, no se publica.
+- **La marca se escribe aunque no se publique nada**, que es lo que corta el bucle. Y solo se escribe si la síntesis llegó a persistirse: un cluster que falló se reintenta solo en la corrida siguiente.
+- **El bloqueo por filtros de contenido se cuenta aparte** (`SintesisBloqueada`) y no se reintenta: la misma entrada da el mismo bloqueo. Si empieza a pasar seguido, lo que dice es que el producto no puede cubrir policiales — una decisión de producto, no un bug. Los datos reales ya tienen material que puede activarlo.
+- **Un cluster que falla no arrastra a los demás.**
+
+**Validado contra Gemini real** (cluster de la muerte de Jorge Messi, 8 notas de 3 medios, de las que se enviaron 6 por el tope por medio):
+
+- **6.747 tokens de entrada, 879 de salida, 0 de razonamiento.** Confirma la estimación previa y que `thinking_level=LOW` no agrega costo.
+- Separó la cobertura en **dos ángulos correctos**: el fallecimiento y la llegada de Lionel (3 medios) y los homenajes del mundo del fútbol (2 medios). Ambos superaron el mínimo de cobertura.
+- La comparativa salió fundamentada y con citas textuales: *"TN destacó la ubicación del cementerio El Prado / omitió la trayectoria laboral previa de Jorge Messi"*, *"Paparazzi destacó el operativo de seguridad y el arribo desde Miami"*.
+
+**Un problema que solo apareció con el modelo real: los nombres de medio no vuelven como están en la base.** Devolvió `"La Nacion"` sin tilde, y la comparativa quedaba con una clave que no matchea `"La Nación"`. Se agregó `_comparativa_validada()`, que compara sin acentos ni mayúsculas contra los medios que **de verdad participan del cluster** y guarda el nombre canónico. De paso implementa el descarte de medios ajenos, que estaba documentado como decisión pero no en el código.
+
+### El pipeline avisa cuando falla, y solo la fusión corta la cadena
+`services/alerts.py` centraliza los avisos por mail; la alerta de ingesta pasó a usarlo. Se extrajo recién ahora, cuando aparecieron dos usuarios reales.
+
+En el job del scheduler, cada paso corre aislado: **uno que falla no frena a los siguientes**, porque todos son idempotentes y la corrida siguiente retoma sola. Tres cosas que importan:
+
+- **El `rollback()` no es opcional.** Después de una excepción de base la sesión queda inutilizable, y sin él los pasos siguientes fallarían en cascada por un motivo distinto al original — lo peor posible para diagnosticar.
+- **La fusión sí corta la cadena.** Es el único paso que, si falla, omite la síntesis: sintetizar sin haber consolidado publicaría dos veces el mismo hecho, y una publicación entregada al backend no se retracta.
+- **Los avisos tienen cooldown** (`ALERT_COOLDOWN_MINUTOS`, 60 por defecto). Un fallo permanente serían 96 mails por día al intervalo de 15 minutos, y a partir del tercero nadie los lee.
+
+La recuperación ya existía por idempotencia; lo que faltaba era enterarse.
+
+### Lo que no tiene hecho no es problema de este motor
+Con el flujo real andando apareció una publicación de **horóscopo** (La Nación + Revista Gente, el mismo día). Eso desmiente el argumento con el que se había descartado la exclusión por género: *"el periodismo de servicio no se replica entre medios, se autofiltra"*. Falso — el horóscopo lo publican todos los medios todos los días, así que pasa el mínimo de cobertura sin esfuerzo. El razonamiento venía de una corrida donde las recetas y los cronogramas habían caído en clusters de un solo medio por casualidad.
+
+Lo que **sí** se confirmó es que el segmento de URL no sirve para esto: una de las cuatro notas del cluster estaba bajo `/tecnologia/` ("los tres signos con menos suerte"). Por eso `services/categorias.py` busca en la **URL completa**, no en la sección.
+
+**El límite de responsabilidad, decidido explícitamente:** este motor compara enfoques editoriales de un mismo hecho y entrega síntesis. Si no hay hecho, no hay nada que comparar y no es su trabajo. Se evaluó producir acá un digest por categoría y día ("el horóscopo de hoy") y **se descartó**: mezcla dos productos distintos en el mismo motor, necesita un segundo prompt sin comparativa, y arrastra una migración. Qué se hace con esas notas —tag suscribible, enlace, o nada— lo resuelve el back-end.
+
+El motor entonces **clasifica y deja afuera del agrupamiento, nada más**. Las notas quedan guardadas, con su categoría derivable de la URL y disponibles en `GET /search`. No se filtran en la ingesta a propósito: así la decisión es reversible cambiando un patrón y reagrupando, sin haber perdido datos.
+
+**Sobre los patrones:** son angostos. Se probó `signos` a secas, que sobre 1.200 noticias reales no dio un solo falso positivo, y se sacó igual — "signos de recuperación" es español corriente y el riesgo a futuro no compensaba. Las notas sueltas que se escapen no llegan a formar cluster de todos modos: les falta el segundo medio.
+
+### Umbral de fusión bajado a 0.85
+Con datos reales, dos clusters de la muerte de Jorge Messi quedaron a **0.8806** —debajo del 0.90— y publicaron ángulos solapados (*"Fallecimiento y llegada de Lionel"* contra *"Fallecimiento y antecedentes de salud"*).
+
+El mecanismo: el primer cluster acumuló 12 notas de repercusiones (mensajes de Palermo, Paredes, Sofi Martínez), su **centroide se corrió hacia "reacciones"**, y cuando llegaron las fotos del velatorio ya no alcanzaban 0.75 contra ese centroide desplazado. Nacieron como cluster aparte y la fusión a 0.90 no los tocó. A 0.85 se unen, y ya estaba medido que a ese nivel la fusión consolida sin mezclar hechos ajenos.
+
+### Resultado de la corrida comparativa
+
+| | 0.90, sin categorías | 0.85, con categorías |
+|---|---|---|
+| Clusters | 21 | 19 |
+| **Publicaciones** | **12** | **7** |
+| Horóscopo publicado | sí | no (8 notas enrutadas) |
+| Muerte de Jorge Messi | 2 clusters, ángulos solapados | 1 cluster, 1 publicación |
+| Comparativas incompletas | sí | no |
+
+También se ajustó el prompt para que la comparativa **cubra todos los medios que aportaron notas al ángulo**: antes se salteaba alguno (un ángulo con 2 medios describía uno solo).
+
+### El tope por medio recortaba producto, no solo costo
+`SINTESIS_NOTAS_POR_MEDIO = 2` se había puesto para acotar el gasto de los clusters de cobertura alta. En la corrida comparativa apareció que un cluster de **14 notas producía una sola publicación**, cuando una versión con menos material agrupado había sacado dos. Se probó el mismo cluster con distintos topes:
+
+| Notas enviadas | Tokens | Ángulos publicables |
+|---:|---:|---:|
+| 6 (tope 2) | 7.785 | **1** |
+| 9 (tope 3) | 10.737 | **1** |
+| 14 (todas) | 15.484 | **3** |
+
+Subir a 3 no movió nada: con 9 de 14 notas el modelo sigue viendo una sola historia. Y el ahorro que justificaba el recorte era **13 centavos al mes** — el tope costaba dos publicaciones para ahorrar eso.
+
+**Rediseñado como piso + techo.** `SINTESIS_NOTAS_POR_MEDIO` pasa a ser un piso garantizado por medio (que ninguno quede afuera sigue siendo intocable) y `SINTESIS_MAX_NOTAS = 30` es el techo global. El cupo sobrante se reparte **por rondas entre medios** y no por cercanía global al centroide: con 46 notas y 5 medios, quedarse con las mejores en bruto sesgaba el material hacia el medio más prolífico.
+
+30 cubre entero el caso de 14 notas y casi entero el peor real medido (46), y deja el gasto acotado por arriba en vez de crecer con la cobertura.
+
+**Resultado sobre los mismos 6 clusters: 7 publicaciones → 9.**
+
+Aclaración sobre el límite del modelo: el `1.048.576` de la ficha es el **tamaño de un request**, no una cuota diaria ni semanal. Nuestros prompts usan entre 1% y 3% de eso. Las cuotas reales son RPM, TPM y RPD, dependen del tier y hay que mirarlas en la consola. El punto donde nos pueden apretar no es el volumen sino la **ráfaga**: se sintetizan todos los clusters pendientes seguidos, medido en ~18 requests por minuto, y ahí sí puede aparecer un 429 — que `tenacity` absorbe con espera creciente.
 
 ### Entrega de síntesis al backend web/mobile
 El motor no expone la síntesis vía polling: la empuja por webhook al back-end del producto (web/mobile), que la persiste en su propia BD junto a atributos propios (likes, comentarios, etc.).

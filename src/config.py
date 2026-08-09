@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Dict, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     ALERT_EMAIL_TO: Optional[str] = None
+
+    # Tiempo mínimo entre dos avisos del mismo problema. Un fallo permanente
+    # dispararía 96 mails por día al intervalo de 15 minutos del scheduler, y a
+    # partir del tercero ya nadie los lee.
+    ALERT_COOLDOWN_MINUTOS: int = 60
 
     # --- Vectorización y clustering (Fase 3) ---
     # Todos estos valores se calibraron contra 620 noticias reales; el
@@ -52,6 +57,93 @@ class Settings(BaseSettings):
     # Medios distintos que necesita un cluster para generar síntesis. Con menos,
     # se cierra como "descartado": sin dos voces no hay enfoques que comparar.
     MIN_MEDIOS_CLUSTER: int = 2
+
+    # Similitud entre centroides a partir de la cual dos clusters abiertos se
+    # consideran el mismo hecho y se fusionan. El clustering busca cobertura y
+    # deja la separación por ángulo para Fase 4, así que fusionar de más no es
+    # el riesgo: el riesgo es mezclar hechos ajenos, y a 0.85 no se observó.
+    #
+    # Bajado de 0.90 tras verlo fallar con datos reales: dos clusters de la
+    # muerte de Jorge Messi quedaron a 0.8806 y publicaron ángulos solapados.
+    # Pasa cuando un cluster acumula un tipo de cobertura (repercusiones) y su
+    # centroide se corre, de modo que el material nuevo del mismo hecho (las
+    # fotos del velatorio) ya no lo alcanza y arma un cluster aparte.
+    # Subirlo a 1.01 desactiva la fusión, porque el coseno nunca supera 1.
+    UMBRAL_FUSION_CLUSTERS: float = 0.85
+
+    # Notas que no reportan un hecho: no entran al agrupamiento, pero **no se
+    # descartan** — quedan con su categoría, que es lo que habilita tratarlas
+    # como producto propio (un tag suscribible, por ejemplo el horóscopo).
+    #
+    # Se buscan en la URL completa y no en el segmento de sección; ver
+    # `services/categorias.py`. Los patrones son angostos a propósito: se probó
+    # `signos` a secas —que sobre 1.200 noticias reales no dio un solo falso
+    # positivo— y se sacó igual, porque "signos de recuperación" es español
+    # corriente y el riesgo no compensa. Las notas sueltas que se escapen no
+    # llegan a formar cluster: les falta el segundo medio.
+    CATEGORIAS_NO_EVENTO: Dict[str, str] = {
+        "horoscopo": r"horoscopo|zodiaco|zodiacal|astrolog",
+        "recetas": r"receta",
+        "juegos": r"loteria|quiniela",
+    }
+
+    # --- Preproceso de evidencia para la síntesis (Fase 4) ---
+    # Ver specs/change_logs.md, Fase 4 -- "El cálculo señala, el modelo juzga".
+
+    # Modelo de spaCy para NER. El chico (`sm`) confundía nombres propios
+    # ("Iara" por "Lara") y etiquetaba verbos como entidades; el mediano acierta
+    # bastante más y sigue siendo liviano. Se instala aparte:
+    #     python -m spacy download es_core_news_md
+    SPACY_MODEL: str = "es_core_news_md"
+
+    # Caracteres del cuerpo que se analizan con NER. Las entidades de un hecho
+    # aparecen en los primeros párrafos; el resto suele ser contexto y cierre.
+    NER_CHARS_CUERPO: int = 4000
+
+    # Términos distintivos que se extraen por medio y para el núcleo común.
+    TFIDF_TERMINOS_POR_MEDIO: int = 8
+
+    # Cuánto tiene que crecer el corpus para reajustar el TF-IDF (0.2 = 20%).
+    # Reajustar es lo caro del preproceso y los pesos no cambian con cada nota.
+    TFIDF_REFIT_RATIO: float = 0.2
+
+    # **Piso** de notas por medio: cada medio entra con al menos sus N notas más
+    # representativas. Que ningún medio quede afuera es lo único que no se puede
+    # resignar — sin su voz no hay comparativa. Si el piso choca con el techo de
+    # abajo, gana el piso.
+    SINTESIS_NOTAS_POR_MEDIO: int = 2
+
+    # **Techo** global de notas por cluster. Antes el límite era el piso mismo, y
+    # eso recortaba justo donde había más para contar: medido sobre un cluster de
+    # 14 notas, mandando 6 el modelo encontró 1 ángulo, mandando 9 encontró 1, y
+    # mandando las 14 encontró **3 ángulos publicables**. El tope por medio no
+    # ahorraba casi nada (13 centavos al mes) y costaba dos publicaciones.
+    #
+    # 30 cubre entero ese caso y casi entero el peor real medido (46 notas de
+    # una sola muerte), y deja el gasto acotado por arriba: ~34k tokens de
+    # entrada en el peor caso, contra el millón que admite un request.
+    SINTESIS_MAX_NOTAS: int = 30
+
+    # --- Síntesis con Gemini (Fase 4) ---
+    # Medido: 68.534 tokens de entrada para 21 clusters publicables, o sea del
+    # orden de US$0,01 por corrida completa. Verificá los precios vigentes.
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+
+    # Baja a propósito: la tarea es resumir sin inventar, no escribir bonito.
+    GEMINI_TEMPERATURA: float = 0.2
+
+    # Cuánto razonamiento previo hace el modelo: MINIMAL, LOW, MEDIUM o HIGH.
+    # Importa porque **los tokens de razonamiento se facturan como salida**, y
+    # la salida es ~80% del costo de esta fase.
+    #
+    # Medido contra gemini-3.5-flash-lite con un prompt corto: MINIMAL y LOW
+    # gastan 0 tokens de razonamiento, MEDIUM 349 y HIGH 448. Se usa LOW porque
+    # no cuesta nada en las tareas simples y deja margen para escalar solo
+    # cuando el caso lo pide.
+    #
+    # NO usar `thinking_budget`: este modelo rechaza el 0 con un 400 genérico
+    # (verificado). `thinking_level` es la palanca que sí acepta.
+    GEMINI_THINKING_LEVEL: str = "LOW"
 
 
 # Instancia única de configuración, importada en el resto de la aplicación.

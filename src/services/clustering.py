@@ -18,7 +18,8 @@ import numpy as np
 from sqlmodel import Session, select
 
 from ..config import settings
-from ..models import Cluster, Noticia
+from ..models import Cluster, Noticia, Sintesis
+from .categorias import categoria_no_evento
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,12 @@ class _ClusterEnMemoria:
         self.medios.add(medio_id)
         self.centroide = np.array(calcular_centroide(self.embeddings), dtype=float)
 
+    def absorber(self, otro: "_ClusterEnMemoria") -> None:
+        """Incorpora los miembros de otro cluster tras una fusión."""
+        self.embeddings.extend(otro.embeddings)
+        self.medios |= otro.medios
+        self.centroide = np.array(calcular_centroide(self.embeddings), dtype=float)
+
 
 def _cargar_clusters_abiertos(session: Session, desde: datetime) -> Dict[int, _ClusterEnMemoria]:
     """Carga los clusters abiertos vigentes junto a los embeddings de sus miembros."""
@@ -99,26 +106,45 @@ def _mejor_match(
     """
     Devuelve (similitud, cluster_id, noticia_suelta) del mejor candidato.
 
+    **Un cluster que supera el umbral le gana a cualquier noticia suelta, aunque
+    la suelta se parezca más.** Es la lectura literal de lo que significa el
+    umbral: si la nota se parece a un cluster por encima de él, pertenece a ese
+    cluster. Quedarse con el mejor candidato global hacía que una suelta casi
+    idéntica (0.96) le ganara a un cluster que ya era match válido (0.87) y
+    naciera un cluster paralelo describiendo el mismo hecho.
+
+    Eso era el origen de la fragmentación, no la fusión: medido sobre las 368
+    noticias del día de mayor cobertura, el criterio anterior dejaba 50 clusters
+    con 19 pares que después había que fusionar; prefiriendo el cluster quedan
+    26 y **ninguno** que fusionar. Sin encadenamiento: el cluster más grande
+    juntó 82 noticias y las 82 eran del mismo hecho. El centroide de un grupo
+    grande y coherente es un atractor estable, y ningún tema ajeno le llega.
+
     Los embeddings están normalizados, así que el producto punto ES la
     similitud coseno.
     """
-    mejor_sim = -1.0
+    sim_cluster = -1.0
     mejor_cluster: Optional[int] = None
-    mejor_suelta: Optional[Noticia] = None
-
     for cluster_id, cluster in clusters.items():
         sim = float(np.dot(embedding, cluster.centroide))
-        if sim > mejor_sim:
-            mejor_sim, mejor_cluster, mejor_suelta = sim, cluster_id, None
+        if sim > sim_cluster:
+            sim_cluster, mejor_cluster = sim, cluster_id
 
+    if sim_cluster >= settings.UMBRAL_SIMILITUD:
+        return sim_cluster, mejor_cluster, None
+
+    sim_suelta = -1.0
+    mejor_suelta: Optional[Noticia] = None
     for otra in sueltas:
         if otra.id == noticia_actual_id or otra.cluster_id is not None:
             continue
         sim = float(np.dot(embedding, np.array(otra.embedding, dtype=float)))
-        if sim > mejor_sim:
-            mejor_sim, mejor_cluster, mejor_suelta = sim, None, otra
+        if sim > sim_suelta:
+            sim_suelta, mejor_suelta = sim, otra
 
-    return mejor_sim, mejor_cluster, mejor_suelta
+    if sim_suelta > sim_cluster:
+        return sim_suelta, None, mejor_suelta
+    return sim_cluster, mejor_cluster, None
 
 
 def agrupar_pendientes(session: Session) -> dict:
@@ -134,7 +160,7 @@ def agrupar_pendientes(session: Session) -> dict:
     desde = ahora - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
 
     clusters = _cargar_clusters_abiertos(session, desde)
-    sueltas = session.exec(
+    candidatas = session.exec(
         select(Noticia)
         .where(
             Noticia.cluster_id.is_(None),
@@ -144,8 +170,14 @@ def agrupar_pendientes(session: Session) -> dict:
         .order_by(Noticia.fecha_publicacion)
     ).all()
 
+    # Las notas que no reportan un hecho quedan afuera: no hay enfoques que
+    # comparar. No se pierden —siguen guardadas y con su categoría— pero qué
+    # hacer con ellas es del back-end. Ver `services/categorias.py`.
+    sueltas = [n for n in candidatas if categoria_no_evento(n.url) is None]
+
     stats = {
         "evaluadas": len(sueltas),
+        "de_otra_categoria": len(candidatas) - len(sueltas),
         "sumadas_a_cluster": 0,
         "clusters_creados": 0,
         "sin_match": 0,
@@ -191,6 +223,137 @@ def agrupar_pendientes(session: Session) -> dict:
 
     session.commit()
     logger.info(f"Agrupamiento completado: {stats}")
+    return stats
+
+
+def _grupos_a_fusionar(clusters: Dict[int, _ClusterEnMemoria]) -> List[List[int]]:
+    """
+    Agrupa los ids de cluster que describen el mismo evento, por centroide.
+
+    Todos los pares se evalúan contra la MISMA foto de centroides, sin
+    recalcular después de cada unión. Recalcular reintroduce el encadenamiento
+    que el centroide vino a evitar: el promedio de dos vectores distintos tiene
+    norma < 1, así que al renormalizarlo la similitud contra todo lo demás se
+    amplifica y cada fusión habilita la siguiente. Medido sobre datos reales,
+    la versión que recalculaba terminó juntando 46 noticias en un solo cluster.
+    """
+    ids = sorted(clusters)
+    padre = {id_cluster: id_cluster for id_cluster in ids}
+
+    def raiz(id_cluster: int) -> int:
+        while padre[id_cluster] != id_cluster:
+            padre[id_cluster] = padre[padre[id_cluster]]
+            id_cluster = padre[id_cluster]
+        return id_cluster
+
+    for posicion, id_a in enumerate(ids):
+        for id_b in ids[posicion + 1 :]:
+            sim = float(np.dot(clusters[id_a].centroide, clusters[id_b].centroide))
+            if sim >= settings.UMBRAL_FUSION_CLUSTERS:
+                padre[raiz(id_a)] = raiz(id_b)
+
+    grupos: Dict[int, List[int]] = {}
+    for id_cluster in ids:
+        grupos.setdefault(raiz(id_cluster), []).append(id_cluster)
+
+    return [sorted(grupo) for grupo in grupos.values() if len(grupo) > 1]
+
+
+def fusionar_clusters_duplicados(session: Session) -> dict:
+    """
+    Une los clusters abiertos que quedaron cubriendo el mismo hecho.
+
+    Aparecen porque la asignación es codiciosa: `_mejor_match` se queda con el
+    mejor candidato global entre centroides y noticias sueltas, así que una
+    suelta casi idéntica le gana a un cluster que ya era match válido y nace un
+    cluster paralelo. Nada volvía a unirlos. Medido sobre datos reales: una sola
+    muerte de alta cobertura dejó 20 clusters, con pares de centroides a 0.94
+    entre sí, y partió un hecho de 4 medios en uno publicable y otro descartado.
+
+    El cluster busca **cobertura, no precisión editorial**: junta todo lo que
+    habla del hecho y deja que Fase 4 lo separe en ángulos leyendo los textos.
+    Un cluster amplio y limpio es mejor materia prima que varios fragmentos,
+    porque le da al modelo las coberturas de todos los medios juntas. Por eso
+    fusionar de más no es un riesgo acá; ver specs/change_logs.md, Fase 3.
+
+    Sobrevive el cluster más viejo para que una fusión no estire el plazo de
+    cierre. Solo se tocan clusters abiertos: los cerrados ya pueden haber sido
+    publicados.
+
+    **Hoy es una red de seguridad, no el mecanismo principal.** La fragmentación
+    se ataca en el origen, en `_mejor_match`, prefiriendo el cluster existente.
+    Con eso, sobre el día de mayor cobertura las fusiones necesarias pasaron de
+    19 a 0. Queda un hueco angosto que esto cubre: cuando una noticia se empareja
+    con una suelta para crear un cluster, la suelta entra sin que se revise si
+    ella misma pertenecía a un cluster ya existente. Requiere una combinación
+    puntual de orden y geometría, y no se observó ninguna vez.
+
+    Que empiece a fusionar seguido es señal de que la regla de asignación se
+    rompió: sirve de canario.
+    """
+    ahora = datetime.utcnow()
+    desde = ahora - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
+
+    en_memoria = _cargar_clusters_abiertos(session, desde)
+    stats = {"evaluados": len(en_memoria), "fusionados": 0}
+
+    # Se itera hasta el punto fijo. Cada fusión corre el centroide del
+    # superviviente y puede acercarlo a un tercer cluster que antes no llegaba
+    # al umbral, así que una sola vuelta deja el agrupamiento a mitad de camino.
+    # Resolverlo acá hace que la función sea idempotente y que el pipeline
+    # termine siempre en el mismo estado; si no, la consolidación se estiraría
+    # a lo largo de varias corridas del scheduler y el resultado dependería de
+    # cuántas alcanzaron a ejecutarse antes del cierre.
+    grupos = _grupos_a_fusionar(en_memoria)
+    while grupos:
+        for grupo in grupos:
+            miembros = sorted(
+                (session.get(Cluster, id_cluster) for id_cluster in grupo),
+                key=lambda c: (c.fecha_creacion, c.id),
+            )
+            superviviente, absorbidos = miembros[0], miembros[1:]
+
+            for absorbido in absorbidos:
+                for noticia in session.exec(
+                    select(Noticia).where(Noticia.cluster_id == absorbido.id)
+                ).all():
+                    noticia.cluster_id = superviviente.id
+                    session.add(noticia)
+
+                # Las síntesis se mudan con su id intacto. Ese id es la clave de
+                # idempotencia del webhook: borrarlas dejaría al backend con
+                # ítems huérfanos, con sus likes y comentarios encima. Y sin
+                # reasignarlas el borrado falla, porque SQLAlchemy intenta poner
+                # `cluster_id` en NULL sobre una columna que no lo admite.
+                for sintesis in session.exec(
+                    select(Sintesis).where(Sintesis.cluster_id == absorbido.id)
+                ).all():
+                    sintesis.cluster_id = superviviente.id
+                    session.add(sintesis)
+
+                # El superviviente hereda la marca de síntesis más alta del par.
+                # Como el cluster fusionado tiene más noticias que cualquiera de
+                # sus partes, la marca queda por debajo del total, y eso es lo
+                # que dispara la re-síntesis sobre el material ya unificado.
+                marcas = [
+                    c.noticias_al_sintetizar
+                    for c in (superviviente, absorbido)
+                    if c.noticias_al_sintetizar is not None
+                ]
+                if marcas:
+                    superviviente.noticias_al_sintetizar = max(marcas)
+                    session.add(superviviente)
+
+                session.flush()
+                session.delete(absorbido)
+                en_memoria[superviviente.id].absorber(en_memoria.pop(absorbido.id))
+                stats["fusionados"] += 1
+
+            session.commit()
+
+        grupos = _grupos_a_fusionar(en_memoria)
+
+    logger.info(f"Fusión de clusters completada: {stats}")
     return stats
 
 

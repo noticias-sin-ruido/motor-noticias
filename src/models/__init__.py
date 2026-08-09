@@ -8,6 +8,6 @@ Este módulo importa todos los modelos para que:
 from .medio import Medio
 from .noticia import Noticia
 from .cluster import Cluster
-from .sintesis import Sintesis
+from .sintesis import Sintesis, SintesisNoticia
 
-__all__ = ["Medio", "Noticia", "Cluster", "Sintesis"]
+__all__ = ["Medio", "Noticia", "Cluster", "Sintesis", "SintesisNoticia"]

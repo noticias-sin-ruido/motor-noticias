@@ -5,9 +5,7 @@ las noticias nuevas. Ver CLAUDE.md, sección Fase 2, para las decisiones de
 diseño detrás de cada paso.
 """
 import logging
-import smtplib
 from datetime import datetime
-from email.message import EmailMessage
 from typing import Optional
 
 import feedparser
@@ -18,6 +16,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from ..config import settings
 from ..models import Medio, Noticia
+from . import alerts
 
 logger = logging.getLogger(__name__)
 
@@ -98,30 +97,15 @@ def _parsear_entry(entry: feedparser.FeedParserDict) -> Optional[dict]:
 
 def enviar_alerta(medio: Medio, error: Exception) -> None:
     """Envía un mail de alerta cuando se agotan los reintentos de un medio."""
-    if not settings.SMTP_HOST or not settings.ALERT_EMAIL_TO:
-        logger.error(
-            f"No se pudo enviar alerta por mail (SMTP no configurado) -- "
-            f"fallo en ingesta de {medio.nombre}: {error}"
-        )
-        return
-
-    mensaje = EmailMessage()
-    mensaje["Subject"] = f"[Sin Ruido] Fallo de ingesta: {medio.nombre}"
-    mensaje["From"] = settings.SMTP_USER or settings.ALERT_EMAIL_TO
-    mensaje["To"] = settings.ALERT_EMAIL_TO
-    mensaje.set_content(
-        f"No se pudo ingerir el feed de {medio.nombre} ({medio.feed_rss}) "
-        f"tras agotar los reintentos.\n\nError: {error}"
+    alerts.enviar_alerta(
+        asunto=f"[Sin Ruido] Fallo de ingesta: {medio.nombre}",
+        cuerpo=(
+            f"No se pudo ingerir el feed de {medio.nombre} ({medio.feed_rss}) "
+            f"tras agotar los reintentos.\n\nError: {error}"
+        ),
+        # Por medio: que falle La Nación no debe silenciar el aviso de TN.
+        clave=f"ingesta:{medio.nombre}",
     )
-
-    try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as smtp:
-            smtp.starttls()
-            if settings.SMTP_USER and settings.SMTP_PASSWORD:
-                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            smtp.send_message(mensaje)
-    except Exception as smtp_error:
-        logger.error(f"No se pudo enviar el mail de alerta para {medio.nombre}: {smtp_error}")
 
 
 def ingerir_medio(session: Session, medio: Medio) -> dict:

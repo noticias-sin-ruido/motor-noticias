@@ -5,9 +5,15 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, Text
 from sqlmodel import Field, Relationship, SQLModel
 
+# Import en tiempo de ejecución (no bajo TYPE_CHECKING) porque `link_model` lo
+# necesita resuelto. No genera ciclo: `sintesis.py` importa `Noticia` solo para
+# anotaciones de tipo.
+from .sintesis import SintesisNoticia
+
 if TYPE_CHECKING:
     from .medio import Medio
     from .cluster import Cluster
+    from .sintesis import Sintesis
 
 # Dimensión del vector de embedding.
 # Modelo elegido: "paraphrase-multilingual-MiniLM-L12-v2" (384 dims) —
@@ -42,3 +48,8 @@ class Noticia(SQLModel, table=True):
 
     medio: "Medio" = Relationship(back_populates="noticias")
     cluster: Optional["Cluster"] = Relationship(back_populates="noticias")
+    # Ángulos que esta nota respalda. Es una lista porque una misma noticia
+    # puede sostener varios (un minuto a minuto cubre el hecho y sus reacciones).
+    sintesis: List["Sintesis"] = Relationship(
+        back_populates="noticias", link_model=SintesisNoticia
+    )

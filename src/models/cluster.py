@@ -23,5 +23,21 @@ class Cluster(SQLModel, table=True):
     #                 sin dos voces no hay enfoques editoriales que comparar
     estado: str = Field(default="abierto", index=True)
 
+    # Noticias que tenía el cluster la última vez que se intentó sintetizarlo.
+    # Es la guarda contra el reintento infinito: si ningún ángulo alcanzó el
+    # mínimo de medios no se crea ninguna fila de `Sintesis`, y sin esta marca
+    # el cluster sería indistinguible de uno nunca intentado.
+    #
+    # Se cuentan noticias y no medios porque el conteo de medios no distingue
+    # "no pasó nada nuevo" de "llegó material nuevo de los mismos medios", y ese
+    # segundo caso sí puede dar un ángulo publicable: si TN y La Nación ya están
+    # en el cluster y los dos publican después sobre los homenajes de la AFA,
+    # eso es un ángulo nuevo con dos medios aunque no haya entrado ninguno.
+    #
+    # No alcanza por sí sola para decidir: quién dispara la síntesis es la
+    # cobertura de las noticias todavía no asociadas a ningún ángulo. Ver
+    # `services/synthesis.py`.
+    noticias_al_sintetizar: Optional[int] = Field(default=None)
+
     noticias: List["Noticia"] = Relationship(back_populates="cluster")
     sintesis: List["Sintesis"] = Relationship(back_populates="cluster")

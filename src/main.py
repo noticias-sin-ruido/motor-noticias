@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query
@@ -8,9 +8,15 @@ from sqlmodel import Session
 
 from .config import settings
 from .database import get_engine, get_session, init_db
-from .services.clustering import agrupar_pendientes, cerrar_clusters_vencidos
+from .services.alerts import enviar_alerta
+from .services.clustering import (
+    agrupar_pendientes,
+    cerrar_clusters_vencidos,
+    fusionar_clusters_duplicados,
+)
 from .services.ingestion import ingerir_todos_los_medios
 from .services.search import buscar_noticias_similares, listar_clusters
+from .services.synthesis import sintetizar_pendientes
 from .services.vectorization import vectorizar_pendientes
 
 logger = logging.getLogger(__name__)
@@ -22,29 +28,64 @@ INGEST_INTERVAL_MINUTES = 15
 scheduler = AsyncIOScheduler()
 
 
+def _correr_paso(session: Session, nombre: str, funcion: Callable) -> Optional[dict]:
+    """
+    Corre un paso del pipeline. Si falla, avisa y devuelve None sin cortar.
+
+    El `rollback()` no es opcional: después de una excepción de base la sesión
+    queda inutilizable, y sin él los pasos siguientes fallarían en cascada por
+    un motivo distinto al original — que es lo peor posible para diagnosticar.
+    """
+    try:
+        resultado = funcion(session)
+        logger.info(f"{nombre}: {resultado}")
+        return resultado
+    except Exception as error:
+        session.rollback()
+        logger.exception(f"Falló el paso '{nombre}' del pipeline")
+        enviar_alerta(
+            asunto=f"[Sin Ruido] Falló el paso '{nombre}' del pipeline",
+            cuerpo=f"{type(error).__name__}: {error}",
+            clave=f"pipeline:{nombre}",
+        )
+        return None
+
+
 def _job_ingesta_programada() -> None:
     """
-    Job del scheduler: ingiere los feeds y vectoriza lo que haya entrado.
+    Job del scheduler: el pipeline completo, de los feeds a las síntesis.
 
-    La vectorización va encadenada a la ingesta y no en un job propio porque
-    depende de ella: sin noticias nuevas no hay nada que vectorizar. Es
-    idempotente, así que si una corrida falla a mitad de camino, la siguiente
-    retoma las noticias que quedaron sin embedding.
+    Los pasos van encadenados y no en jobs propios porque cada uno depende del
+    anterior: sin noticias nuevas no hay nada que vectorizar, sin embeddings no
+    hay nada que agrupar.
+
+    **Un paso que falla no frena a los siguientes**, salvo la fusión. Todos son
+    idempotentes —la ingesta deduplica por `guid`, la vectorización busca
+    `embedding IS NULL`, el agrupamiento reevalúa las sueltas, la fusión itera
+    hasta el punto fijo— así que la corrida siguiente retoma sola donde quedó.
+    Esa idempotencia es la contingencia real; las alertas son para enterarse.
     """
     with Session(get_engine()) as session:
-        resultados = ingerir_todos_los_medios(session)
-        logger.info(f"Ingesta programada completada: {resultados}")
-
-        stats = vectorizar_pendientes(session)
-        logger.info(f"Vectorización completada: {stats}")
+        _correr_paso(session, "ingesta", ingerir_todos_los_medios)
+        _correr_paso(session, "vectorización", vectorizar_pendientes)
 
         # El cierre va ANTES del agrupamiento para que los clusters vencidos no
         # sigan capturando noticias nuevas en esta misma corrida.
-        cierre = cerrar_clusters_vencidos(session)
-        logger.info(f"Cierre de clusters completado: {cierre}")
+        _correr_paso(session, "cierre de clusters", cerrar_clusters_vencidos)
+        _correr_paso(session, "agrupamiento", agrupar_pendientes)
 
-        agrupamiento = agrupar_pendientes(session)
-        logger.info(f"Agrupamiento completado: {agrupamiento}")
+        # La fusión va antes de la síntesis: primero se arma todo y recién ahí
+        # se consolidan los clusters que quedaron describiendo el mismo hecho.
+        fusion = _correr_paso(session, "fusión de clusters", fusionar_clusters_duplicados)
+
+        # Es el único paso que corta la cadena. Sintetizar sin haber consolidado
+        # publicaría dos veces el mismo hecho, y una publicación ya entregada al
+        # backend no se retracta.
+        if fusion is None:
+            logger.error("Se omite la síntesis porque falló la fusión de clusters")
+            return
+
+        _correr_paso(session, "síntesis", sintetizar_pendientes)
 
 
 @asynccontextmanager
@@ -100,17 +141,38 @@ def vectorize(limite: Optional[int] = None, session: Session = Depends(get_sessi
     return {"status": "ok", **stats}
 
 
+@app.post("/synthesize")
+def synthesize(session: Session = Depends(get_session)):
+    """
+    Genera a demanda las síntesis de los clusters con material nuevo.
+
+    Mismo criterio que `/ingest` y `/cluster`: disparo manual y fallback si el
+    scheduler no corrió. Es idempotente — un cluster sin material nuevo desde su
+    último intento no se vuelve a sintetizar, así que llamarlo dos veces seguidas
+    no duplica publicaciones ni gasta de más.
+    """
+    stats = sintetizar_pendientes(session)
+    return {"status": "ok", **stats}
+
+
 @app.post("/cluster")
 def cluster(session: Session = Depends(get_session)):
     """
-    Cierra los clusters vencidos y agrupa las noticias vectorizadas sueltas.
+    Cierra los clusters vencidos, agrupa las noticias sueltas y fusiona los
+    clusters que quedaron describiendo el mismo evento.
 
     El cierre corre primero para que un cluster ya vencido no capture noticias
-    nuevas en la misma pasada.
+    nuevas en la misma pasada; la fusión, al final, sobre lo ya armado.
     """
     cierre = cerrar_clusters_vencidos(session)
     agrupamiento = agrupar_pendientes(session)
-    return {"status": "ok", "cierre": cierre, "agrupamiento": agrupamiento}
+    fusion = fusionar_clusters_duplicados(session)
+    return {
+        "status": "ok",
+        "cierre": cierre,
+        "agrupamiento": agrupamiento,
+        "fusion": fusion,
+    }
 
 
 @app.get("/search")

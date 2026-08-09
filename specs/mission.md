@@ -14,6 +14,9 @@ Agregar noticias de múltiples fuentes (RSS feeds), vectorizarlas, agruparlas po
 ### Público objetivo
 Usuarios que desean entender eventos noticiosos sin sesgos editoriales, viendo cómo cada medio reporta el mismo hecho.
 
+### Qué NO hace este motor
+Compara enfoques editoriales sobre **un mismo hecho** y entrega síntesis. **Si no hay hecho, no es su trabajo.** Los horóscopos, las recetas y la quiniela se clasifican y quedan fuera del agrupamiento (`services/categorias.py`): no se pierden, pero qué se hace con ellos lo resuelve el back-end del producto. Meter acá un circuito para contenido sin hecho mezclaría dos productos distintos en el mismo motor.
+
 ### Principio rector
 Este proyecto prioriza **claridad sobre optimalidad prematura**. No sobre-ingenierices: preferí tres líneas parecidas antes que una abstracción prematura, y no resuelvas problemas de escala que todavía no existen (ver `tech_stack.md`, sección "Arquitectura y Escalabilidad", para los que sí están identificados y a propósito pospuestos).
 

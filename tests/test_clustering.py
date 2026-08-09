@@ -12,8 +12,9 @@ import pytest
 from sqlmodel import Session, select
 
 from src.config import settings
-from src.models import Cluster, Medio, Noticia
+from src.models import Cluster, Medio, Noticia, Sintesis
 from src.services import clustering
+from src.services.categorias import categoria_no_evento
 
 DIMENSIONES = 384
 
@@ -94,6 +95,73 @@ class TestCalcularCentroide:
         assert pytest.approx(centroide[0], abs=1e-6) == math.cos(math.radians(30))
 
 
+class TestCategoriaNoEvento:
+    """
+    Un horóscopo o una receta no son un hecho, y sin hecho no hay enfoques que
+    comparar: no entran al agrupamiento por evento. Pero **no se descartan** —
+    llevan su categoría para su propio circuito de producto.
+
+    Se clasifican por palabra en la URL completa y no por segmento de sección:
+    el segmento identifica el tópico, no el género.
+    """
+
+    @pytest.mark.parametrize(
+        "url, esperada",
+        [
+            ("https://www.lanacion.com.ar/horoscopo/asi-le-ira-cada-signo", "horoscopo"),
+            ("https://www.revistagente.com/horoscopo/por-que-virgo", "horoscopo"),
+            ("https://x.com/espectaculos/la-receta-de-empanadas", "recetas"),
+            ("https://x.com/servicios/quiniela-nacional-de-hoy", "juegos"),
+        ],
+    )
+    def test_clasifica_los_generos_sin_hecho(self, url, esperada):
+        assert categoria_no_evento(url) == esperada
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.lanacion.com.ar/politica/milei-se-reunio-con-el-gabinete",
+            "https://tn.com.ar/deportes/river-confirmo-a-thiago-almada",
+            "https://www.lanacion.com.ar/sociedad/un-tren-choco-contra-un-colectivo",
+            # 'signos' quedó fuera del patrón: "signos de recuperación" es
+            # español corriente y el riesgo de falso positivo no compensaba.
+            "https://www.lanacion.com.ar/economia/los-signos-de-la-recuperacion",
+        ],
+    )
+    def test_las_noticias_comunes_no_llevan_categoria(self, url):
+        assert categoria_no_evento(url) is None
+
+    def test_no_entran_al_agrupamiento(self, session: Session, medios):
+        cluster_previo = len(session.exec(select(Cluster)).all())
+        for indice, (medio, url) in enumerate(
+            [
+                (medios[0], "https://a.com/horoscopo/aries-hoy"),
+                (medios[1], "https://b.com/horoscopo/aries-de-hoy"),
+            ]
+        ):
+            noticia = Noticia(
+                medio_id=medio.id,
+                titulo=f"Horóscopo {indice}",
+                url=url,
+                guid=f"g-{indice}",
+                contenido_limpio="Predicciones.",
+                fecha_publicacion=datetime.utcnow(),
+                embedding=vector_con_angulo(indice),
+            )
+            session.add(noticia)
+        session.commit()
+
+        stats = clustering.agrupar_pendientes(session)
+
+        assert stats["de_otra_categoria"] == 2
+        assert stats["evaluadas"] == 0
+        assert len(session.exec(select(Cluster)).all()) == cluster_previo
+        # Siguen en la base, con su categoría: no se perdieron.
+        guardadas = session.exec(select(Noticia)).all()
+        assert len(guardadas) == 2
+        assert all(categoria_no_evento(n.url) == "horoscopo" for n in guardadas)
+
+
 class TestAgruparPendientes:
     def test_crea_cluster_con_dos_noticias_similares(self, session: Session, medios):
         crear_noticia(session, medios[0], 1, embedding=vector_con_angulo(0))
@@ -132,6 +200,55 @@ class TestAgruparPendientes:
         assert stats["clusters_creados"] == 0
         assert stats["sumadas_a_cluster"] == 1
         assert len(session.exec(select(Cluster)).all()) == 1
+
+    def test_prefiere_el_cluster_aunque_una_suelta_se_parezca_mas(
+        self, session: Session, medios
+    ):
+        """
+        Un cluster por encima del umbral gana sobre cualquier suelta.
+
+        Con el criterio de "mejor candidato global", dos noticias casi idénticas
+        entre sí formaban un cluster paralelo aunque las dos pertenecieran a uno
+        que ya existía. De ahí venía la fragmentación.
+        """
+        cluster = Cluster(titulo_evento="El hecho", estado=clustering.ESTADO_ABIERTO)
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=cluster.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(4), cluster_id=cluster.id)
+
+        # Ambas están a ~0.90 del centroide (por encima del umbral) pero a 0.9998
+        # entre sí: con el criterio viejo se iban juntas a un cluster nuevo.
+        crear_noticia(session, medios[2], 3, vector_con_angulo(26))
+        crear_noticia(session, medios[0], 4, vector_con_angulo(27))
+
+        clustering.agrupar_pendientes(session)
+
+        assert len(session.exec(select(Cluster)).all()) == 1
+        agrupadas = session.exec(
+            select(Noticia).where(Noticia.cluster_id == cluster.id)
+        ).all()
+        assert len(agrupadas) == 4
+
+    def test_crea_cluster_nuevo_si_ningun_cluster_llega_al_umbral(
+        self, session: Session, medios
+    ):
+        """Preferir el cluster no debe impedir que nazcan hechos nuevos."""
+        cluster = Cluster(titulo_evento="Un hecho", estado=clustering.ESTADO_ABIERTO)
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=cluster.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(4), cluster_id=cluster.id)
+
+        # Lejos del cluster (cos 80° = 0.17) pero parecidas entre sí.
+        crear_noticia(session, medios[2], 3, vector_con_angulo(80))
+        crear_noticia(session, medios[0], 4, vector_con_angulo(82))
+
+        clustering.agrupar_pendientes(session)
+
+        assert len(session.exec(select(Cluster)).all()) == 2
 
     def test_ignora_noticias_sin_embedding(self, session: Session, medios):
         crear_noticia(session, medios[0], 1, embedding=None)
@@ -220,3 +337,200 @@ class TestCerrarClustersVencidos:
         assert stats["evaluados"] == 0
         session.refresh(cluster)
         assert cluster.estado == clustering.ESTADO_ABIERTO
+
+
+class TestFusionarClustersDuplicados:
+    """
+    La asignación codiciosa puede dejar dos clusters describiendo el mismo
+    evento; estos tests cubren la pasada que los vuelve a unir.
+    """
+
+    def _cluster(
+        self,
+        session: Session,
+        titulo: str,
+        estado: str = clustering.ESTADO_ABIERTO,
+        horas_atras: float = 1,
+    ) -> Cluster:
+        cluster = Cluster(
+            titulo_evento=titulo,
+            estado=estado,
+            fecha_creacion=datetime.utcnow() - timedelta(hours=horas_atras),
+        )
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+        return cluster
+
+    def test_fusiona_dos_clusters_del_mismo_evento(self, session: Session, medios):
+        # Centroides a 2° y 8°: similitud cos(6°) = 0.995, por encima del umbral.
+        viejo = self._cluster(session, "Murio Fulano", horas_atras=2)
+        nuevo = self._cluster(session, "Murio Fulano a los 51", horas_atras=1)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=viejo.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(4), cluster_id=viejo.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(6), cluster_id=nuevo.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(10), cluster_id=nuevo.id)
+
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats == {"evaluados": 2, "fusionados": 1}
+        assert session.get(Cluster, nuevo.id) is None
+        supervivientes = session.exec(select(Cluster)).all()
+        assert len(supervivientes) == 1
+        noticias = session.exec(
+            select(Noticia).where(Noticia.cluster_id == viejo.id)
+        ).all()
+        assert len(noticias) == 4
+
+    def test_sobrevive_el_cluster_mas_viejo(self, session: Session, medios):
+        """El plazo de cierre lo manda `fecha_creacion`: fusionar no debe estirarlo."""
+        reciente = self._cluster(session, "El nuevo", horas_atras=1)
+        antiguo = self._cluster(session, "El viejo", horas_atras=5)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=reciente.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(2), cluster_id=reciente.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(4), cluster_id=antiguo.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(6), cluster_id=antiguo.id)
+
+        clustering.fusionar_clusters_duplicados(session)
+
+        assert session.get(Cluster, reciente.id) is None
+        assert session.get(Cluster, antiguo.id) is not None
+
+    def test_no_fusiona_eventos_distintos(self, session: Session, medios):
+        # Centroides a 2° y 42°: similitud cos(40°) = 0.766, por debajo del umbral.
+        uno = self._cluster(session, "Un evento")
+        otro = self._cluster(session, "Otro evento")
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=uno.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(4), cluster_id=uno.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(40), cluster_id=otro.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(44), cluster_id=otro.id)
+
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats == {"evaluados": 2, "fusionados": 0}
+        assert session.get(Cluster, uno.id) is not None
+        assert session.get(Cluster, otro.id) is not None
+
+    def test_fusiona_en_cadena_tres_clusters(self, session: Session, medios):
+        clusters = [
+            self._cluster(session, f"Cobertura {i}", horas_atras=3 - i) for i in range(3)
+        ]
+        for indice, cluster in enumerate(clusters):
+            crear_noticia(
+                session, medios[0], indice * 2, vector_con_angulo(indice * 5),
+                cluster_id=cluster.id,
+            )
+            crear_noticia(
+                session, medios[1], indice * 2 + 1, vector_con_angulo(indice * 5 + 2),
+                cluster_id=cluster.id,
+            )
+
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats["fusionados"] == 2
+        assert len(session.exec(select(Cluster)).all()) == 1
+        # La pasada tiene que dejar la base en un punto fijo, no a mitad de
+        # camino: la consolidación no puede depender de cuántas corridas del
+        # scheduler alcanzaron a ejecutarse antes de que el cluster cierre.
+        assert clustering.fusionar_clusters_duplicados(session)["fusionados"] == 0
+
+    def test_ignora_los_clusters_ya_cerrados(self, session: Session, medios):
+        """Un cluster cerrado ya pudo haberse publicado: no se toca."""
+        procesado = self._cluster(session, "Ya cerrado", estado=clustering.ESTADO_PROCESADO)
+        abierto = self._cluster(session, "Todavia abierto")
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=procesado.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(2), cluster_id=procesado.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(4), cluster_id=abierto.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(6), cluster_id=abierto.id)
+
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats == {"evaluados": 1, "fusionados": 0}
+        assert session.get(Cluster, procesado.id) is not None
+        assert session.get(Cluster, abierto.id) is not None
+
+    def test_es_idempotente(self, session: Session, medios):
+        viejo = self._cluster(session, "Evento", horas_atras=2)
+        nuevo = self._cluster(session, "Mismo evento", horas_atras=1)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=viejo.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(2), cluster_id=viejo.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(4), cluster_id=nuevo.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(6), cluster_id=nuevo.id)
+
+        clustering.fusionar_clusters_duplicados(session)
+        segunda = clustering.fusionar_clusters_duplicados(session)
+
+        assert segunda == {"evaluados": 1, "fusionados": 0}
+        assert len(session.exec(select(Cluster)).all()) == 1
+
+    def test_muda_las_sintesis_al_superviviente(self, session: Session, medios):
+        """
+        Una síntesis ya publicada no se borra: su id es la clave de idempotencia
+        del webhook. Antes de esto, fusionar un cluster con síntesis fallaba con
+        IntegrityError al intentar dejar `cluster_id` en NULL.
+        """
+        viejo = self._cluster(session, "El hecho", horas_atras=2)
+        nuevo = self._cluster(session, "El mismo hecho", horas_atras=1)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=viejo.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(2), cluster_id=viejo.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(4), cluster_id=nuevo.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(6), cluster_id=nuevo.id)
+
+        sintesis = Sintesis(
+            cluster_id=nuevo.id,
+            titulo_angulo="Un ángulo ya entregado",
+            resumen_neutro="...",
+            enviado_backend=True,
+        )
+        session.add(sintesis)
+        session.commit()
+        session.refresh(sintesis)
+        id_original = sintesis.id
+
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats["fusionados"] == 1
+        session.refresh(sintesis)
+        assert sintesis.id == id_original          # el backend la sigue reconociendo
+        assert sintesis.cluster_id == viejo.id     # mudada, no borrada
+        assert sintesis.enviado_backend is True
+
+    def test_hereda_la_marca_de_sintesis_mas_alta(self, session: Session, medios):
+        """
+        El cluster fusionado tiene más noticias que sus partes, así que la marca
+        heredada queda por debajo del total y dispara la re-síntesis.
+        """
+        viejo = self._cluster(session, "El hecho", horas_atras=2)
+        nuevo = self._cluster(session, "El mismo hecho", horas_atras=1)
+        viejo.noticias_al_sintetizar = None
+        nuevo.noticias_al_sintetizar = 2
+        session.add(viejo)
+        session.add(nuevo)
+        session.commit()
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=viejo.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(2), cluster_id=viejo.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(4), cluster_id=nuevo.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(6), cluster_id=nuevo.id)
+
+        clustering.fusionar_clusters_duplicados(session)
+
+        session.refresh(viejo)
+        assert viejo.noticias_al_sintetizar == 2
+        noticias_actuales = len(
+            session.exec(select(Noticia).where(Noticia.cluster_id == viejo.id)).all()
+        )
+        assert viejo.noticias_al_sintetizar < noticias_actuales  # se re-sintetiza
+
+    def test_respeta_el_umbral_configurado(self, session: Session, medios, monkeypatch):
+        # Centroides a 2° y 42°: similitud 0.766, que solo alcanza si se baja el umbral.
+        uno = self._cluster(session, "Un evento", horas_atras=2)
+        otro = self._cluster(session, "Otro evento", horas_atras=1)
+        crear_noticia(session, medios[0], 1, vector_con_angulo(0), cluster_id=uno.id)
+        crear_noticia(session, medios[1], 2, vector_con_angulo(4), cluster_id=uno.id)
+        crear_noticia(session, medios[2], 3, vector_con_angulo(40), cluster_id=otro.id)
+        crear_noticia(session, medios[0], 4, vector_con_angulo(44), cluster_id=otro.id)
+
+        monkeypatch.setattr(settings, "UMBRAL_FUSION_CLUSTERS", 0.70)
+        stats = clustering.fusionar_clusters_duplicados(session)
+
+        assert stats["fusionados"] == 1

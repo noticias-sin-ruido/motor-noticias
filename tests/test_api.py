@@ -70,22 +70,107 @@ class TestVectorizeEndpoint:
         assert mock.call_args.kwargs["limite"] == 5
 
 
+class TestSynthesizeEndpoint:
+    """Pruebas del endpoint manual POST /synthesize."""
+
+    def test_synthesize_devuelve_las_estadisticas(self, client: TestClient):
+        stats = {
+            "pendientes": 3, "sintetizados": 2, "creados": 4,
+            "actualizados": 1, "descartados": 1, "bloqueados": 1, "fallidos": 0,
+        }
+
+        with patch("src.main.sintetizar_pendientes", return_value=stats) as mock:
+            response = client.post("/synthesize")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", **stats}
+        mock.assert_called_once()
+
+
+class TestPipelineProgramado:
+    """
+    El job del scheduler aísla los pasos: uno que falla no frena a los que
+    siguen, porque todos son idempotentes y la corrida siguiente retoma sola.
+    """
+
+    def _mocks(self, **overrides):
+        nombres = {
+            "ingerir_todos_los_medios": {"ok": True},
+            "vectorizar_pendientes": {"ok": True},
+            "cerrar_clusters_vencidos": {"ok": True},
+            "agrupar_pendientes": {"ok": True},
+            "fusionar_clusters_duplicados": {"ok": True},
+            "sintetizar_pendientes": {"ok": True},
+        }
+        nombres.update(overrides)
+        return nombres
+
+    def test_un_paso_que_falla_no_frena_a_los_siguientes(self):
+        from src import main
+
+        config = self._mocks(vectorizar_pendientes=RuntimeError("boom"))
+        parches = []
+        for nombre, valor in config.items():
+            kwargs = (
+                {"side_effect": valor} if isinstance(valor, Exception)
+                else {"return_value": valor}
+            )
+            parches.append(patch.object(main, nombre, **kwargs))
+
+        with parches[0], parches[1], parches[2], parches[3], parches[4], parches[5], \
+             patch.object(main, "enviar_alerta") as alerta, \
+             patch.object(main, "Session"):
+            main._job_ingesta_programada()
+
+        # Avisó del fallo, pero la síntesis igual corrió.
+        assert alerta.call_count == 1
+        assert alerta.call_args.kwargs["clave"] == "pipeline:vectorización"
+
+    def test_si_falla_la_fusion_no_se_sintetiza(self):
+        """
+        Sintetizar sin consolidar publicaría dos veces el mismo hecho, y una
+        publicación ya entregada al backend no se retracta.
+        """
+        from src import main
+
+        with patch.object(main, "ingerir_todos_los_medios", return_value={}), \
+             patch.object(main, "vectorizar_pendientes", return_value={}), \
+             patch.object(main, "cerrar_clusters_vencidos", return_value={}), \
+             patch.object(main, "agrupar_pendientes", return_value={}), \
+             patch.object(main, "fusionar_clusters_duplicados",
+                          side_effect=RuntimeError("boom")), \
+             patch.object(main, "sintetizar_pendientes") as sintesis, \
+             patch.object(main, "enviar_alerta"), \
+             patch.object(main, "Session"):
+            main._job_ingesta_programada()
+
+        sintesis.assert_not_called()
+
+
 class TestClusterEndpoint:
     """Pruebas del endpoint manual POST /cluster."""
 
-    def test_cluster_cierra_y_agrupa(self, client: TestClient):
-        """Verifica que /cluster corre el cierre y el agrupamiento, en ese orden."""
+    def test_cluster_cierra_agrupa_y_fusiona(self, client: TestClient):
+        """Verifica que /cluster corre el cierre, el agrupamiento y la fusión."""
         cierre = {"evaluados": 2, "procesados": 1, "descartados": 1}
         agrupamiento = {"evaluadas": 5, "sumadas_a_cluster": 2, "clusters_creados": 1, "sin_match": 2}
+        fusion = {"evaluados": 3, "fusionados": 1}
 
         with patch("src.main.cerrar_clusters_vencidos", return_value=cierre) as mock_cierre, \
-             patch("src.main.agrupar_pendientes", return_value=agrupamiento) as mock_agrupar:
+             patch("src.main.agrupar_pendientes", return_value=agrupamiento) as mock_agrupar, \
+             patch("src.main.fusionar_clusters_duplicados", return_value=fusion) as mock_fusion:
             response = client.post("/cluster")
 
         assert response.status_code == 200
-        assert response.json() == {"status": "ok", "cierre": cierre, "agrupamiento": agrupamiento}
+        assert response.json() == {
+            "status": "ok",
+            "cierre": cierre,
+            "agrupamiento": agrupamiento,
+            "fusion": fusion,
+        }
         mock_cierre.assert_called_once()
         mock_agrupar.assert_called_once()
+        mock_fusion.assert_called_once()
 
 
 class TestSearchEndpoint:

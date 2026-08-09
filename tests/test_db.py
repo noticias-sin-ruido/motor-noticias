@@ -6,7 +6,7 @@ from datetime import datetime
 import pytest
 from sqlmodel import Session, select
 
-from src.models import Medio, Noticia, Cluster, Sintesis
+from src.models import Medio, Noticia, Cluster, Sintesis, SintesisNoticia
 
 
 class TestMedio:
@@ -245,6 +245,7 @@ class TestSintesis:
 
         sintesis = Sintesis(
             cluster_id=cluster.id,
+            titulo_angulo="El hecho central",
             resumen_neutro="Este es un resumen neutro del evento.",
             puntos_clave=["Punto 1", "Punto 2", "Punto 3"],
             comparativa_enfoques={
@@ -261,3 +262,178 @@ class TestSintesis:
         assert len(sintesis.puntos_clave) == 3
         assert "Clarín" in sintesis.comparativa_enfoques
         assert sintesis.fecha_generacion is not None
+
+    def test_arranca_sin_entregar_al_backend(self, session: Session):
+        cluster = Cluster(titulo_evento="Evento")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        sintesis = Sintesis(
+            cluster_id=cluster.id, titulo_angulo="Un ángulo", resumen_neutro="Resumen."
+        )
+        session.add(sintesis)
+        session.commit()
+        session.refresh(sintesis)
+
+        assert sintesis.enviado_backend is False
+        assert sintesis.fecha_envio is None
+        assert sintesis.intentos_envio == 0
+
+    def test_un_cluster_produce_varios_angulos(self, session: Session):
+        """La unidad que se publica es el ángulo, no el cluster."""
+        cluster = Cluster(titulo_evento="Murió una figura pública")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        for titulo in ["La muerte", "Las reacciones", "El velatorio"]:
+            session.add(
+                Sintesis(cluster_id=cluster.id, titulo_angulo=titulo, resumen_neutro="...")
+            )
+        session.commit()
+        session.refresh(cluster)
+
+        assert len(cluster.sintesis) == 3
+        assert {s.titulo_angulo for s in cluster.sintesis} == {
+            "La muerte", "Las reacciones", "El velatorio",
+        }
+
+
+class TestMarcaDeSintesis:
+    """
+    `Cluster.noticias_al_sintetizar` es la guarda contra el reintento infinito.
+
+    Cuenta noticias y no medios porque el conteo de medios no distingue "no pasó
+    nada nuevo" de "llegó material nuevo de los mismos medios", y ese segundo
+    caso sí puede dar un ángulo publicable.
+    """
+
+    def _cluster(self, session: Session, marca=None) -> Cluster:
+        cluster = Cluster(titulo_evento="Un hecho", noticias_al_sintetizar=marca)
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+        return cluster
+
+    def test_arranca_sin_marca(self, session: Session):
+        assert self._cluster(session).noticias_al_sintetizar is None
+
+    def test_sin_sintesis_pero_con_marca_es_un_intento_sin_resultado(
+        self, session: Session
+    ):
+        """
+        No alcanza con mirar si el cluster tiene síntesis: si ningún ángulo llegó
+        al mínimo de medios no se crea ninguna fila, y sin la marca el cluster
+        sería indistinguible de uno nunca intentado — se reintentaría siempre.
+        """
+        cluster = self._cluster(session, marca=4)
+
+        assert cluster.sintesis == []
+        assert cluster.noticias_al_sintetizar == 4
+
+    def test_el_conteo_de_medios_no_habria_detectado_material_nuevo(
+        self, session: Session
+    ):
+        """
+        El caso que motivó contar noticias: TN y La Nación ya estaban, los dos
+        publican sobre un ángulo nuevo. Los medios siguen siendo 2, pero las
+        noticias pasaron de 2 a 4 y hay material publicable.
+        """
+        cluster = self._cluster(session, marca=2)
+        medios_antes = medios_ahora = 2
+        noticias_ahora = 4
+
+        assert medios_ahora == medios_antes  # no lo habría detectado
+        assert cluster.noticias_al_sintetizar < noticias_ahora  # sí lo detecta
+
+
+class TestSintesisNoticia:
+    """La relación entre un ángulo y las noticias que lo respaldan."""
+
+    def _armar(self, session: Session, cantidad_medios: int):
+        medios = []
+        for i in range(cantidad_medios):
+            medio = Medio(
+                nombre=f"Medio {i}",
+                url_base=f"https://m{i}.com",
+                feed_rss=f"https://m{i}.com/rss",
+            )
+            session.add(medio)
+            medios.append(medio)
+        cluster = Cluster(titulo_evento="Un hecho")
+        session.add(cluster)
+        session.commit()
+        for m in medios:
+            session.refresh(m)
+        session.refresh(cluster)
+        return medios, cluster
+
+    def _noticia(self, session: Session, medio: Medio, cluster: Cluster, n: int) -> Noticia:
+        noticia = Noticia(
+            medio_id=medio.id,
+            cluster_id=cluster.id,
+            titulo=f"Nota {n}",
+            url=f"https://m.com/{n}",
+            guid=f"guid-{n}",
+            contenido_limpio="Cuerpo.",
+            fecha_publicacion=datetime.utcnow(),
+        )
+        session.add(noticia)
+        session.commit()
+        session.refresh(noticia)
+        return noticia
+
+    def test_asocia_las_noticias_que_respaldan_el_angulo(self, session: Session):
+        medios, cluster = self._armar(session, 2)
+        notas = [self._noticia(session, m, cluster, i) for i, m in enumerate(medios)]
+
+        sintesis = Sintesis(
+            cluster_id=cluster.id, titulo_angulo="El hecho", resumen_neutro="...",
+            noticias=notas,
+        )
+        session.add(sintesis)
+        session.commit()
+        session.refresh(sintesis)
+
+        assert len(sintesis.noticias) == 2
+        assert session.exec(select(SintesisNoticia)).all().__len__() == 2
+
+    def test_una_noticia_puede_respaldar_varios_angulos(self, session: Session):
+        """Un minuto a minuto cubre el hecho y sus reacciones a la vez."""
+        medios, cluster = self._armar(session, 1)
+        nota = self._noticia(session, medios[0], cluster, 1)
+
+        for titulo in ["El hecho", "Las reacciones"]:
+            session.add(
+                Sintesis(
+                    cluster_id=cluster.id, titulo_angulo=titulo,
+                    resumen_neutro="...", noticias=[nota],
+                )
+            )
+        session.commit()
+        session.refresh(nota)
+
+        assert len(nota.sintesis) == 2
+
+    def test_permite_contar_medios_distintos_del_angulo(self, session: Session):
+        """
+        La regla que decide qué se publica: un ángulo necesita 2 medios
+        distintos. Se resuelve contando sobre esta relación, no en memoria.
+        """
+        medios, cluster = self._armar(session, 3)
+        # Dos notas del mismo medio y una de otro: son 2 medios, no 3.
+        notas = [
+            self._noticia(session, medios[0], cluster, 1),
+            self._noticia(session, medios[0], cluster, 2),
+            self._noticia(session, medios[1], cluster, 3),
+        ]
+        sintesis = Sintesis(
+            cluster_id=cluster.id, titulo_angulo="El hecho",
+            resumen_neutro="...", noticias=notas,
+        )
+        session.add(sintesis)
+        session.commit()
+        session.refresh(sintesis)
+
+        assert len({n.medio_id for n in sintesis.noticias}) == 2

@@ -9,6 +9,10 @@ __pycache__/
 # Variables de entorno locales
 .env
 
+# Reportes de coverage (mission.md pide 80% mínimo, pero el reporte no se versiona)
+.coverage
+htmlcov/
+
 # Archivos de SO o editores
 .DS_Store
 .vscode/

@@ -48,12 +48,16 @@ sin_ruido/
 │   │   ├── medio.py            # Modelo: Medio (fuente de noticias)
 │   │   ├── noticia.py          # Modelo: Noticia (con embedding Vector)
 │   │   ├── cluster.py          # Modelo: Cluster (agrupación por evento)
-│   │   └── sintesis.py         # Modelo: Sintesis (resumen neutral + JSONB)
+│   │   └── sintesis.py         # Modelos: Sintesis (un ángulo) + SintesisNoticia
 │   └── services/
 │       ├── __init__.py
 │       ├── ingestion.py        # Pipeline de ingesta RSS (Fase 2)
 │       ├── vectorization.py    # Embeddings de noticias (Fase 3)
-│       ├── clustering.py       # Agrupamiento incremental + cierre (Fase 3)
+│       ├── clustering.py       # Agrupamiento incremental + fusión + cierre (Fase 3)
+│       ├── preprocessing.py    # Evidencia (TF-IDF + NER) para el prompt (Fase 4)
+│       ├── synthesis.py        # Síntesis por ángulo con Gemini (Fase 4)
+│       ├── categorias.py       # Notas sin hecho (horóscopo, recetas): no se agrupan
+│       ├── alerts.py           # Avisos por mail ante fallo de cualquier paso
 │       └── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
 │
 ├── alembic/                    # Migraciones de esquema
@@ -69,7 +73,8 @@ sin_ruido/
 │   ├── test_api.py             # 16 tests de endpoints
 │   ├── test_ingestion.py       # 9 tests del pipeline de ingesta
 │   ├── test_vectorization.py   # 9 tests de vectorización
-│   └── test_clustering.py      # 13 tests de agrupamiento y cierre
+│   ├── test_clustering.py      # 20 tests de agrupamiento, fusión y cierre
+│   └── test_preprocessing.py   # 21 tests de evidencia para la síntesis
 │
 ├── specs/                      # Fuente de verdad del proyecto
 │   ├── mission.md
@@ -101,14 +106,17 @@ sin_ruido/
 
 ```
 Medio (1) ─────→ (∞) Noticia
-                   ↓
-                   └─→ Cluster (1) ─────→ (∞) Sintesis
+                       ↓         ↑
+                       ↓         └──── (∞) SintesisNoticia (∞) ────┐
+                       ↓                                           │
+                       └─→ Cluster (1) ─────→ (∞) Sintesis ────────┘
 ```
 
 - **Medio**: Fuente de noticias. 6 activos: La Nación, TN, El Cronista (generales) + Revista Gente, Revista Paparazzi, Ciudad Magazine (espectáculos)
 - **Noticia**: Artículo individual con `embedding` (Vector 384 dims)
-- **Cluster**: Agrupación de noticias del mismo evento (similitud semántica)
-- **Sintesis**: Resumen neutro + comparativa de enfoques (JSON/JSONB)
+- **Cluster**: El hecho y toda su cobertura. Agrupa por similitud semántica buscando no perder cobertura; **no** es la unidad que se publica
+- **Sintesis**: Un **ángulo** del cluster (el hecho, sus consecuencias, las reacciones) con su resumen neutro y comparativa de enfoques. Un cluster produce varias, y separarlas requiere leer los textos — lo hace el modelo en Fase 4
+- **SintesisNoticia**: Qué noticias respaldan cada ángulo. Es muchos-a-muchos porque una nota puede sostener varios ángulos, y es tabla (y no una lista JSON) porque de este join sale el `count(distinct medio_id)` que decide si el ángulo se publica
 
 ---
 
@@ -120,10 +128,14 @@ Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica
 2. **Pool de conexiones sin configurar** (Fase 3+): `get_engine()` no fija `pool_size`/`max_overflow` explícitamente. Con varios workers de Uvicorn el pool por defecto puede agotarse. Definir al fijar el despliegue real (Fase 5).
 3. **Índice de pgvector** (revisar cuando crezca el volumen): sigue sin haber índice HNSW/IVFFlat sobre `Noticia.embedding`, **a propósito**. A la escala actual el scan secuencial se resuelve en milisegundos, y con un `WHERE` restrictivo el índice ANN pierde parte de su ventaja igual. Además el clustering ni siquiera usa el KNN de la base: compara centroides en memoria. El único consumidor real del KNN es `GET /search`. Crear el índice cuando la tabla `noticia` llegue al orden de las decenas de miles de filas.
 4. **Scheduler embebido, un solo proceso** (Fase 5): si en el futuro se escala la API a varias réplicas, cada una levantaría su propio scheduler y pollearía los feeds por separado (N veces el mismo trabajo). Separar en proceso propio si eso llega a pasar.
-5. **Costo y rate limit del LLM de síntesis** (Fase 4): si `Sintesis` se genera on-demand por cada request en vez de precalculada al cerrar el cluster, un pico de tráfico dispara costo y latencia sin control. Decidir si se precalcula al cerrar el `Cluster`.
+5. **Costo y rate limit del LLM de síntesis** (Fase 4): ✅ **decidido** — la síntesis se precalcula al alcanzar 2 medios, nunca on-demand por request, así que un pico de tráfico no dispara costo. Queda vigente el **rate limit**: en una corrida se sintetizan todos los clusters publicables de una (medido: 21), y la capa gratuita de Gemini limita por minuto. Necesita backoff con `tenacity`, igual que la ingesta.
 6. **Modelo de embeddings en memoria** (Fase 3/5): `sentence-transformers` carga el modelo en RAM por proceso; con varios workers de Uvicorn eso multiplica el consumo de memoria. Decidir si se comparte un único proceso de embeddings o se acepta el costo por worker.
 7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `mission.md`, "BD y migraciones".
-8. **Alertas sin observabilidad** (Fase 2/5): la alerta por mail ante fallo de ingesta avisa de un fallo puntual, pero no hay métricas ni logging estructurado todavía — un patrón de fallos recurrente no se nota salvo leyendo mails uno por uno. El ítem de Monitoring en Fase 5 lo cubre parcialmente.
+8. ~~**El pipeline se auto-repara pero es mudo**~~ ✅ **RESUELTO**: `services/alerts.py` avisa por mail ante el fallo de cualquier paso, con cooldown para no inundar la casilla, y en el scheduler cada paso corre aislado (la fusión es la única que corta la cadena, para no publicar duplicados). La contingencia de fondo sigue siendo la idempotencia de todos los pasos: un crash a mitad se recupera solo en la corrida siguiente. Queda pendiente el logging estructurado y las métricas, que cubre Monitoring en Fase 5.
+
+9. **`agrupar_pendientes` es cuadrático** (Fase 5): compara cada noticia suelta contra todas las demás de la ventana. Medido: 3,6 s con ~200 sueltas; proyectado, ~14 s con 400 y cerca de un minuto con 800. Con 6 medios y ventana de 12 h no se llega ni cerca, pero es el primer lugar que se va a poner lento al sumar medios. La salida sería acotar los candidatos con el KNN de pgvector en vez de comparar contra todo (ver punto 3, que hoy es el único motivo por el que el índice no hace falta).
+
+10. **Los eventos de varios días generan clusters sucesivos** (Fase 4): un cluster cierra a las 12 h de creado, así que la cobertura del día siguiente arma uno nuevo, y la fusión solo toca clusters abiertos. Una historia larga (la muerte de Jorge Messi cubrió varios días) produce un segundo conjunto de publicaciones. En parte es correcto —el velorio es otro hecho— pero puede haber solapamiento. Revisar con síntesis reales a la vista.
 
 ---
 
