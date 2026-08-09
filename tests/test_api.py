@@ -87,6 +87,31 @@ class TestSynthesizeEndpoint:
         mock.assert_called_once()
 
 
+class TestDeliverEndpoint:
+    """Pruebas del endpoint manual POST /deliver."""
+
+    def test_deliver_devuelve_las_estadisticas(self, client: TestClient):
+        stats = {
+            "estado": "ok", "pendientes": 2, "entregadas": 2,
+            "rechazadas": 0, "fallidas": 0, "agotadas": 0,
+        }
+
+        with patch("src.main.entregar_pendientes", return_value=stats) as mock:
+            response = client.post("/deliver")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", **stats}
+        assert mock.call_args.kwargs["forzar"] is False
+
+    def test_deliver_pasa_el_forzado(self, client: TestClient):
+        """`forzar` reincluye las síntesis que agotaron los intentos."""
+        with patch("src.main.entregar_pendientes", return_value={}) as mock:
+            response = client.post("/deliver?forzar=true")
+
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["forzar"] is True
+
+
 class TestPipelineProgramado:
     """
     El job del scheduler aísla los pasos: uno que falla no frena a los que
@@ -101,6 +126,7 @@ class TestPipelineProgramado:
             "agrupar_pendientes": {"ok": True},
             "fusionar_clusters_duplicados": {"ok": True},
             "sintetizar_pendientes": {"ok": True},
+            "entregar_pendientes": {"ok": True},
         }
         nombres.update(overrides)
         return nombres
@@ -118,6 +144,7 @@ class TestPipelineProgramado:
             parches.append(patch.object(main, nombre, **kwargs))
 
         with parches[0], parches[1], parches[2], parches[3], parches[4], parches[5], \
+             parches[6], \
              patch.object(main, "enviar_alerta") as alerta, \
              patch.object(main, "Session"):
             main._job_ingesta_programada()
@@ -140,11 +167,16 @@ class TestPipelineProgramado:
              patch.object(main, "fusionar_clusters_duplicados",
                           side_effect=RuntimeError("boom")), \
              patch.object(main, "sintetizar_pendientes") as sintesis, \
+             patch.object(main, "entregar_pendientes") as entrega, \
              patch.object(main, "enviar_alerta"), \
              patch.object(main, "Session"):
             main._job_ingesta_programada()
 
         sintesis.assert_not_called()
+
+        # La entrega sí corre: es un barrido de todo lo pendiente, y lo que
+        # quedó sin entregar de antes no tiene por qué esperar a la fusión.
+        entrega.assert_called_once()
 
 
 class TestClusterEndpoint:

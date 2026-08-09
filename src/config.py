@@ -145,6 +145,29 @@ class Settings(BaseSettings):
     # (verificado). `thinking_level` es la palanca que sí acepta.
     GEMINI_THINKING_LEVEL: str = "LOW"
 
+    # --- Entrega al back-end por webhook (Fase 4) ---
+    # Ver specs/webhook_contract.md para el payload y specs/change_logs.md para
+    # el razonamiento. Sin URL ni secreto la entrega no corre: las síntesis
+    # quedan en la base con `enviado_backend=False` y salen cuando se configura.
+    WEBHOOK_URL: Optional[str] = None
+
+    # Secreto compartido con el back-end para la firma HMAC-SHA256. Nunca viaja
+    # por la red: lo que se manda es una firma derivada de él.
+    WEBHOOK_SECRET: Optional[str] = None
+
+    # Segundos de espera por respuesta. Corto a propósito: el receptor solo
+    # tiene que aceptar y encolar, no procesar. Si tarda más, algo le pasa y
+    # conviene reintentar en la corrida siguiente antes que bloquear el paso.
+    WEBHOOK_TIMEOUT: float = 10.0
+
+    # Corridas del barrido tras las que una síntesis deja de reintentarse. El
+    # barrido es idempotente y corre cada 15 minutos, así que sin tope una
+    # síntesis que el backend rechaza siempre se reintentaría para siempre. Al
+    # llegar acá se avisa por mail y se la deja de tomar; una re-síntesis (que
+    # trae contenido nuevo) resetea el contador, y `POST /deliver?forzar=true`
+    # las vuelve a incluir cuando el problema del otro lado está resuelto.
+    WEBHOOK_MAX_INTENTOS: int = 5
+
 
 # Instancia única de configuración, importada en el resto de la aplicación.
 settings = Settings()

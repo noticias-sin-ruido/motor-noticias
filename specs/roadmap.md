@@ -2,8 +2,8 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 4 (Síntesis Neutra con IA), **en curso**. El motor ya produce publicaciones reales de punta a punta —ingesta → vectorización → clustering → fusión → síntesis por ángulo con Gemini— validado contra 1.296 noticias y 138/138 tests.
-**Falta para cerrarla:** la entrega por webhook al back-end. Hoy las síntesis se generan y quedan en la base; nadie las consume.
+**Fase actual:** Fase 4 (Síntesis Neutra con IA) ✅ **completa**. El motor produce publicaciones reales de punta a punta y las entrega al back-end: ingesta → vectorización → clustering → fusión → síntesis por ángulo con Gemini → webhook firmado. Validado contra 1.296 noticias y 195/195 tests.
+**Siguiente:** Fase 5 (Deployment y Escalabilidad).
 
 ---
 
@@ -69,7 +69,7 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 
 ---
 
-## Fase 4: Síntesis Neutra con IA (En curso — falta la entrega por webhook)
+## Fase 4: Síntesis Neutra con IA ✅ COMPLETA
 
 - [x] **Preproceso de evidencia** (`preprocessing.py`): núcleo compartido, vocabulario propio por medio (TF-IDF con IDF de corpus) y entidades exclusivas/omitidas (spaCy NER). Entra al prompt como pistas a verificar, no como conclusiones
 - [x] **Esquema de `Sintesis` por ángulo** + `SintesisNoticia` + campos de entrega (migración `979689aeb928`)
@@ -82,10 +82,16 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 - [x] **Probado contra Gemini real** con `gemini-3.5-flash-lite`: 6.747 tokens de entrada, 879 de salida, 0 de razonamiento; separó un cluster en dos ángulos correctos con comparativa citada. Detalle y correcciones en `change_logs.md`
 - [x] **Categorías sin hecho** (`categorias.py`): horóscopos, recetas y quiniela quedan fuera del agrupamiento — no hay enfoques que comparar. Qué se hace con ellas es del back-end
 - [x] **Validado de punta a punta con datos reales**: 11 publicaciones sobre 8 hechos, tres de ellos con dos ángulos cada uno
-- [ ] **Entrega al backend por webhook** + firma HMAC + job de reintento de las no entregadas (diseño cerrado en `change_logs.md`; `Sintesis.id` es la clave de idempotencia)
+- [x] **Tópico por publicación** (`topicos.py`): taxonomía cerrada de 10 categorías, principal + secundario opcional. La sección declarada por cada medio entra al prompt como pista y el modelo decide leyendo los textos — los medios discrepan y esa discrepancia es editorial, no ruido a promediar (migración `eb625bff05fc`)
+- [x] **Entrega al backend por webhook** (`webhook_delivery.py`): firma HMAC-SHA256 sobre `timestamp.cuerpo`, un request por síntesis, `POST /deliver` manual con `forzar`. El paso es un **barrido de todo lo pendiente**, así que el job de reintento planificado no hizo falta
+- [x] **Contrato documentado para el equipo de back-end**: `specs/webhook_contract.md`, con payload real, validación de firma y semántica de reintentos
 - [ ] Validación de neutralidad de lo que devuelve el modelo — **no es detectable por código de forma confiable**; se ataca con el prompt y revisión manual sobre corridas reales
 
-**Entregables:** `src/services/preprocessing.py`, `synthesis.py`, `categorias.py`, `alerts.py`, `POST /synthesize`, `src/services/webhook_delivery.py` (pendiente), job periódico de reintento (pendiente).
+**Entregables:** `src/services/preprocessing.py`, `synthesis.py`, `categorias.py`, `topicos.py`, `alerts.py`, `webhook_delivery.py`, `POST /synthesize`, `POST /deliver`, `specs/webhook_contract.md`.
+
+**Pendiente de validación con el otro equipo:** el webhook está probado contra un receptor mockeado, no contra el back-end real. Falta acordar la URL y el secreto, y hacer la primera entrega punta a punta.
+
+**A vigilar:** el modelo sobreescribió una vez una señal unánime de tópico (los dos medios dijeron `internacional`, él puso `policiales + internacional`). Se sostiene, pero es una sola observación — mirar si se repite.
 
 **Pendiente de observación** (no bloquea): un cluster de economía juntó inflación y mora, dos hechos distintos pegados por vocabulario compartido. El modelo los separó bien en dos ángulos, pero el agrupamiento no debió unirlos. Una sola observación — mirar si se repite antes de tocar nada.
 

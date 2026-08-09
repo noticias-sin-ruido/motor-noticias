@@ -32,6 +32,7 @@ from ..config import settings
 from ..models import Cluster, Medio, Noticia, Sintesis, SintesisNoticia
 from .clustering import ESTADO_ABIERTO, ESTADO_PROCESADO
 from .preprocessing import construir_evidencia
+from .topicos import NINGUNO, Topico, TopicoSecundario, topico_declarado
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,12 @@ class AnguloGenerado(BaseModel):
     titulo_angulo: str
     resumen_neutro: str
     puntos_clave: List[str]
+    # Lista cerrada: con texto libre convivirían "Deportes", "deportes" y
+    # "Fútbol", y la navegación del producto se rompe sola.
+    topico: Topico
+    topico_secundario: TopicoSecundario = PydanticField(
+        description=f"Segundo tema, o '{NINGUNO}' si no corresponde"
+    )
     comparativa_enfoques: List[EnfoqueMedio]
     notas: List[int] = PydanticField(description="Números de las notas que lo respaldan")
 
@@ -170,9 +177,12 @@ def construir_prompt(
     for numero, noticia in enumerate(noticias, start=1):
         medio = medios[noticia.medio_id]
         datos = evidencia["por_medio"].get(medio, {})
+        seccion = topico_declarado(noticia.url)
         bloques.append(
             f"--- NOTA {numero} | {medio}\n"
             f"TITULAR: {noticia.titulo}\n"
+            f"Sección en la que la publicó el medio: "
+            f"{seccion.value if seccion else '(no la declara)'}\n"
             f"Vocabulario propio del medio: "
             f"{', '.join(datos.get('terminos_propios', [])) or '(sin rasgo)'}\n"
             f"Menciona en exclusiva: "
@@ -220,6 +230,12 @@ cuerpo y descartá las que no sean significativas.
 Para cada ángulo:
 - `resumen_neutro`: sin adjetivos valorativos, solo hechos que sostenga más de
   un medio.
+- `topico`: de qué tema es, de la lista cerrada. La sección que declara cada
+  medio es una pista y no la respuesta: los medios discrepan seguido y esa
+  discrepancia es editorial, no un error a promediar.
+- `topico_secundario`: solo si la cobertura pertenece con el mismo derecho a un
+  segundo tema (la muerte de un futbolista es deportes y también espectáculos).
+  Si no, `{NINGUNO}`.
 - `comparativa_enfoques`: **una entrada por cada medio que aportó notas a ese
   ángulo**, sin saltearte ninguno, con qué destacó, qué omitió y una `cita`
   textual del cuerpo que lo respalde. Omití las diferencias que no sean
@@ -358,12 +374,31 @@ def _persistir(
                 continue
             sintesis = Sintesis(cluster_id=cluster.id, titulo_angulo=angulo.titulo_angulo)
             sintesis.noticias = notas
+            sintesis.topico = angulo.topico.value
+            secundario = angulo.topico_secundario.value
+            sintesis.topico_secundario = None if secundario == NINGUNO else secundario
             stats["creados"] += 1
         else:
-            # El título no se toca: es lo que el backend ya publicó.
+            # Ni el título ni el tópico se tocan: son lo que el backend ya
+            # publicó. Mover una publicación de Deportes a Espectáculos entre
+            # una entrega y la siguiente es el mismo problema que renombrarla —
+            # del otro lado ya está en una sección, con lectores encima.
+            #
+            # La excepción son las síntesis anteriores a que el campo existiera:
+            # ahí no hay nada que preservar, solo un hueco que llenar.
+            if sintesis.topico is None:
+                sintesis.topico = angulo.topico.value
+                secundario = angulo.topico_secundario.value
+                sintesis.topico_secundario = None if secundario == NINGUNO else secundario
+
             faltantes = [n for n in notas if n not in sintesis.noticias]
             sintesis.noticias = list(sintesis.noticias) + faltantes
-            sintesis.enviado_backend = False  # hay contenido nuevo que entregar
+
+            # Hay contenido nuevo que entregar. El contador de intentos vuelve a
+            # cero porque el cuerpo cambió: si el backend venía rechazando esta
+            # síntesis, este payload distinto merece su propia oportunidad.
+            sintesis.enviado_backend = False
+            sintesis.intentos_envio = 0
             stats["actualizados"] += 1
 
         sintesis.resumen_neutro = angulo.resumen_neutro

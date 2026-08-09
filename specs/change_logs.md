@@ -504,3 +504,64 @@ El motor no expone la síntesis vía polling: la empuja por webhook al back-end 
 - **Reintentos**: `tenacity` en el momento de enviar (mismo patrón que la ingesta). Si se agotan, la `Sintesis` queda con `enviado_backend=False` y un **job periódico sobre el `APScheduler` ya existente** (no una cola de mensajes) barre las síntesis no entregadas y reintenta. Sin reenvío manual — se descartó por depender de que un operario vea una alerta y actúe.
 - **Autenticación del webhook**: firma HMAC-SHA256 sobre el cuerpo del request + timestamp en el header (para poder rechazar requests viejos y mitigar replay), con secreto compartido vía variable de entorno en ambos lados. Se prefirió por sobre un token estático porque el secreto nunca viaja en la red (se manda una firma derivada, no el secreto en sí) — defensa en profundidad más allá de lo que ya da TLS.
 - **Idempotencia del lado del backend receptor**: queda a resolver por el equipo de backend/mobile, no es una decisión de este repo.
+
+### La entrega es un barrido, no un envío de lo recién generado
+Al implementarlo cayó una simplificación que no estaba en el diseño original. El paso de entrega no manda "lo que se acaba de sintetizar": **selecciona todo lo que tenga `enviado_backend=False`**, sin importar de cuándo sea.
+
+Con eso, el primer intento y el reintento de lo que falló hace horas son exactamente el mismo código, y **el job periódico de reintento que estaba planificado deja de hacer falta**. Es el mismo argumento que ya sostiene todo el pipeline: si cada paso es idempotente, alcanza con volver a correrlo.
+
+Por lo mismo, la entrega es el único paso que corre **aunque falle la fusión**. La síntesis sí se saltea —publicar sin consolidar duplicaría un hecho—, pero lo que quedó sin entregar de corridas anteriores no tiene por qué esperar a que se arregle otra cosa.
+
+### El intento se cuenta aunque el envío falle
+Detalle chico con consecuencia grande: `intentos_envio` se incrementa en un `finally`, no después del éxito. Si solo avanzara al entregar bien, un back-end permanentemente caído se quedaría en cero para siempre, nunca alcanzaría `WEBHOOK_MAX_INTENTOS` y el barrido lo reintentaría cada 15 minutos indefinidamente sin que nadie se entere.
+
+Sobre el corte: un **4xx no se reintenta** (salvo 408, 425 y 429). Un 4xx significa que el contrato se rompió —un campo que cambió de forma, una firma que no valida— y eso se arregla con una corrección, no insistiendo. Los 5xx y los timeouts sí se reintentan.
+
+Para que el corte no sea una trampa sin salida hay dos escapes: una **re-síntesis resetea el contador** (el cuerpo cambió, merece otra oportunidad) y `POST /deliver?forzar=true` reincluye las agotadas cuando el problema del otro lado ya está resuelto.
+
+### El bug que el mock no podía ver: `utcnow().timestamp()`
+Se probó la entrega contra un receptor local que valida la firma **copiando literalmente el pseudocódigo del contrato**. Rechazó las 11 síntesis con `401 timestamp vencido`.
+
+`datetime.utcnow()` devuelve un datetime *naive*, y `.timestamp()` sobre un naive lo interpreta como **hora local**: desde Argentina el epoch salía corrido 3 horas. Contra un receptor que valida la ventana anti-replay —que es lo que nuestro propio contrato le pide al back-end— eso rechaza absolutamente todo. Se cambió por `time.time()`.
+
+Vale anotar cómo apareció: con `httpx.post` mockeado el test pasaba, porque el mock no valida nada. El bug necesitaba **un segundo actor que verificara de verdad**. Tras el arreglo, el mismo receptor aceptó las 11 con firma válida, la segunda corrida no reenvió nada y con el secreto cambiado rechazó — o sea que la firma protege de verdad y no es decorativa.
+
+### El nombre del hecho no se manda
+Al mirar el primer payload real apareció que `hecho.titulo` traía *"Quiénes son los jugadores de la Selección Argentina que acompañan a Messi en el velatorio…"*. Ese campo es `Cluster.titulo_evento`, que no es más que el titular de la primera nota que formó el cluster: **el encuadre de un medio puntual**.
+
+Mandarlo sería entregarle al front, como nombre neutro del hecho, exactamente lo que el producto se propone no hacer. Se sacó. Para agrupar los ángulos de una historia alcanza con `hecho.id`; si más adelante hace falta una etiqueta visible, hay que generarla neutra y no reciclar un titular.
+
+Por la misma lógica de identificadores, la **comparativa viaja como lista con el `id` del medio** y no como el diccionario indexado por nombre que se guarda en la base. Un nombre para mostrar cambia (un rebranding, una tilde corregida) y del otro lado eso deja filas huérfanas.
+
+### El tópico: qué sección es cada publicación
+Faltaba lo más básico para que el back-end pueda filtrar: **de qué tema es cada publicación**. El motor no lo asignaba en ningún lado.
+
+La opción barata era derivarlo de la URL, porque los medios ya categorizan (`tn.com.ar/deportes/…`, `lanacion.com.ar/economia/…`). Se midió sobre las 1.296 noticias:
+
+- Cada medio nombra lo mismo distinto: `el-mundo` (La Nación) es `internacional` (TN), `economia-politica` (El Cronista) es `economia`, y `show` / `teve` / `entretenimiento` / `romances` son todos espectáculos. Con una tabla de ~50 entradas se normaliza el **93,6%** de las URLs.
+- Normalizar sube el acuerdo entre medios de **3/11 a 8/11** publicaciones.
+
+**Pero los 3 desacuerdos que quedan no son ruido, son el producto:**
+
+| Publicación | Medio A | Medio B |
+|---|---|---|
+| Muerte de Jorge Messi | TN → `deportes` | Paparazzi → `teve` |
+| Galperin contra CAME | La Nación → `politica` | El Cronista → `negocios` |
+
+Los dos tienen razón. Que un medio lo trate como deporte y otro como espectáculo **es encuadre editorial** — justo lo que el motor existe para mostrar. Una votación por mayoría promediaría precisamente la señal del producto.
+
+Así que se resolvió con el reparto que ya usábamos con TF-IDF y NER, **el cálculo señala y el modelo juzga**: la sección normalizada de cada medio entra al prompt como pista y el modelo elige de una lista cerrada leyendo los textos. Cuesta ~4 tokens de salida por ángulo, no necesita mantenimiento al sumar un medio, y decide **por ángulo**, que es la unidad que se publica.
+
+**Taxonomía cerrada de 10**: politica, economia, sociedad, policiales, internacional, deportes, espectaculos, tecnologia, ciencia, lifestyle. Cerrada porque con texto libre convivirían "Deportes", "deportes" y "Fútbol", y la navegación del producto se rompe sola. No hay `opinion` ni `columnistas`: eso es **género**, no tema (una columna sobre inflación es economía), la misma distinción que ya habíamos hecho con el horóscopo.
+
+**Principal + secundario opcional.** El caso que lo justifica es el velorio de Jorge Messi: pertenece con igual derecho a deportes y a espectáculos, y con un solo tópico desaparecería de una de las dos secciones.
+
+Detalle de implementación: el secundario es un enum aparte que incluye el valor `ninguno`, en vez de un campo nulable. Los esquemas de respuesta del modelo manejan mucho mejor un enum obligatorio que uno nulable, y con `ninguno` explícito no hay forma de que devuelva algo fuera de la lista. Se traduce a `NULL` al guardar: es un detalle del protocolo y no tiene por qué llegar a la base.
+
+**Validado contra Gemini real sobre las 11 publicaciones.** En 7 el tópico coincide con lo que declararon los medios; en 4 se aparta, y todas se sostienen:
+
+- Los dos ángulos del cluster de Messi: `deportes + espectaculos` para el velorio, y **solo `deportes`** para el de las reacciones futbolísticas. Dos ángulos del mismo cluster con tratamiento distinto, que es lo que una votación por cluster no puede producir.
+- Galperin: los medios se partían entre política y negocios, el modelo resolvió `economia`.
+- El vuelco de la lancha frente a la Estatua de la Libertad: los dos medios dijeron `internacional` y el modelo puso `policiales + internacional`. **Es el único caso donde sobreescribió una señal unánime.** Se sostiene (un accidente con víctimas es policiales, y dejó internacional como secundario), pero es el patrón a vigilar.
+
+**El tópico se congela igual que el título.** Mover una publicación de Deportes a Espectáculos entre una entrega y la siguiente es el mismo problema que renombrarla: del otro lado ya está en una sección, con lectores encima. La única excepción son las síntesis anteriores a que el campo existiera, donde no hay nada que preservar.

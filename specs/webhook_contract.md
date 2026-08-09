@@ -1,0 +1,233 @@
+# 🔌 Contrato del webhook — Sin Ruido → back-end
+
+Documento para el equipo de back-end. Describe qué manda el motor, cómo validarlo y qué esperamos de vuelta.
+
+El motor **no expone las síntesis por polling**: las empuja apenas las genera. Del otro lado cada síntesis es una fila con vida propia (likes, comentarios, suscripciones), así que lo que importa acá es que sea siempre reconocible entre entregas.
+
+---
+
+## 1. Qué es una "síntesis"
+
+La unidad que se publica **no es la noticia ni el evento, sino el ángulo**.
+
+El motor agrupa toda la cobertura de un mismo hecho en un *cluster*, y después un modelo lee esos textos y los separa en los ángulos distintos que encuentra (el hecho central, sus consecuencias, las reacciones). **Un hecho puede producir varias publicaciones**, y lo hace seguido: en la última corrida real, 8 hechos dieron 11 publicaciones.
+
+Cada publicación trae, además del resumen neutro, **la comparativa de cómo lo contó cada medio** — qué destacó, qué omitió y una cita textual que lo respalda. Eso es el producto.
+
+---
+
+## 2. El request
+
+```
+POST <la URL que nos pasen>
+Content-Type: application/json; charset=utf-8
+X-SinRuido-Timestamp: 1754740800
+X-SinRuido-Signature: sha256=81011cb08fe2ac64a...
+```
+
+| Header | Qué es |
+|---|---|
+| `X-SinRuido-Timestamp` | Unix epoch en segundos, UTC, al momento de firmar |
+| `X-SinRuido-Signature` | `sha256=` + HMAC-SHA256 en hexadecimal (ver punto 6) |
+
+**Un request por síntesis, no lotes.** El status HTTP es el acuse de esa síntesis puntual. Si mandáramos un lote, un 200 parcial nos dejaría sin saber qué marcar como entregado.
+
+---
+
+## 3. El payload
+
+Este ejemplo es real, generado por el motor sobre la cobertura del 9/8 (recortado en las partes repetitivas).
+
+```jsonc
+{
+  "version": 1,
+  "evento": "sintesis.creada",
+
+  "sintesis": {
+    "id": 23,
+    "titulo": "Fallecimiento y velorio de Jorge Messi en Rosario",
+    "resumen": "Jorge Messi, padre y exrepresentante de Lionel Messi, falleció a los 68 años en el Sanatorio Centro de Rosario. Sus restos fueron velados en una ceremonia íntima en el cementerio El Prado…",
+    "puntos_clave": [
+      "Jorge Messi murió a los 68 años tras atravesar un delicado estado de salud.",
+      "Lionel Messi viajó de urgencia desde Estados Unidos junto a su esposa, Antonela Roccuzzo, y sus hijos.",
+      "El velorio se realizó en el cementerio El Prado en un ambiente de hermetismo, con fuerte custodia policial."
+    ],
+    "topico": "deportes",
+    "topico_secundario": "espectaculos",
+    "fecha_generacion": "2026-08-09T22:47:24Z"
+  },
+
+  "hecho": {
+    "id": 190,
+    "abierto": true
+  },
+
+  "comparativa": [
+    {
+      "medio": { "id": 1, "nombre": "La Nación" },
+      "destaco": "El comunicado oficial del Sanatorio Centro, los homenajes de Newell's y la trayectoria de Jorge como pilar de la carrera de su hijo.",
+      "omitio": "Los detalles sobre el operativo vial específico del cementerio.",
+      "cita": "Jorge Messi, el padre de Lionel, murió a los 68 años este sábado 8 de agosto a las 2 de la madrugada en el Sanatorio Centro, donde se encontraba internado"
+    },
+    {
+      "medio": { "id": 4, "nombre": "TN" },
+      "destaco": "Detalles geográficos de la ubicación del cementerio El Prado en Pérez y el esquema de control de ingresos.",
+      "omitio": "El paso a paso del viaje de Lionel Messi desde Miami.",
+      "cita": "El cementerio El Prado, en las afueras de Rosario, fue el elegido de la familia para despedir a uno de los pilares de la carrera del capitán argentino."
+    }
+  ],
+
+  "fuentes": [
+    {
+      "medio": { "id": 4, "nombre": "TN" },
+      "titulo": "Cómo es y dónde queda “El Prado”, el cementerio elegido por Lionel Messi para despedir a su papá",
+      "url": "https://tn.com.ar/deportes/futbol/2026/08/09/como-es-y-donde-queda-el-prado…",
+      "fecha_publicacion": "2026-08-09T12:21:23Z"
+    }
+  ]
+}
+```
+
+Tamaño real medido: **~7,5 KB** para una publicación con 4 medios y 14 fuentes.
+
+### Campos
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `version` | int | Versión de **este contrato**. Va en el cuerpo y no en la URL para que puedan soportar dos versiones a la vez durante una migración, sin coordinar un cambio de endpoint |
+| `evento` | `"sintesis.creada"` \| `"sintesis.actualizada"` | **Informativo.** El upsert por `sintesis.id` va igual en los dos casos. Sirve para decisiones suyas, como notificar suscriptores solo cuando la publicación es nueva |
+| `sintesis.id` | int | **La clave.** Estable para siempre, ver punto 5 |
+| `sintesis.titulo` | string | Qué recorte del hecho cubre esta publicación. Es el título que ve el usuario |
+| `sintesis.resumen` | string | Redacción neutra, solo hechos que sostenga más de un medio |
+| `sintesis.puntos_clave` | string[] | Entre 1 y 5 en la práctica. No asuman cantidad fija |
+| `sintesis.topico` | string | De la lista cerrada del punto 4 |
+| `sintesis.topico_secundario` | string \| null | De la misma lista. Ver punto 4 |
+| `sintesis.fecha_generacion` | ISO 8601 UTC | Ver punto 7 (entregas cruzadas) |
+| `hecho.id` | int | Agrupa los ángulos de una misma historia. Ver la advertencia de abajo |
+| `hecho.abierto` | bool | El hecho todavía puede sumar ángulos o actualizar los que tiene. Alcanza para mostrarlo como "en desarrollo" |
+| `comparativa[]` | array | **Una entrada por medio**, no por nota. Ordenada alfabéticamente por nombre |
+| `fuentes[]` | array | **Una entrada por nota.** Un medio puede aparecer varias veces. Ordenadas por fecha de publicación |
+
+**Sobre `hecho`: mandamos el id pero deliberadamente no un título.** Internamente el cluster tiene un nombre, pero es el titular de la primera nota que lo formó — o sea, el encuadre de un medio puntual. Mostrarlo como nombre "del hecho" sería presentar como neutro justo lo que el producto se propone no hacer. Si necesitan una etiqueta para agrupar en pantalla, avisen y la generamos neutra; no reciclen ese campo.
+
+**Sobre `medio`: usen el `id`, no el `nombre`.** El nombre es para mostrar y puede cambiar (un rebranding, una tilde corregida). Si lo usan como clave, esos cambios les dejan filas huérfanas.
+
+---
+
+## 4. Tópicos
+
+Lista **cerrada**. Si el valor pudiera ser texto libre terminarían con "Deportes", "deportes" y "Fútbol" conviviendo, y la navegación se rompe sola.
+
+```
+politica        internacional
+economia        deportes
+sociedad        espectaculos
+policiales      tecnologia
+ciencia         lifestyle
+```
+
+- `salud` y `educacion` entran en **sociedad**; `cultura` en **espectaculos**. Con 6 medios no juntan volumen propio.
+- **No hay `opinion` ni `columnistas`.** Eso es género, no tema: una columna sobre inflación es `economia`.
+- Si necesitan una categoría nueva, es un cambio nuestro de una línea. Pídanla.
+
+**`topico_secundario` puede venir en null**, y viene con valor solo cuando la cobertura pertenece con igual derecho a dos temas. El caso real que motivó el campo: el velorio de Jorge Messi lo publicó TN en deportes y Paparazzi en espectáculos, y las dos secciones tienen razón. Con un solo tópico, esa publicación desaparecería de una de las dos.
+
+Sugerencia de uso: **filtren por `topico OR topico_secundario`, ordenen y armen la navegación por `topico`.**
+
+El tópico lo decide el modelo leyendo los textos, no la sección de la URL. Medido sobre las 11 publicaciones reales: en 7 coincide con lo que declararon los medios y en 4 se aparta, siempre porque los medios discrepaban entre sí o porque la sección declarada se quedaba corta.
+
+**El tópico no cambia entre entregas** (ver punto 5).
+
+---
+
+## 5. Idempotencia: `sintesis.id` es la clave
+
+**`sintesis.id` no cambia nunca.** Es la clave que tienen que usar para el upsert.
+
+Está garantizado por diseño y no por casualidad: cuando llega cobertura nueva de un hecho el motor **re-sintetiza** — actualiza el contenido de los ángulos que ya existen y agrega los que aparecieron, pero **nunca los renombra, ni los parte, ni los combina**. La descomposición en ángulos se congela en la primera síntesis, justamente para no dejarlos con ítems huérfanos que ya tenían likes encima.
+
+Lo mismo vale cuando el motor detecta que dos clusters eran el mismo hecho y los une: las síntesis se mudan al sobreviviente con su id intacto en vez de borrarse.
+
+Consecuencia práctica: **van a recibir el mismo `sintesis.id` más de una vez**, con contenido actualizado. Es lo esperado, no un error nuestro.
+
+Qué puede cambiar entre entregas del mismo id:
+
+| | |
+|---|---|
+| ✅ Cambia | `resumen`, `puntos_clave`, `fecha_generacion` |
+| ✅ Puede sumar | `comparativa` (medios nuevos), `fuentes` (solo suma, nunca quita) |
+| ❌ No cambia | `titulo`, `topico`, `topico_secundario`, `hecho.id` |
+
+Que el título y el tópico estén congelados es la misma decisión: renombrar una publicación, o moverla de Deportes a Espectáculos entre una entrega y la siguiente, confunde a quien ya la vio.
+
+---
+
+## 6. Validar la firma
+
+Firmamos `"{timestamp}.{cuerpo_crudo}"` con HMAC-SHA256 y el secreto compartido.
+
+El timestamp va **dentro** del mensaje firmado, no solo en un header suelto: si viajara aparte, cualquiera podría reenviar un request capturado cambiándole la fecha y la firma seguiría validando.
+
+```python
+import hmac, hashlib, time
+
+def validar(cuerpo_crudo: bytes, timestamp: str, firma_recibida: str, secreto: str) -> bool:
+    # 1. Rechazar lo viejo — acota la ventana de replay.
+    if abs(time.time() - int(timestamp)) > 300:  # 5 minutos
+        return False
+
+    # 2. Recalcular la firma.
+    mensaje = timestamp.encode() + b"." + cuerpo_crudo
+    esperada = "sha256=" + hmac.new(secreto.encode(), mensaje, hashlib.sha256).hexdigest()
+
+    # 3. Comparación en tiempo constante, no con ==.
+    return hmac.compare_digest(esperada, firma_recibida)
+```
+
+Tres cosas críticas:
+
+1. **Usen el cuerpo crudo, los bytes tal como llegaron.** Si lo parsean a un objeto y lo vuelven a serializar para verificar, cualquier diferencia de espaciado o de escapes rompe la firma. En la mayoría de los frameworks hay que pedir el raw body explícitamente.
+2. **El cuerpo viene en UTF-8 sin escapar los acentos** (mandamos `"La Nación"`, no `"La Nación"`).
+3. **Comparen con `compare_digest`**, no con `==`.
+
+El secreto se comparte por variable de entorno de los dos lados, nunca en el repo. Lo definimos cuando tengan el endpoint.
+
+---
+
+## 7. Qué esperamos de la respuesta
+
+| Respuesta | Qué hacemos |
+|---|---|
+| **2xx** | La marcamos entregada y no volvemos a mandarla salvo que su contenido cambie |
+| **4xx** (menos 408, 425, 429) | **Dejamos de reintentar** y salta una alerta. Un 4xx lo leemos como "el contrato se rompió", y eso se arregla con una corrección, no insistiendo |
+| **408 / 425 / 429** | Reintentamos con espera creciente |
+| **5xx** o timeout | Reintentamos: 3 veces en el momento, y después una vez por corrida del pipeline (cada 15 min) hasta 5 corridas |
+
+**Respondan rápido: solo tienen que aceptar y encolar.** Cortamos a los 10 segundos y lo tratamos como fallo. Procesen en background.
+
+**Si algo les explota procesando, devuelvan 5xx.** Un 200 nos dice "quedó" y no lo reintentamos nunca más.
+
+Después de agotar los reintentos, la síntesis queda pendiente en nuestra base y sale una alerta. Cuando el problema esté resuelto del lado de ustedes la reenviamos con un disparo manual — nada se pierde.
+
+**Entregas cruzadas:** puede pasar que dos requests de la misma síntesis se solapen (uno lento que reintentamos, y el nuevo). Usen `fecha_generacion` para descartar la más vieja.
+
+---
+
+## 8. Volumen esperado
+
+Medido sobre corridas reales con 6 medios:
+
+- El pipeline corre **cada 15 minutos**
+- Una corrida activa genera del orden de **1 a 11 publicaciones**
+- Cada request pesa **~7,5 KB**
+- Sobre 57 clusters, 11 llegaron a publicar
+
+O sea: ráfagas cortas de pocos requests cada 15 minutos. No hay nada que justifique una cola del lado de ustedes por volumen — sí por no bloquear la respuesta.
+
+---
+
+## 9. Lo que este contrato **no** cubre
+
+- **Categorías sin hecho** (horóscopos, recetas, quiniela). No pasan por síntesis porque no hay enfoques que comparar, y no salen por este webhook. Quedan etiquetadas en la base del motor y cómo se consumen es una conversación aparte.
+- **Imágenes.** No mandamos ninguna; las fuentes van como URL.
+- **Borrado.** No hay evento de baja: el motor nunca retracta una publicación entregada.

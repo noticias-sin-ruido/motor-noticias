@@ -57,6 +57,8 @@ sin_ruido/
 │       ├── preprocessing.py    # Evidencia (TF-IDF + NER) para el prompt (Fase 4)
 │       ├── synthesis.py        # Síntesis por ángulo con Gemini (Fase 4)
 │       ├── categorias.py       # Notas sin hecho (horóscopo, recetas): no se agrupan
+│       ├── topicos.py          # Taxonomía cerrada + sección declarada por el medio (Fase 4)
+│       ├── webhook_delivery.py # Entrega firmada de las síntesis al back-end (Fase 4)
 │       ├── alerts.py           # Avisos por mail ante fallo de cualquier paso
 │       └── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
 │
@@ -188,6 +190,7 @@ docker run -p 8000:8000 \
 - `GEMINI_API_KEY` — Google Gemini (usada desde Fase 4)
 - `ENVIRONMENT` — `development` | `production`
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)
+- `WEBHOOK_URL` / `WEBHOOK_SECRET` — entrega de síntesis al back-end. **Sin ellas la entrega no corre**: las síntesis se acumulan en la base con `enviado_backend=False` y salen cuando se configuran (ver `webhook_contract.md`)
 
 ---
 

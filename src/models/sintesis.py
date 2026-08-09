@@ -59,6 +59,23 @@ class Sintesis(SQLModel, table=True):
     puntos_clave: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
     comparativa_enfoques: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONVariant))
 
+    # De qué tema es. Valores de la lista cerrada de `services/topicos.py`: es
+    # lo que le permite al back-end armar secciones y filtros, y con texto libre
+    # esa navegación se rompe sola.
+    #
+    # Se guarda como string y no como Enum de base para poder agregar una
+    # categoría sin migrar la tabla; la garantía de que el valor es válido la da
+    # el `response_schema` del modelo, que sólo admite los de la lista.
+    #
+    # El secundario existe porque hay coberturas que pertenecen con igual
+    # derecho a dos temas: la muerte del padre de Messi la publicaron TN en
+    # deportes y Paparazzi en espectáculos, y las dos son correctas. Con un solo
+    # tópico, la publicación desaparecería de una de las dos secciones.
+    #
+    # Nulos en las síntesis generadas antes de que existiera el campo.
+    topico: Optional[str] = Field(default=None, index=True)
+    topico_secundario: Optional[str] = Field(default=None, index=True)
+
     fecha_generacion: datetime = Field(
         default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False)
     )

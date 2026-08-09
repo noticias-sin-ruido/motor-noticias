@@ -21,6 +21,7 @@ from src.services.synthesis import (
     RespuestaSintesis,
     SintesisBloqueada,
 )
+from src.services.topicos import NINGUNO, Topico, TopicoSecundario
 
 
 @pytest.fixture
@@ -70,12 +71,20 @@ def crear_noticia(session: Session, medio: Medio, n: int, cluster: Cluster) -> N
     return noticia
 
 
-def angulo(titulo="El hecho", notas=(1, 2), id_existente=None) -> AnguloGenerado:
+def angulo(
+    titulo="El hecho",
+    notas=(1, 2),
+    id_existente=None,
+    topico=Topico.SOCIEDAD,
+    secundario=NINGUNO,
+) -> AnguloGenerado:
     return AnguloGenerado(
         id_existente=id_existente,
         titulo_angulo=titulo,
         resumen_neutro="Pasó algo, contado sin adjetivos.",
         puntos_clave=["Un hecho verificado"],
+        topico=topico,
+        topico_secundario=TopicoSecundario(secundario),
         comparativa_enfoques=[
             EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="una frase")
         ],
@@ -232,6 +241,8 @@ class TestComparativaValidada:
                 titulo_angulo="El hecho",
                 resumen_neutro="...",
                 puntos_clave=[],
+                topico=Topico.SOCIEDAD,
+                topico_secundario=TopicoSecundario(NINGUNO),
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="La Nacion", destaco="X", omitio="Y", cita="z")
                 ],
@@ -255,6 +266,8 @@ class TestComparativaValidada:
                 titulo_angulo="El hecho",
                 resumen_neutro="...",
                 puntos_clave=[],
+                topico=Topico.SOCIEDAD,
+                topico_secundario=TopicoSecundario(NINGUNO),
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
                     EnfoqueMedio(medio="Clarín", destaco="X", omitio="Y", cita="z"),
@@ -268,6 +281,63 @@ class TestComparativaValidada:
 
         guardada = session.exec(select(Sintesis)).one()
         assert list(guardada.comparativa_enfoques) == ["TN"]
+
+
+class TestTopico:
+    """
+    El tópico es lo que le permite al back-end armar secciones y filtros. Lo
+    elige el modelo de una lista cerrada; acá se prueba cómo se guarda.
+    """
+
+    def test_guarda_el_topico_del_angulo(self, session: Session, medios):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[angulo(topico=Topico.DEPORTES)])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.topico == "deportes"
+        assert guardada.topico_secundario is None
+
+    def test_guarda_el_secundario_cuando_hay_doble_pertenencia(
+        self, session: Session, medios
+    ):
+        """
+        La muerte del padre de Messi la publicaron TN en deportes y Paparazzi en
+        espectáculos: con un solo tópico desaparecería de una de las secciones.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(topico=Topico.DEPORTES, secundario="espectaculos")]
+        )
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.topico == "deportes"
+        assert guardada.topico_secundario == "espectaculos"
+
+    def test_ninguno_se_guarda_como_null(self, session: Session, medios):
+        """
+        `ninguno` existe para que el enum del modelo no tenga que ser nulable.
+        Es un detalle del protocolo y no tiene por qué llegar a la base.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[angulo(secundario=NINGUNO)])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.topico_secundario is None
 
 
 class TestDescomposicionCongelada:
@@ -311,6 +381,45 @@ class TestDescomposicionCongelada:
         assert original.resumen_neutro == "Pasó algo, contado sin adjetivos."
         assert original.enviado_backend is False        # hay que reentregarlo
         assert len(session.exec(select(Sintesis)).all()) == 1
+
+    def test_no_le_cambia_el_topico_a_un_angulo_publicado(self, session: Session, medios):
+        """
+        Mover una publicación de Deportes a Espectáculos entre una entrega y la
+        siguiente es el mismo problema que renombrarla: del otro lado ya está en
+        una sección, con lectores encima.
+        """
+        cluster, original = self._con_angulo_publicado(session, medios)
+        original.topico = "deportes"
+        session.add(original)
+        session.commit()
+        crear_noticia(session, medios[2], 3, cluster)
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(notas=(1, 2, 3), id_existente=original.id, topico=Topico.POLITICA)]
+        )
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        session.refresh(original)
+        assert original.topico == "deportes"
+
+    def test_completa_el_topico_si_todavia_no_lo_tenia(self, session: Session, medios):
+        """
+        Las síntesis anteriores a que el campo existiera no tienen nada que
+        preservar, solo un hueco que llenar.
+        """
+        cluster, original = self._con_angulo_publicado(session, medios)
+        assert original.topico is None
+        crear_noticia(session, medios[2], 3, cluster)
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(notas=(1, 2, 3), id_existente=original.id, topico=Topico.POLITICA)]
+        )
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        session.refresh(original)
+        assert original.topico == "politica"
 
     def test_no_le_quita_noticias_a_un_angulo_publicado(self, session: Session, medios):
         cluster, original = self._con_angulo_publicado(session, medios)

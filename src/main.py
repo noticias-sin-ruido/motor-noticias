@@ -18,6 +18,7 @@ from .services.ingestion import ingerir_todos_los_medios
 from .services.search import buscar_noticias_similares, listar_clusters
 from .services.synthesis import sintetizar_pendientes
 from .services.vectorization import vectorizar_pendientes
+from .services.webhook_delivery import entregar_pendientes
 
 logger = logging.getLogger(__name__)
 
@@ -78,14 +79,19 @@ def _job_ingesta_programada() -> None:
         # se consolidan los clusters que quedaron describiendo el mismo hecho.
         fusion = _correr_paso(session, "fusión de clusters", fusionar_clusters_duplicados)
 
-        # Es el único paso que corta la cadena. Sintetizar sin haber consolidado
-        # publicaría dos veces el mismo hecho, y una publicación ya entregada al
-        # backend no se retracta.
+        # Es el único paso que condiciona a otro. Sintetizar sin haber
+        # consolidado publicaría dos veces el mismo hecho, y una publicación ya
+        # entregada al backend no se retracta.
         if fusion is None:
             logger.error("Se omite la síntesis porque falló la fusión de clusters")
-            return
+        else:
+            _correr_paso(session, "síntesis", sintetizar_pendientes)
 
-        _correr_paso(session, "síntesis", sintetizar_pendientes)
+        # La entrega sí corre igual, porque es un barrido de todo lo pendiente y
+        # no un envío de lo recién generado: lo que quedó sin entregar de
+        # corridas anteriores no tiene por qué esperar a que se arregle la
+        # fusión. Por lo mismo tampoco necesita un job de reintento aparte.
+        _correr_paso(session, "entrega al backend", entregar_pendientes)
 
 
 @asynccontextmanager
@@ -152,6 +158,20 @@ def synthesize(session: Session = Depends(get_session)):
     no duplica publicaciones ni gasta de más.
     """
     stats = sintetizar_pendientes(session)
+    return {"status": "ok", **stats}
+
+
+@app.post("/deliver")
+def deliver(forzar: bool = False, session: Session = Depends(get_session)):
+    """
+    Empuja al back-end las síntesis que quedaron sin entregar.
+
+    Es el mismo barrido que corre el scheduler, expuesto para disparo manual.
+    `forzar=true` incluye además las que agotaron `WEBHOOK_MAX_INTENTOS`: es lo
+    que se usa cuando el back-end estuvo rechazando por un problema suyo y hay
+    que reenviarles lo trabado una vez resuelto.
+    """
+    stats = entregar_pendientes(session, forzar=forzar)
     return {"status": "ok", **stats}
 
 
