@@ -47,6 +47,7 @@ sin_ruido/
 │   │   ├── __init__.py         # Imports centralizados de modelos
 │   │   ├── medio.py            # Modelo: Medio (fuente de noticias)
 │   │   ├── noticia.py          # Modelo: Noticia (con embedding Vector)
+│   │   ├── tipos.py            # Tipos de columna compartidos (JSONB/JSON)
 │   │   ├── cluster.py          # Modelo: Cluster (agrupación por evento)
 │   │   └── sintesis.py         # Modelos: Sintesis (un ángulo) + SintesisNoticia
 │   └── services/
@@ -183,6 +184,16 @@ docker run -p 8000:8000 \
   -e ENVIRONMENT=production \
   sin-ruido:latest
 ```
+
+### Manejo del tiempo
+
+**Se guarda en UTC, se muestra en UTC-3.** La decisión vive en `src/tiempo.py`, que es el único lugar donde se toca una zona horaria.
+
+El almacenamiento no puede pasarse a hora local por tres razones concretas: `fecha_publicacion` llega del RSS en UTC y se compara contra "ahora" para la ventana de 12 h del cluster (con una punta en local la ventana se correría 3 h sin que nada falle a la vista); `webhook_contract.md` ya le prometió fechas UTC con `Z` al back-end; y ya nos costó un bug real — la firma del webhook usaba `datetime.utcnow().timestamp()`, que lee un naive como hora local, y el receptor rechazaba todo con 401.
+
+Lo que sí es local es todo lo que lee una persona: la API devuelve ISO con el offset explícito (`2026-08-09T18:48:35-03:00`) y el pipeline loguea su arranque y cierre en hora argentina. `GET /` expone `hora_local` para verificar el reloj del contenedor.
+
+En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— sino `tiempo.ahora_utc()`, que devuelve exactamente lo mismo (UTC naive) sin el warning.
 
 ### Variables de entorno críticas
 

@@ -40,7 +40,7 @@ def medios(session: Session) -> list:
         m = Medio(
             nombre=nombre,
             url_base=f"https://{nombre.replace(' ', '').lower()}.com",
-            feed_rss=f"https://{nombre.replace(' ', '').lower()}.com/rss",
+            feeds_rss=[f"https://{nombre.replace(' ', '').lower()}.com/rss"],
         )
         session.add(m)
         creados.append(m)

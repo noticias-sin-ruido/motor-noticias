@@ -519,6 +519,118 @@ Sobre el corte: un **4xx no se reintenta** (salvo 408, 425 y 429). Un 4xx signif
 
 Para que el corte no sea una trampa sin salida hay dos escapes: una **re-síntesis resetea el contador** (el cuerpo cambió, merece otra oportunidad) y `POST /deliver?forzar=true` reincluye las agotadas cuando el problema del otro lado ya está resuelto.
 
+### Lo que mostró la primera corrida completa con la fase cerrada
+Flujo entero sobre 1.354 noticias: 39 s punta a punta, 7 llamadas al modelo (20.639 tokens de entrada, 3.281 de salida, **0 de razonamiento**), **US$ 0,0034 la corrida**, y las 17 publicaciones entregadas y verificadas por un receptor independiente. El costo dejó de ser una preocupación: son ~2 centavos de dólar cada 100 publicaciones.
+
+El embudo real, en cambio, es angosto y conviene tenerlo a la vista:
+
+| | notas | |
+|---|---:|---|
+| ingeridas | 1.354 | 100% |
+| dentro de un cluster | 210 | 15,5% |
+| respaldando una publicación | 50 | 3,7% |
+
+**39 de 66 clusters son de exactamente 2 notas** y 13 de las 17 publicaciones tienen exactamente 2 medios: el producto vive pegado al mínimo. No es una falla del clustering —1.116 notas simplemente no tienen par en ningún otro medio— sino lo que hay cuando 6 medios cubren agendas distintas. La palanca es **sumar medios**, no bajar el umbral (ya medido: degrada). Cada medio nuevo multiplica los pares posibles en vez de sumarlos.
+
+Dato asociado: **El Cronista agrupa solo el 5,7%** de sus 176 notas y participó de 3 publicaciones. Es económico-financiero puro y cuando La Nación o TN tocan economía lo hacen desde otro lado. Hoy, en los hechos, el producto es **La Nación contra TN**, con las revistas apareciendo en espectáculos.
+
+### La ventana de síntesis perdía material en silencio
+De esa misma corrida salió que **30 clusters publicables, con 85 noticias adentro, nunca se intentaron sintetizar**: todos con la marca en `None`.
+
+La causa era el recorte de `clusters_pendientes`, que descartaba lo creado hace más de `HORAS_CLUSTER_ABIERTO * 2` (24 h). Esos 30 eran anteriores a que la Fase 4 existiera, así que en su momento no fue un bug — pero el mecanismo sí es un problema vivo, y contradice la contingencia sobre la que está armado todo el pipeline. Nos dijimos *"cada paso es idempotente, la corrida siguiente retoma sola"*; **para la síntesis eso vencía a las 24 horas**, y nada lo decía. La alerta avisa que un paso falló, no que quedó material inalcanzable.
+
+Dos cambios:
+
+- **El plazo se desacopla y se ensancha**: `HORAS_MAXIMAS_SIN_SINTETIZAR = 72`. El `* 2` sobre la ventana del cluster era un acoplamiento sin razón — son dos preguntas distintas. 72 h le da margen a una caída de fin de semana largo (viernes a la noche a lunes a la mañana son ~60 h).
+- **Lo que caduca deja rastro.** `descartar_vencidos_sin_sintetizar` cuenta los que **podrían haber publicado** (los que caducan con un solo medio no perdieron nada), les pone la marca y avisa. La marca hace el aviso terminal: sin eso se repetiría en cada corrida para siempre, y una alerta que se repite sin novedad es una alerta que se deja de leer.
+
+Que una noticia de hace tres días deje de ser candidata sigue estando bien. Lo que estaba mal era el silencio.
+
+*Nota sobre los datos de desarrollo:* con el plazo nuevo esos 30 clusters volvían a estar en alcance, y se habrían publicado noticias del 08/08. Se los marcó a mano como históricos, por única vez, para no ensuciar con material viejo el corpus que venimos usando para evaluar. En producción el mismo caso —una caída real— sí debería terminar en publicación, que es justamente lo que arregla el cambio.
+
+### Publicaciones que decían comparar y mostraban una sola voz
+Dos de las 17 (`Evolución de la inflación` y `Aumento de la mora`) tenían notas de La Nación y El Cronista, así que pasaban el filtro, pero el modelo escribió **una sola entrada de comparativa**. Salían al aire como comparativa de enfoques mostrando un solo enfoque, que es exactamente lo que el producto promete no hacer.
+
+El filtro contaba medios **con notas**; la comparativa la escribe el modelo y puede tener menos. Ahora el mínimo se exige **en los dos lados**: noticias y comparativa escrita. El prompt ya lo pedía explícitamente y aun así pasaba — es la clase de cosa que el código tiene que garantizar, no pedir.
+
+Efecto lateral correcto: si al descartar un medio inventado la comparativa queda con una sola voz, el ángulo tampoco se publica. Si una de las dos voces era alucinada, no había dos voces.
+
+Mirando eso apareció algo peor en la ruta de actualización: **la comparativa se pisaba entera**, así que una re-síntesis podía degradar un ángulo ya publicado de dos voces a una. Además de ser peor que no haberlo publicado, incumple lo que `webhook_contract.md` ya le promete al back-end: *la comparativa suma medios, no los quita*. Ahora se fusiona — la entrada nueva de un medio reemplaza a la vieja, pero un medio que ya estaba no desaparece porque el modelo no lo haya vuelto a mencionar.
+
+### Segunda ronda de medios: ninguno pasa, y el motivo cambió
+El embudo angosto (3,7% de las notas llega a una publicación) apunta a sumar medios, así que se reevaluaron cinco candidatos. **Ninguno pasa el criterio de Fase 2**, pero los motivos son distintos y conviene distinguirlos:
+
+| Medio | Feed vivo | `content:encoded` | Cuerpo | Agenda |
+|---|---|---|---|---|
+| Clarín | sí, 26 feeds | **no** | 201 car (copete) | nacional ✓ |
+| Perfil | sí, 13 feeds | **no** | 190 car (copete) | nacional ✓ |
+| Buenos Aires Times | sí, 100 items | **no** | 154 car (copete) | es Perfil en inglés |
+| Cadena 3 | **no — congelado en 2018** | sí | 190 car (copete) | Córdoba |
+| Diario Crónica | sí, 500 items/feed | sí, **vacío** | 0-50 car (epígrafe) | Chubut ✗ |
+| La Voz | servidores caídos | — | — | Córdoba |
+
+Dos hallazgos que no estaban en la evaluación de Fase 2:
+
+- **Tener el tag no es tener el cuerpo.** Cadena 3 y Diario Crónica declaran `content:encoded` y adentro traen el copete o directamente el epígrafe de la foto ("La hipertensión, una de las enfermedades crónicas", 50 caracteres). El criterio hay que medirlo en caracteres, no en presencia del tag.
+- **Un medio solo suma si cubre los mismos hechos.** Diario Crónica publica 500 items por feed, frescos y bien formados, pero su agenda es Comodoro Rivadavia: arenas silíceas de Chubut, Telebingo Chubutense, paritaria petrolera. Casi nada se cruza con lo que cubren La Nación o TN, así que sumarlo agregaría volumen sin agregar un solo par. Lo mismo Cadena 3 y La Voz, las dos de Córdoba.
+
+Por eso los candidatos correctos son Clarín y Perfil: son nacionales y **ya se los vio cubriendo hechos que hoy publicamos** (CAME/Galperin y Milei/Lula aparecieron en la muestra de los dos).
+
+**Se probó la extracción desde la página**, que es para lo que `trafilatura` está reservado en `requirements.txt` desde Fase 2:
+
+| | mediana extraída | fallos | tiempo | `robots.txt` |
+|---|---:|---:|---:|---|
+| Clarín | 4.207 car | 0/6 | 0,3 s | permite las rutas de artículo |
+| Perfil | 4.402 car | 0/6 | 0,3-0,5 s | permite las rutas de artículo |
+
+Eso los deja en el medio del pelotón de lo que ya tenemos (El Cronista 4.574, La Nación 3.805, TN 2.648, Ciudad 2.281). Adoptarlo **cambiaría la regla dura de Fase 2** —"el feed debe traer el artículo completo"— por una segunda vía de ingesta: un request HTTP por artículo en vez de uno por feed, con la fragilidad de depender del maquetado de cada medio. Queda como decisión abierta.
+
+### Revisión del código con las fases cerradas
+Con Fase 4 terminada se revisó todo el motor. Lo que apareció no fueron bugs sueltos sino **tres lugares donde el código no hacía lo que su propia documentación decía**, todos introducidos en las últimas correcciones. Vale anotarlo como patrón: el riesgo no estuvo en lo viejo sino en lo recién escrito.
+
+**El descarte por caducidad era irreversible, y la alerta prometía lo contrario.** El mail decía "si esto aparece sin que haya habido una caída, el plazo quedó corto", pero `descartar_vencidos_sin_sintetizar` estampaba `noticias_al_sintetizar` con el conteo real de noticias. Subir el plazo devolvía los clusters a la ventana de fecha y la guarda anti-bucle los salteaba igual: la recomendación era mentira. Ahora se marcan con `MARCA_CADUCADO = -1`, un valor imposible como conteo, que `clusters_pendientes` no toma como intento. Verificado sobre la base real: 14 de 14 clusters caducados pasan la guarda con la marca nueva, y 14 de 14 quedaban bloqueados con la anterior.
+
+**El aviso de ese descarte se silenciaba solo.** `enviar_alerta` tiene un cooldown de 60 minutos por clave y el pipeline corre cada 15: los clusters que caducaran en las corridas 2, 3 y 4 de la hora se descartaban sin un solo mail — exactamente el silencio que la función existía para eliminar, y encima terminal. Se agregó `ignorar_cooldown`, pensado solo para avisos que informan algo irreversible y que el emisor garantiza no repetir. El cooldown protege contra un fallo que se repite; frente a un evento único protege de más.
+
+**La misma forma, al revés, en el webhook.** La alerta de síntesis agotadas consultaba *todas* las trabadas después de cada barrido, así que una sola disparaba un mail por hora para siempre. Ahora avisa solo por las que cruzaron el tope en esa corrida, y el total queda en `agotadas_total` como visibilidad sin ruido.
+
+**La comparativa podía nombrar un medio ausente de las fuentes.** `_comparativa_validada` filtraba contra los medios del **cluster**, no contra los del ángulo. Un ángulo con notas de TN y La Nación podía publicarse describiendo a TN y El Cronista: pasaba el filtro de dos entradas, pero El Cronista no aparecía en sus `fuentes`. Para el front eso es un enfoque sin una sola nota que lo respalde, y contradice la lectura natural de `webhook_contract.md`. Ahora el alcance es el ángulo; en una actualización incluye además los medios que el ángulo ya tenía, porque sus noticias siguen ahí.
+
+**"Un feed que falla no frena a los demás" era cierto solo para errores de red.** Cualquier otra excepción se escapaba de `ingerir_medio` sin commit y abortaba la ingesta de todos los medios que faltaban. Además el commit era por medio, así que un fallo tardío se llevaba puesto lo que ya habían traído los feeds anteriores. Ahora el commit es por feed y no sale ninguna excepción de `ingerir_feed`. El propio test destapó que la primera versión del arreglo solo protegía el procesamiento y no la descarga.
+
+De paso: `stats["error"]` guardaba solo el último feed fallado —con 9 feeds, que cayera uno se leía igual que caerse entero— y pasó a ser `errores`, una lista.
+
+### Los feeds por sección son archivo, no cobertura
+Buscando ensanchar el embudo apareció que usábamos **un solo feed por medio**, el general, cuando los diarios grandes publican también uno por sección. La primera medición parecía contundente:
+
+| Medio | feed general | unión de secciones | exclusivos |
+|---|---:|---:|---:|
+| La Nación | 89 items | 342 | **253** |
+| TN | 100 items | +85 en 3 secciones | 85 |
+| El Cronista | 33 items | 34 | 1 |
+| Ciudad Magazine | 25 items | 25 | 0 |
+
+Con eso parecía que veíamos el 26% de La Nación. **La conclusión era equivocada** y se probó en producción: sumar 8 feeds de sección a cada uno de los dos grandes trajo 151 noticias, y de esas
+
+- la **antigüedad mediana fue de 25,5 h** (la más vieja, de casi 4 años),
+- solo **14 entraban en la ventana de agrupamiento**,
+- y formaron **cero pares**: la mejor similitud entre ellas fue 0,556, muy por debajo del umbral.
+
+El error fue comparar **fotos únicas** en vez de pensar en muestreo continuo. El feed general es una ventana móvil de actualidad —7 h en La Nación, 23 h en TN— y las secciones guardan meses de archivo. Los 253 "exclusivos" eran viejos, no cobertura desplazada.
+
+La prueba definitiva: **dentro de la ventana temporal que cubre el general, las secciones de La Nación aportan 0 items que el general no tenga.** TN muestra 41, pero todos de más de 10 h — con el polling cada 15 minutos ya los habíamos capturado cuando eran nuevos. Con 89 items cubriendo 7 h y un ciclo de 15 minutos, el margen es de 28×.
+
+**Se revirtió a un feed por medio.** Lo que sí quedó, porque son mejoras independientes:
+
+- **El modelo soporta varios feeds** (`Medio.feeds_rss`, lista JSONB, migración `a72ec65ef1f1`). No cuesta nada con listas de un elemento y sirve el día que entre un medio con el feed general flaco.
+- **La deduplicación mira `guid` y `url`, no solo `guid`.** Con varios feeds eso dejó de ser redundante: el mismo artículo aparece en el general y en su sección, y nada garantiza que le pongan el mismo guid — la segunda copia llegaría al `INSERT` y reventaría contra el índice único de `url`, tirando la ingesta entera del medio. En la corrida real se atraparon 317 duplicados en La Nación y 304 en TN, sin una sola colisión.
+- **Un feed que falla no frena a los demás del mismo medio.**
+
+Dos cosas para el registro:
+
+- **`tn.com.ar/feed/<seccion>/` responde 200 pero ignora la sección** y devuelve el feed general. La que filtra de verdad es la de Arc. Es una trampa fácil de no ver, porque no falla: miente.
+- **`fecha_publicacion` puede venir muy mal.** Una nota sobre el San Lorenzo-Huracán de ayer llegó con fecha de hace 1.408 días: es una página *evergreen* que el medio actualiza sin tocar el `pubDate`. Esa nota queda fuera de la ventana de agrupamiento aunque sea cobertura actual. Es anterior a este cambio y no se tocó — queda anotado.
+
 ### El bug que el mock no podía ver: `utcnow().timestamp()`
 Se probó la entrega contra un receptor local que valida la firma **copiando literalmente el pseudocódigo del contrato**. Rechazó las 11 síntesis con `401 timestamp vencido`.
 

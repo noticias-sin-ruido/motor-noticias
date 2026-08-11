@@ -16,7 +16,7 @@ Ver specs/change_logs.md, Fase 4, para el detalle de las decisiones.
 import json
 import logging
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field as PydanticField
@@ -29,12 +29,22 @@ from tenacity import (
 )
 
 from ..config import settings
+from ..tiempo import ahora_utc
 from ..models import Cluster, Medio, Noticia, Sintesis, SintesisNoticia
+from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO, ESTADO_PROCESADO
 from .preprocessing import construir_evidencia
 from .topicos import NINGUNO, Topico, TopicoSecundario, topico_declarado
 
 logger = logging.getLogger(__name__)
+
+# Marca de `Cluster.noticias_al_sintetizar` para "caducó sin intentarse nunca".
+#
+# Es un valor imposible como conteo, y eso es a propósito: distingue el descarte
+# por caducidad de un intento real, así que subir `HORAS_MAXIMAS_SIN_SINTETIZAR`
+# vuelve a poner esos clusters en carrera. Con el conteo real, la recuperación
+# que recomienda la alerta no haría nada.
+MARCA_CADUCADO = -1
 
 
 class SintesisBloqueada(Exception):
@@ -124,10 +134,13 @@ def clusters_pendientes(session: Session) -> List[Cluster]:
 
     Se incluyen los `procesado` recién cerrados porque un cluster puede alcanzar
     el mínimo de medios en los últimos minutos de su ventana y cerrarse antes de
-    la corrida siguiente; sin esto perdería su publicación en silencio. El
-    recorte por fecha evita revivir noticias viejas al arrancar el sistema.
+    la corrida siguiente; sin esto perdería su publicación en silencio.
+
+    El recorte por fecha evita revivir noticias viejas al arrancar el sistema.
+    Lo que cae del otro lado no se pierde callado: `descartar_vencidos_sin_sintetizar`
+    lo cuenta y avisa.
     """
-    limite = datetime.utcnow() - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO * 2)
+    limite = ahora_utc() - timedelta(hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR)
 
     candidatos = session.exec(
         select(Cluster).where(
@@ -144,10 +157,11 @@ def clusters_pendientes(session: Session) -> List[Cluster]:
             select(Noticia).where(Noticia.cluster_id == cluster.id)
         ).all()
 
-        if (
-            cluster.noticias_al_sintetizar is not None
-            and len(noticias) <= cluster.noticias_al_sintetizar
-        ):
+        # `MARCA_CADUCADO` no cuenta como intento: si el cluster volvió a entrar
+        # en la ventana de fecha —porque se subió el plazo— tiene que poder
+        # sintetizarse, que es justamente la recuperación que promete la alerta.
+        marca = cluster.noticias_al_sintetizar
+        if marca is not None and marca != MARCA_CADUCADO and len(noticias) <= marca:
             continue
 
         sin_angulo = [n for n in noticias if n.id not in ya_con_angulo]
@@ -155,6 +169,82 @@ def clusters_pendientes(session: Session) -> List[Cluster]:
             pendientes.append(cluster)
 
     return pendientes
+
+
+def descartar_vencidos_sin_sintetizar(session: Session) -> int:
+    """
+    Marca y denuncia los clusters que caducaron sin haberse intentado nunca.
+
+    Que un cluster viejo deje de ser candidato está bien —una noticia de hace
+    tres días no es noticia— pero hasta acá eso pasaba **en silencio**. Y ese
+    silencio contradice la contingencia sobre la que está armado el pipeline:
+    "todo paso es idempotente, la corrida siguiente retoma sola". Para la
+    síntesis eso era falso pasado el plazo, y nada lo decía.
+
+    Medido sobre datos reales: 30 clusters publicables con 85 notas adentro
+    murieron así, todos con la marca en `None` — o sea, sin que el paso los
+    mirara una sola vez.
+
+    Solo se cuentan los que **podrían haber publicado** (alcanzaron el mínimo de
+    medios). Un cluster que caduca con un solo medio no perdió nada: no tenía
+    con qué comparar.
+
+    Se los marca con `MARCA_CADUCADO` para que el aviso no se repita en cada
+    corrida —una alerta que se repite sin novedad es una alerta que se deja de
+    leer— pero **sin cerrarles la puerta**: esa marca no cuenta como intento, así
+    que subir el plazo los devuelve a la carrera. Con el conteo real de noticias
+    quedaban descartados para siempre y la recomendación de la alerta era
+    mentira.
+
+    El aviso ignora el cooldown a propósito: el descarte es terminal y no se va
+    a volver a informar, así que si el cooldown se lo traga esa información se
+    pierde. El emisor garantiza no repetir, que es la condición para usarlo.
+    """
+    limite = ahora_utc() - timedelta(hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR)
+
+    vencidos = session.exec(
+        select(Cluster).where(
+            Cluster.estado.in_([ESTADO_ABIERTO, ESTADO_PROCESADO]),
+            Cluster.fecha_creacion < limite,
+            Cluster.noticias_al_sintetizar.is_(None),
+        )
+    ).all()
+
+    perdidos = [
+        c for c in vencidos
+        if len({n.medio_id for n in c.noticias}) >= settings.MIN_MEDIOS_CLUSTER
+    ]
+
+    for cluster in vencidos:
+        cluster.noticias_al_sintetizar = MARCA_CADUCADO
+        session.add(cluster)
+    session.commit()
+
+    if perdidos:
+        notas = sum(len(c.noticias) for c in perdidos)
+        logger.error(
+            f"{len(perdidos)} clusters publicables caducaron sin sintetizarse "
+            f"({notas} noticias): {[c.id for c in perdidos]}"
+        )
+        enviar_alerta(
+            asunto=f"[Sin Ruido] {len(perdidos)} clusters publicables caducaron sin publicar",
+            cuerpo=(
+                f"Alcanzaron {settings.MIN_MEDIOS_CLUSTER} medios pero pasaron "
+                f"{settings.HORAS_MAXIMAS_SIN_SINTETIZAR} h sin que la síntesis los "
+                f"mirara, así que ya no son candidatos.\n\n"
+                f"Clusters: {[c.id for c in perdidos]}\n"
+                f"Noticias involucradas: {notas}\n\n"
+                "Si esto aparece sin que haya habido una caída, el plazo de "
+                "HORAS_MAXIMAS_SIN_SINTETIZAR quedó corto: subirlo los vuelve a "
+                "poner en carrera en la corrida siguiente."
+            ),
+            clave="sintesis:vencidos",
+            # Terminal y sin repetición: si el cooldown se lo traga, esta
+            # información no aparece nunca más.
+            ignorar_cooldown=True,
+        )
+
+    return len(perdidos)
 
 
 def construir_prompt(
@@ -345,32 +435,61 @@ def _persistir(
     """
     Guarda los ángulos válidos. Los inválidos se descartan sin tocar el cluster.
 
-    Un ángulo nuevo se publica solo si sus noticias cubren `MIN_MEDIOS_CLUSTER`
-    medios distintos: sin dos voces no hay enfoques que comparar. El filtro va
-    acá, sobre el ángulo, y no sobre el cluster — un cluster de 5 medios puede
-    contener un ángulo que cubrió uno solo.
+    Un ángulo nuevo se publica solo si cubre `MIN_MEDIOS_CLUSTER` medios, y eso
+    se exige **dos veces**: en las noticias que lo respaldan y en la comparativa
+    escrita. Con una sola de las dos no alcanza. Medido en una corrida real: dos
+    ángulos tenían notas de La Nación y El Cronista —así que pasaban el filtro
+    de noticias— pero el modelo escribió una sola entrada de comparativa en cada
+    uno. Se publicaban como comparativa mostrando una sola voz, que es
+    precisamente lo que el producto promete no hacer.
+
+    El filtro va acá, sobre el ángulo, y no sobre el cluster: un cluster de 5
+    medios puede contener un ángulo que cubrió uno solo.
 
     A los ángulos que ya existen no se les aplica ese filtro ni se les quitan
     noticias: ya se publicaron, y del otro lado tienen lectores encima.
     """
     por_numero = {numero: n for numero, n in enumerate(enviadas, start=1)}
-    nombres_del_cluster = sorted({medios[n.medio_id] for n in enviadas})
     existentes = {s.id: s for s in cluster.sintesis}
     stats = {"creados": 0, "actualizados": 0, "descartados": 0}
 
     for angulo in respuesta.angulos:
         notas = [por_numero[n] for n in angulo.notas if n in por_numero]
-        comparativa = _comparativa_validada(
-            angulo.comparativa_enfoques, nombres_del_cluster
-        )
 
         # Un `id_existente` que no corresponde a este cluster es alucinación:
         # se trata como ángulo nuevo.
         sintesis = existentes.get(angulo.id_existente) if angulo.id_existente else None
 
+        # La comparativa se valida contra los medios que aportaron notas a
+        # ESTE ángulo, no contra los del cluster entero. Con el alcance amplio,
+        # un ángulo con notas de TN y La Nación podía publicarse describiendo a
+        # TN y El Cronista: pasaba el filtro de dos entradas, pero El Cronista
+        # no aparecía en sus `fuentes` y del otro lado quedaba un enfoque sin
+        # una sola nota que lo respalde.
+        #
+        # En una actualización el alcance incluye también los medios que el
+        # ángulo ya tenía: sus noticias siguen ahí, así que sus enfoques son
+        # legítimos aunque el modelo no haya vuelto a mandar notas de ellos.
+        ids_del_angulo = {n.medio_id for n in notas}
+        if sintesis is not None:
+            ids_del_angulo |= {n.medio_id for n in sintesis.noticias}
+
+        comparativa = _comparativa_validada(
+            angulo.comparativa_enfoques,
+            sorted({medios[mid] for mid in ids_del_angulo if mid in medios}),
+        )
+
         if sintesis is None:
-            if len({n.medio_id for n in notas}) < settings.MIN_MEDIOS_CLUSTER:
+            medios_con_notas = len({n.medio_id for n in notas})
+            if (
+                medios_con_notas < settings.MIN_MEDIOS_CLUSTER
+                or len(comparativa) < settings.MIN_MEDIOS_CLUSTER
+            ):
                 stats["descartados"] += 1
+                logger.info(
+                    f"Ángulo descartado ({medios_con_notas} medios con notas, "
+                    f"{len(comparativa)} en la comparativa): {angulo.titulo_angulo}"
+                )
                 continue
             sintesis = Sintesis(cluster_id=cluster.id, titulo_angulo=angulo.titulo_angulo)
             sintesis.noticias = notas
@@ -394,6 +513,16 @@ def _persistir(
             faltantes = [n for n in notas if n not in sintesis.noticias]
             sintesis.noticias = list(sintesis.noticias) + faltantes
 
+            # La comparativa se FUSIONA, no se pisa: la entrada nueva de un
+            # medio reemplaza a la vieja, pero un medio que ya estaba no
+            # desaparece porque el modelo no lo haya vuelto a mencionar.
+            #
+            # Sin esto una re-síntesis puede degradar un ángulo publicado de dos
+            # voces a una, que es peor que no haberlo publicado. Y además
+            # incumple lo que specs/webhook_contract.md ya le promete al
+            # back-end: la comparativa suma medios, no los quita.
+            comparativa = {**sintesis.comparativa_enfoques, **comparativa}
+
             # Hay contenido nuevo que entregar. El contador de intentos vuelve a
             # cero porque el cuerpo cambió: si el backend venía rechazando esta
             # síntesis, este payload distinto merece su propia oportunidad.
@@ -404,7 +533,7 @@ def _persistir(
         sintesis.resumen_neutro = angulo.resumen_neutro
         sintesis.puntos_clave = angulo.puntos_clave
         sintesis.comparativa_enfoques = comparativa
-        sintesis.fecha_generacion = datetime.utcnow()
+        sintesis.fecha_generacion = ahora_utc()
         session.add(sintesis)
 
     return stats
@@ -442,8 +571,13 @@ def sintetizar_pendientes(session: Session) -> dict:
     corrida siguiente lo reintenta sola, porque la marca solo se escribe cuando
     la síntesis llegó a persistirse.
     """
+    # Antes de buscar candidatos, cerrar la cuenta de lo que caducó: si no, lo
+    # que quedó fuera de plazo desaparece sin que nadie se entere.
+    vencidos = descartar_vencidos_sin_sintetizar(session)
+
     pendientes = clusters_pendientes(session)
     stats = {
+        "vencidos_sin_publicar": vencidos,
         "pendientes": len(pendientes),
         "sintetizados": 0,
         "creados": 0,

@@ -17,7 +17,7 @@ class TestMedio:
         medio = Medio(
             nombre="Clarín",
             url_base="https://www.clarin.com",
-            feed_rss="https://www.clarin.com/rss",
+            feeds_rss=["https://www.clarin.com/rss"],
             activo=True,
         )
         session.add(medio)
@@ -33,7 +33,7 @@ class TestMedio:
         medio = Medio(
             nombre="La Nación",
             url_base="https://www.lanacion.com.ar",
-            feed_rss="https://www.lanacion.com.ar/rss",
+            feeds_rss=["https://www.lanacion.com.ar/rss"],
         )
         session.add(medio)
         session.commit()
@@ -55,7 +55,7 @@ class TestMedio:
         ]
 
         for nombre, url_base, feed_rss in medios_datos:
-            medio = Medio(nombre=nombre, url_base=url_base, feed_rss=feed_rss)
+            medio = Medio(nombre=nombre, url_base=url_base, feeds_rss=[feed_rss])
             session.add(medio)
 
         session.commit()
@@ -73,7 +73,7 @@ class TestNoticia:
         medio = Medio(
             nombre="Clarín",
             url_base="https://clarin.com",
-            feed_rss="https://clarin.com/rss",
+            feeds_rss=["https://clarin.com/rss"],
         )
         session.add(medio)
         session.commit()
@@ -102,7 +102,7 @@ class TestNoticia:
         medio = Medio(
             nombre="Test",
             url_base="https://test.com",
-            feed_rss="https://test.com/rss",
+            feeds_rss=["https://test.com/rss"],
         )
         session.add(medio)
         session.commit()
@@ -136,7 +136,7 @@ class TestNoticia:
         medio = Medio(
             nombre="Test",
             url_base="https://test.com",
-            feed_rss="https://test.com/rss",
+            feeds_rss=["https://test.com/rss"],
         )
         session.add(medio)
         session.commit()
@@ -192,7 +192,7 @@ class TestCluster:
         medio = Medio(
             nombre="Test",
             url_base="https://test.com",
-            feed_rss="https://test.com/rss",
+            feeds_rss=["https://test.com/rss"],
         )
         session.add(medio)
         session.commit()
@@ -357,7 +357,7 @@ class TestSintesisNoticia:
             medio = Medio(
                 nombre=f"Medio {i}",
                 url_base=f"https://m{i}.com",
-                feed_rss=f"https://m{i}.com/rss",
+                feeds_rss=[f"https://m{i}.com/rss"],
             )
             session.add(medio)
             medios.append(medio)

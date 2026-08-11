@@ -12,6 +12,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 
 from ..models import Medio, Noticia
+from ..tiempo import iso_local
 from .vectorization import vectorizar_textos
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,10 @@ def buscar_noticias_similares(
             "url": noticia.url,
             "medio": medio.nombre,
             "cluster_id": noticia.cluster_id,
-            "fecha_publicacion": noticia.fecha_publicacion,
+            # En hora argentina y con el offset a la vista. En la base está en
+            # UTC; ver `src/tiempo.py` para por qué se guarda una y se muestra
+            # la otra.
+            "fecha_publicacion": iso_local(noticia.fecha_publicacion),
             "similitud": round(1 - float(dist), 4),
         }
         for noticia, medio, dist in filas
@@ -94,7 +98,7 @@ def listar_clusters(
                 "id": cluster.id,
                 "titulo_evento": cluster.titulo_evento,
                 "estado": cluster.estado,
-                "fecha_creacion": cluster.fecha_creacion,
+                "fecha_creacion": iso_local(cluster.fecha_creacion),
                 "cantidad_noticias": len(filas),
                 "medios": sorted({medio.nombre for _, medio in filas}),
                 "noticias": [

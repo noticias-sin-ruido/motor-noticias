@@ -52,7 +52,7 @@ def medios(session: Session) -> list:
         m = Medio(
             nombre=nombre,
             url_base=f"https://{nombre[:3].lower()}.com",
-            feed_rss=f"https://{nombre[:3].lower()}.com/rss",
+            feeds_rss=[f"https://{nombre[:3].lower()}.com/rss"],
         )
         session.add(m)
         creados.append(m)
@@ -378,7 +378,10 @@ class TestBarrido:
             stats = entregar_pendientes(session)
 
         assert post.call_count == 0
-        assert stats["agotadas"] == 1
+        # No se avisa de nuevo: ya estaba agotada de antes. Pero sigue
+        # contada para que el operador la vea.
+        assert stats["agotadas"] == 0
+        assert stats["agotadas_total"] == 1
 
     def test_forzar_reincluye_las_agotadas(self, session: Session, sintesis: Sintesis):
         sintesis.intentos_envio = settings.WEBHOOK_MAX_INTENTOS
@@ -391,14 +394,38 @@ class TestBarrido:
         assert post.call_count == 1
         assert stats["entregadas"] == 1
 
-    def test_avisa_cuando_hay_sintesis_agotadas(self, session: Session, sintesis: Sintesis):
+    def test_avisa_cuando_una_sintesis_agota_los_intentos(
+        self, session: Session, sintesis: Sintesis
+    ):
+        """Justo al cruzar el tope, que es cuando hay algo nuevo que contar."""
+        sintesis.intentos_envio = settings.WEBHOOK_MAX_INTENTOS - 1
+        session.add(sintesis)
+        session.commit()
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("caído")):
+            stats = entregar_pendientes(session)
+
+        assert stats["agotadas"] == 1
+        assert webhook_delivery.enviar_alerta.called
+
+    def test_no_vuelve_a_avisar_por_una_que_ya_estaba_agotada(
+        self, session: Session, sintesis: Sintesis
+    ):
+        """
+        Antes se avisaba por todas las trabadas en cada barrido: una sola
+        síntesis mandaba un mail por hora para siempre, y el aviso que hay que
+        leer terminaba perdido entre los que no.
+        """
         sintesis.intentos_envio = settings.WEBHOOK_MAX_INTENTOS
         session.add(sintesis)
         session.commit()
 
-        entregar_pendientes(session)
+        stats = entregar_pendientes(session)
 
-        assert webhook_delivery.enviar_alerta.called
+        assert stats["agotadas"] == 0
+        assert not webhook_delivery.enviar_alerta.called
+        # Pero el operador la sigue viendo en las estadísticas.
+        assert stats["agotadas_total"] == 1
 
     def test_sin_configurar_no_hace_nada_y_no_falla(self, session: Session, sintesis: Sintesis):
         """

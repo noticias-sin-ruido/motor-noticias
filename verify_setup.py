@@ -8,7 +8,6 @@ Valida que:
   4. La app FastAPI se puede instanciar
 """
 import sys
-from datetime import datetime
 
 
 def check_imports():
@@ -44,12 +43,13 @@ def check_models():
     print("\n🔍 Verificando modelos...")
     try:
         from src.models import Medio, Noticia, Cluster, Sintesis
+        from src.tiempo import ahora_utc
 
         # Instanciar Medio
         medio = Medio(
             nombre="Test Medio",
             url_base="https://test.com",
-            feed_rss="https://test.com/rss",
+            feeds_rss=["https://test.com/rss"],
         )
         print(f"  ✓ Medio creado: {medio.nombre}")
 
@@ -64,7 +64,7 @@ def check_models():
             url="https://test.com/news",
             guid="guid-test-news",
             contenido_limpio="Test content",
-            fecha_publicacion=datetime.utcnow(),
+            fecha_publicacion=ahora_utc(),
         )
         print(f"  ✓ Noticia creada: {noticia.titulo}")
 
@@ -106,7 +106,7 @@ def check_database():
             medio = Medio(
                 nombre="Test Medio",
                 url_base="https://test.com",
-                feed_rss="https://test.com/rss",
+                feeds_rss=["https://test.com/rss"],
             )
             session.add(medio)
             session.commit()

@@ -3,6 +3,8 @@ from typing import List, Optional, TYPE_CHECKING
 
 from sqlmodel import Field, Relationship, SQLModel
 
+from ..tiempo import ahora_utc
+
 if TYPE_CHECKING:
     from .noticia import Noticia
     from .sintesis import Sintesis
@@ -16,7 +18,7 @@ class Cluster(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     titulo_evento: str = Field(index=True)
-    fecha_creacion: datetime = Field(default_factory=datetime.utcnow)
+    fecha_creacion: datetime = Field(default_factory=ahora_utc)
     # "abierto"    -> sigue aceptando noticias nuevas
     # "procesado"  -> cerrado con cobertura suficiente, listo para sintetizar
     # "descartado" -> cerrado sin alcanzar el mínimo de medios distintos:
@@ -37,6 +39,17 @@ class Cluster(SQLModel, table=True):
     # No alcanza por sí sola para decidir: quién dispara la síntesis es la
     # cobertura de las noticias todavía no asociadas a ningún ángulo. Ver
     # `services/synthesis.py`.
+    #
+    # Tres estados posibles:
+    #   None  -> nunca se intentó
+    #   >= 0  -> se intentó, y este era el conteo de noticias en ese momento
+    #   -1    -> caducó sin intentarse nunca (`MARCA_CADUCADO`)
+    #
+    # El -1 existe para que el descarte por caducidad sea **reversible**: si se
+    # marcara con el conteo real, subir `HORAS_MAXIMAS_SIN_SINTETIZAR` —que es
+    # lo que recomienda la propia alerta— devolvería el cluster a la ventana de
+    # fecha pero la guarda anti-bucle lo saltearía igual, y la recomendación
+    # sería mentira.
     noticias_al_sintetizar: Optional[int] = Field(default=None)
 
     noticias: List["Noticia"] = Relationship(back_populates="cluster")

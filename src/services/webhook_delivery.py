@@ -40,6 +40,7 @@ from sqlmodel import Session, select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import settings
+from ..tiempo import ahora_utc
 from ..models import Medio, Sintesis
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO
@@ -73,9 +74,13 @@ def _iso(momento: Optional[datetime]) -> Optional[str]:
     """
     Fecha en ISO 8601 con la Z explícita.
 
-    Todo el motor guarda UTC con `datetime.utcnow()`, que devuelve un datetime
-    *naive*: serializado tal cual, viaja sin zona y del otro lado se interpreta
-    como hora local. La Z lo vuelve inequívoco.
+    El motor guarda UTC en datetimes *naive* (ver `src/tiempo.py`): serializados
+    tal cual viajan sin zona, y del otro lado se interpretan como hora local. La
+    Z lo vuelve inequívoco.
+
+    Acá va UTC y no UTC-3, a diferencia de la API: `webhook_contract.md` ya le
+    prometió `Z` al back-end, y es un contrato con otro equipo. Lo que importa
+    es que la zona esté declarada, no cuál sea.
     """
     if momento is None:
         return None
@@ -261,7 +266,7 @@ def entregar_sintesis(session: Session, sintesis: Sintesis) -> int:
     try:
         codigo = _postear(cuerpo, headers)
         sintesis.enviado_backend = True
-        sintesis.fecha_envio = datetime.utcnow()
+        sintesis.fecha_envio = ahora_utc()
         return codigo
     finally:
         session.add(sintesis)
@@ -310,7 +315,18 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
         "entregadas": 0,
         "rechazadas": 0,
         "fallidas": 0,
+        # Las que cruzaron el tope EN ESTA CORRIDA: son las que disparan aviso.
         "agotadas": 0,
+        # Cuántas hay trabadas en total. Es visibilidad operativa y no genera
+        # aviso: si lo hiciera, una sola síntesis trabada mandaría un mail por
+        # hora para siempre y el aviso que importa quedaría enterrado.
+        "agotadas_total": 0,
+    }
+
+    # Cuáles llegaban con reintentos disponibles: solo esas pueden "cruzar" el
+    # tope en esta corrida, y solo de esas hay que avisar.
+    con_margen = {
+        s.id for s in pendientes if s.intentos_envio < settings.WEBHOOK_MAX_INTENTOS
     }
 
     for sintesis in pendientes:
@@ -335,12 +351,25 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
         else:
             stats["entregadas"] += 1
 
-    agotadas = session.exec(
-        select(Sintesis).where(
-            Sintesis.enviado_backend == False,  # noqa: E712
-            Sintesis.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS,
-        )
-    ).all()
+    stats["agotadas_total"] = len(
+        session.exec(
+            select(Sintesis.id).where(
+                Sintesis.enviado_backend == False,  # noqa: E712
+                Sintesis.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS,
+            )
+        ).all()
+    )
+
+    # El aviso sale solo por las que agotaron los intentos EN ESTA CORRIDA.
+    # Antes se avisaba por todas las trabadas, así que una sola disparaba un
+    # mail por hora para siempre, sin novedad — y el aviso que hay que leer
+    # termina perdido entre los que no.
+    agotadas = [
+        s for s in pendientes
+        if s.id in con_margen
+        and not s.enviado_backend
+        and s.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS
+    ]
 
     if agotadas:
         stats["agotadas"] = len(agotadas)
@@ -352,6 +381,9 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
                 "Resuelto el problema, se reenvían con POST /deliver?forzar=true"
             ),
             clave="webhook:agotadas",
+            # Terminal: estas síntesis salen del barrido y no se vuelven a
+            # informar. Si el cooldown se traga el aviso, se pierde.
+            ignorar_cooldown=True,
         )
 
     logger.info(f"Entrega al back-end completada: {stats}")

@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import settings
+from ..tiempo import ahora_utc
 from ..models import Medio, Noticia
 from . import alerts
 
@@ -82,7 +83,7 @@ def _parsear_entry(entry: feedparser.FeedParserDict) -> Optional[dict]:
     if not contenido_limpio:
         return None
 
-    fecha_publicacion = datetime.utcnow()
+    fecha_publicacion = ahora_utc()
     if entry.get("published_parsed"):
         fecha_publicacion = datetime(*entry.published_parsed[:6])
 
@@ -95,42 +96,86 @@ def _parsear_entry(entry: feedparser.FeedParserDict) -> Optional[dict]:
     }
 
 
-def enviar_alerta(medio: Medio, error: Exception) -> None:
-    """Envía un mail de alerta cuando se agotan los reintentos de un medio."""
+def enviar_alerta(medio: Medio, feed_url: str, error: Exception) -> None:
+    """Envía un mail de alerta cuando se agotan los reintentos de un feed."""
     alerts.enviar_alerta(
         asunto=f"[Sin Ruido] Fallo de ingesta: {medio.nombre}",
         cuerpo=(
-            f"No se pudo ingerir el feed de {medio.nombre} ({medio.feed_rss}) "
+            f"No se pudo ingerir un feed de {medio.nombre} ({feed_url}) "
             f"tras agotar los reintentos.\n\nError: {error}"
         ),
-        # Por medio: que falle La Nación no debe silenciar el aviso de TN.
+        # Por medio y no por feed: si a La Nación se le cae la infraestructura
+        # de RSS, sus 8 secciones fallan juntas y el problema es uno solo.
         clave=f"ingesta:{medio.nombre}",
     )
 
 
-def ingerir_medio(session: Session, medio: Medio) -> dict:
-    """Descarga, filtra, deduplica y persiste las noticias nuevas de un medio."""
-    stats = {
-        "medio": medio.nombre,
-        "nuevas": 0,
-        "duplicadas": 0,
-        "en_vivo": 0,
-        "sin_contenido": 0,
-        "error": None,
-    }
+def _ya_esta(session: Session, guid: str, url: str) -> bool:
+    """
+    Si esa nota ya está en la base, por `guid` o por `url`.
 
+    Se miran **las dos** claves, y con varios feeds por medio eso dejó de ser
+    redundante: el mismo artículo aparece en el feed general y en el de su
+    sección, y nada garantiza que los dos le pongan el mismo `guid`. Con solo
+    mirar el guid, la segunda copia llegaría al `INSERT` y reventaría contra el
+    índice único de `url`, tirando la ingesta entera del medio.
+
+    La sesión tiene `autoflush`, así que esta consulta también ve las noticias
+    agregadas en esta misma corrida y todavía sin commitear — que es lo que
+    hace falta para deduplicar entre dos feeds del mismo ciclo.
+    """
+    return session.exec(
+        select(Noticia.id).where((Noticia.guid == guid) | (Noticia.url == url))
+    ).first() is not None
+
+
+def _registrar_fallo(stats: dict, feed_url: str, error: Exception) -> None:
+    stats["feeds_fallados"] += 1
+    stats["errores"].append(f"{feed_url}: {type(error).__name__}: {error}")
+
+
+def ingerir_feed(session: Session, medio: Medio, feed_url: str, stats: dict) -> None:
+    """
+    Procesa un feed, lo commitea y acumula sobre `stats`.
+
+    **Ninguna excepción sale de acá.** Un feed que falla no frena a los demás
+    del mismo medio ni a los medios que siguen: son independientes entre sí, y
+    que la infraestructura de RSS devuelva 500 en `economia` no es razón para
+    perderse `politica`. Antes solo se aislaban los errores de red, y cualquier
+    otro —un `IntegrityError` del autoflush por una corrida concurrente, un
+    valor no-string en `feeds_rss`— abortaba la ingesta completa del ciclo.
+
+    El commit es **por feed** y no por medio: si algo envenena la sesión, el
+    `rollback` se lleva solo lo de este feed y no lo que ya trajeron los
+    anteriores. La deduplicación entre feeds sigue funcionando porque lo
+    commiteado ya es visible para la consulta del siguiente.
+    """
     try:
-        feed_xml = _descargar_feed(medio.feed_rss)
+        feed_xml = _descargar_feed(feed_url)
+        _procesar_items(session, medio, feed_url, feed_xml, stats)
+        session.commit()
     except httpx.HTTPError as error:
-        logger.error(f"Fallo al descargar el feed de {medio.nombre} tras reintentos: {error}")
-        enviar_alerta(medio, error)
-        stats["error"] = str(error)
-        return stats
+        # El único caso que además avisa por mail: que un medio no responda es
+        # información operativa, no un bug nuestro.
+        session.rollback()
+        logger.error(f"Fallo al descargar {feed_url} tras reintentos: {error}")
+        enviar_alerta(medio, feed_url, error)
+        _registrar_fallo(stats, feed_url, error)
+    except Exception as error:
+        session.rollback()
+        logger.exception(f"Fallo inesperado procesando {feed_url}")
+        _registrar_fallo(stats, feed_url, error)
 
+
+def _procesar_items(
+    session: Session, medio: Medio, feed_url: str, feed_xml: str, stats: dict
+) -> None:
+    """Parsea el XML y agrega a la sesión las noticias nuevas. No commitea."""
     feed = feedparser.parse(feed_xml)
     if feed.bozo:
-        logger.warning(f"Aviso al parsear el feed de {medio.nombre}: {feed.bozo_exception}")
+        logger.warning(f"Aviso al parsear {feed_url}: {feed.bozo_exception}")
 
+    sin_contenido_aca = 0
     for entry in feed.entries:
         datos = _parsear_entry(entry)
         if datos is None:
@@ -138,27 +183,50 @@ def ingerir_medio(session: Session, medio: Medio) -> dict:
             # Puede pasar con contenido no periodístico servido en el mismo feed
             # (ej. horóscopos, cables de agencia) que no trae cuerpo completo.
             stats["sin_contenido"] += 1
+            sin_contenido_aca += 1
             continue
 
         if es_en_vivo(datos["titulo"]):
             stats["en_vivo"] += 1
             continue
 
-        ya_existe = session.exec(select(Noticia).where(Noticia.guid == datos["guid"])).first()
-        if ya_existe:
+        if _ya_esta(session, datos["guid"], datos["url"]):
             stats["duplicadas"] += 1
             continue
 
         session.add(Noticia(medio_id=medio.id, **datos))
         stats["nuevas"] += 1
 
-    session.commit()
-
-    if feed.entries and stats["sin_contenido"] == len(feed.entries):
+    if feed.entries and sin_contenido_aca == len(feed.entries):
         logger.warning(
-            f"{medio.nombre}: ningún item de este ciclo tenía contenido completo "
+            f"{medio.nombre}: ningún item de {feed_url} tenía contenido completo "
             f"({len(feed.entries)} items en la ventana del feed)."
         )
+
+
+def ingerir_medio(session: Session, medio: Medio) -> dict:
+    """
+    Descarga, filtra, deduplica y persiste las noticias nuevas de un medio.
+
+    Recorre **todos** los feeds del medio. El general de un diario grande es una
+    selección de portada, no todo lo que publica: ver `models/medio.py`.
+    """
+    stats = {
+        "medio": medio.nombre,
+        "feeds": len(medio.feeds_rss),
+        "feeds_fallados": 0,
+        "nuevas": 0,
+        "duplicadas": 0,
+        "en_vivo": 0,
+        "sin_contenido": 0,
+        # Lista y no un solo string: con varios feeds, guardar únicamente el
+        # último error hacía que la caída de uno se leyera igual que la del
+        # medio entero en la respuesta de `/ingest`.
+        "errores": [],
+    }
+
+    for feed_url in medio.feeds_rss:
+        ingerir_feed(session, medio, feed_url, stats)
 
     return stats
 

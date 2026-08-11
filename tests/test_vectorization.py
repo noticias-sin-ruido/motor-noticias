@@ -21,7 +21,7 @@ DIMENSIONES = 384
 
 @pytest.fixture
 def medio(session: Session) -> Medio:
-    m = Medio(nombre="Medio Test", url_base="https://test.com", feed_rss="https://test.com/rss")
+    m = Medio(nombre="Medio Test", url_base="https://test.com", feeds_rss=["https://test.com/rss"])
     session.add(m)
     session.commit()
     session.refresh(m)

@@ -1,17 +1,16 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from sqlalchemy import Column, DateTime, JSON
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
+
+from .tipos import JSONVariant
+
+from ..tiempo import ahora_utc
 
 if TYPE_CHECKING:
     from .cluster import Cluster
     from .noticia import Noticia
-
-# JSONB en PostgreSQL (producción); JSON genérico en SQLite (tests en memoria),
-# ya que SQLite no soporta el tipo JSONB.
-JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 
 
 class SintesisNoticia(SQLModel, table=True):
@@ -77,7 +76,7 @@ class Sintesis(SQLModel, table=True):
     topico_secundario: Optional[str] = Field(default=None, index=True)
 
     fecha_generacion: datetime = Field(
-        default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False)
+        default_factory=ahora_utc, sa_column=Column(DateTime, nullable=False)
     )
 
     # --- Entrega al backend web/mobile ---

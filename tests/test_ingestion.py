@@ -49,13 +49,130 @@ FEED_XML_SIN_CONTENIDO = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+# La misma nota que FEED_XML pero con otro guid, como la sirve el feed de su
+# sección: comparte la `url`, que es lo único que permite reconocerla.
+FEED_XML_SECCION = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+<title>Medio de Prueba — Política</title>
+<item>
+  <title>Noticia normal de prueba</title>
+  <link>https://test.com/noticia-1</link>
+  <guid>OTRO-guid-para-la-misma-nota</guid>
+  <pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>
+  <content:encoded><![CDATA[<p>Cuerpo <b>completo</b> de la noticia.</p>]]></content:encoded>
+</item>
+<item>
+  <title>Nota que solo está en la sección</title>
+  <link>https://test.com/noticia-3</link>
+  <guid>guid-noticia-3</guid>
+  <pubDate>Thu, 06 Aug 2026 11:00:00 GMT</pubDate>
+  <content:encoded><![CDATA[<p>Lo que el feed general no trae.</p>]]></content:encoded>
+</item>
+</channel>
+</rss>
+"""
+
+
 @pytest.fixture
 def medio(session: Session) -> Medio:
-    m = Medio(nombre="Medio Test", url_base="https://test.com", feed_rss="https://test.com/rss")
+    m = Medio(nombre="Medio Test", url_base="https://test.com", feeds_rss=["https://test.com/rss"])
     session.add(m)
     session.commit()
     session.refresh(m)
     return m
+
+
+@pytest.fixture
+def medio_multifeed(session: Session) -> Medio:
+    m = Medio(
+        nombre="Medio Grande",
+        url_base="https://test.com",
+        feeds_rss=["https://test.com/rss", "https://test.com/rss/politica"],
+    )
+    session.add(m)
+    session.commit()
+    session.refresh(m)
+    return m
+
+
+class TestVariosFeedsPorMedio:
+    """
+    El feed general de un diario grande es una selección de portada: medido, el
+    de La Nación trae el 26% de lo que publica. Recorrer también los de sección
+    es lo que recupera el resto, y trae consigo el problema de que la misma nota
+    llega dos veces.
+    """
+
+    def test_recorre_todos_los_feeds(self, session: Session, medio_multifeed):
+        with patch.object(ingestion, "_descargar_feed",
+                          side_effect=[FEED_XML, FEED_XML_SECCION]) as descargar:
+            stats = ingestion.ingerir_medio(session, medio_multifeed)
+
+        assert descargar.call_count == 2
+        assert stats["feeds"] == 2
+        # noticia-1 (general) + noticia-3 (solo en la sección). La 2 es en vivo.
+        assert stats["nuevas"] == 2
+
+    def test_la_misma_nota_con_distinto_guid_no_se_duplica(
+        self, session: Session, medio_multifeed
+    ):
+        """
+        El caso que puede tirar la ingesta entera: nada garantiza que el feed
+        general y el de sección le pongan el mismo `guid` a la misma nota. Con
+        deduplicar solo por guid, la segunda copia llegaría al INSERT y
+        reventaría contra el índice único de `url`.
+        """
+        with patch.object(ingestion, "_descargar_feed",
+                          side_effect=[FEED_XML, FEED_XML_SECCION]):
+            stats = ingestion.ingerir_medio(session, medio_multifeed)
+
+        urls = [n.url for n in session.exec(select(Noticia)).all()]
+        assert urls.count("https://test.com/noticia-1") == 1
+        assert stats["duplicadas"] == 1
+
+    def test_un_feed_caido_no_frena_a_los_demas(self, session: Session, medio_multifeed):
+        """
+        Que la infraestructura de RSS devuelva 500 en `economia` no es razón
+        para perderse `politica`.
+        """
+        with patch.object(ingestion, "_descargar_feed",
+                          side_effect=[httpx.HTTPError("500"), FEED_XML_SECCION]), \
+             patch.object(ingestion.alerts, "enviar_alerta"):
+            stats = ingestion.ingerir_medio(session, medio_multifeed)
+
+        assert stats["feeds_fallados"] == 1
+        assert stats["nuevas"] == 2  # los dos items del feed que sí respondió
+
+    def test_un_error_que_no_es_de_red_tampoco_frena(
+        self, session: Session, medio_multifeed
+    ):
+        """
+        Antes solo se aislaban los `httpx.HTTPError`. Cualquier otra cosa —un
+        `IntegrityError` del autoflush por una corrida concurrente, un XML que
+        rompe el parser— se escapaba de `ingerir_medio` sin commit y abortaba la
+        ingesta de todos los medios que faltaban.
+        """
+        with patch.object(ingestion, "_descargar_feed",
+                          side_effect=[RuntimeError("algo raro"), FEED_XML_SECCION]):
+            stats = ingestion.ingerir_medio(session, medio_multifeed)
+
+        assert stats["feeds_fallados"] == 1
+        assert stats["nuevas"] == 2
+        assert "algo raro" in stats["errores"][0]
+
+    def test_los_errores_se_acumulan_por_feed(self, session: Session, medio_multifeed):
+        """
+        Con un solo campo `error` guardando el último, la caída de un feed se
+        leía igual que la del medio entero en la respuesta de `/ingest`.
+        """
+        with patch.object(ingestion, "_descargar_feed",
+                          side_effect=[httpx.HTTPError("uno"), httpx.HTTPError("dos")]), \
+             patch.object(ingestion.alerts, "enviar_alerta"):
+            stats = ingestion.ingerir_medio(session, medio_multifeed)
+
+        assert len(stats["errores"]) == 2
+        assert stats["feeds_fallados"] == 2
 
 
 class TestHeuristicoEnVivo:
@@ -97,7 +214,7 @@ class TestIngerirMedio:
 
         assert stats["sin_contenido"] == 1
         assert stats["nuevas"] == 0
-        assert stats["error"] is None
+        assert stats["errores"] == []
 
     def test_no_duplica_noticias_ya_ingeridas(self, session: Session, medio: Medio):
         with patch.object(ingestion, "_descargar_feed", return_value=FEED_XML):
@@ -113,7 +230,7 @@ class TestIngerirMedio:
         ), patch.object(ingestion, "enviar_alerta") as mock_alerta:
             stats = ingestion.ingerir_medio(session, medio)
 
-        assert stats["error"] is not None
+        assert len(stats["errores"]) == 1
         assert stats["nuevas"] == 0
         mock_alerta.assert_called_once()
 
@@ -121,12 +238,12 @@ class TestIngerirMedio:
 class TestIngerirTodosLosMedios:
     def test_solo_procesa_medios_activos(self, session: Session):
         activo = Medio(
-            nombre="Activo", url_base="https://a.com", feed_rss="https://a.com/rss", activo=True
+            nombre="Activo", url_base="https://a.com", feeds_rss=["https://a.com/rss"], activo=True
         )
         inactivo = Medio(
             nombre="Inactivo",
             url_base="https://i.com",
-            feed_rss="https://i.com/rss",
+            feeds_rss=["https://i.com/rss"],
             activo=False,
         )
         session.add(activo)

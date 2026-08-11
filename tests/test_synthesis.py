@@ -31,7 +31,7 @@ def medios(session: Session) -> list:
         m = Medio(
             nombre=nombre,
             url_base=f"https://{nombre[:3].lower()}.com",
-            feed_rss=f"https://{nombre[:3].lower()}.com/rss",
+            feeds_rss=[f"https://{nombre[:3].lower()}.com/rss"],
         )
         session.add(m)
         creados.append(m)
@@ -77,7 +77,16 @@ def angulo(
     id_existente=None,
     topico=Topico.SOCIEDAD,
     secundario=NINGUNO,
+    voces=("TN", "La Nación"),
 ) -> AnguloGenerado:
+    """
+    Un ángulo publicable por defecto.
+
+    `voces` son los medios que aparecen en la comparativa, y por defecto son dos
+    porque un ángulo con una sola voz **no se publica**: el filtro exige el
+    mínimo de medios tanto en las noticias como en la comparativa escrita.
+    Pasarle un solo medio es la forma de probar ese descarte.
+    """
     return AnguloGenerado(
         id_existente=id_existente,
         titulo_angulo=titulo,
@@ -86,7 +95,8 @@ def angulo(
         topico=topico,
         topico_secundario=TopicoSecundario(secundario),
         comparativa_enfoques=[
-            EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="una frase")
+            EnfoqueMedio(medio=m, destaco="X", omitio="Y", cita="una frase")
+            for m in voces
         ],
         notas=list(notas),
     )
@@ -151,7 +161,7 @@ class TestClustersPendientes:
         """El recorte por fecha evita revivir noticias viejas al arrancar."""
         cluster = crear_cluster(session)
         cluster.fecha_creacion = datetime.utcnow() - timedelta(
-            hours=settings.HORAS_CLUSTER_ABIERTO * 2 + 1
+            hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR + 1
         )
         session.add(cluster)
         session.commit()
@@ -159,6 +169,138 @@ class TestClustersPendientes:
         crear_noticia(session, medios[1], 2, cluster)
 
         assert synthesis.clusters_pendientes(session) == []
+
+    def test_el_plazo_esta_desacoplado_de_la_ventana_del_cluster(
+        self, session: Session, medios
+    ):
+        """
+        Antes el corte era `HORAS_CLUSTER_ABIERTO * 2` = 24 h, y ese
+        acoplamiento no tenía razón de ser. Un cluster de 30 h ya no se pierde:
+        una caída de fin de semana largo son ~60 h.
+        """
+        cluster = crear_cluster(session)
+        cluster.fecha_creacion = datetime.utcnow() - timedelta(hours=30)
+        session.add(cluster)
+        session.commit()
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+
+        assert [c.id for c in synthesis.clusters_pendientes(session)] == [cluster.id]
+
+
+class TestVencidosSinSintetizar:
+    """
+    Que un cluster viejo deje de ser candidato está bien; que desaparezca sin
+    que nadie se entere, no. Medido: 30 clusters publicables con 85 notas se
+    perdieron así, todos sin haberse intentado una sola vez.
+    """
+
+    def _vencido(self, session, medios, n_medios=2):
+        cluster = crear_cluster(session)
+        cluster.fecha_creacion = datetime.utcnow() - timedelta(
+            hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR + 1
+        )
+        session.add(cluster)
+        session.commit()
+        for i in range(n_medios):
+            crear_noticia(session, medios[i], i + 1, cluster)
+        return cluster
+
+    def test_denuncia_el_que_podria_haber_publicado(self, session: Session, medios):
+        cluster = self._vencido(session, medios)
+
+        with patch.object(synthesis, "enviar_alerta") as alerta:
+            perdidos = synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        assert perdidos == 1
+        assert alerta.called
+        assert str(cluster.id) in alerta.call_args.kwargs["cuerpo"]
+
+    def test_no_denuncia_el_que_no_tenia_con_que_comparar(
+        self, session: Session, medios
+    ):
+        """Un cluster que caduca con un solo medio no perdió ninguna publicación."""
+        self._vencido(session, medios, n_medios=1)
+
+        with patch.object(synthesis, "enviar_alerta") as alerta:
+            perdidos = synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        assert perdidos == 0
+        assert not alerta.called
+
+    def test_no_repite_el_aviso_en_la_corrida_siguiente(self, session: Session, medios):
+        """
+        Se les pone la marca para que sea terminal. Una alerta que se repite sin
+        novedad en cada corrida es una alerta que se deja de leer.
+        """
+        self._vencido(session, medios)
+
+        with patch.object(synthesis, "enviar_alerta"):
+            assert synthesis.descartar_vencidos_sin_sintetizar(session) == 1
+
+        with patch.object(synthesis, "enviar_alerta") as alerta:
+            assert synthesis.descartar_vencidos_sin_sintetizar(session) == 0
+        assert not alerta.called
+
+    def test_no_toca_los_que_siguen_en_plazo(self, session: Session, medios):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+
+        assert synthesis.descartar_vencidos_sin_sintetizar(session) == 0
+        session.refresh(cluster)
+        assert cluster.noticias_al_sintetizar is None
+
+    def test_subir_el_plazo_los_vuelve_a_poner_en_carrera(
+        self, session: Session, medios
+    ):
+        """
+        La alerta recomienda subir `HORAS_MAXIMAS_SIN_SINTETIZAR`, así que eso
+        tiene que servir de algo. Antes se los marcaba con el conteo real de
+        noticias y la guarda anti-bucle los salteaba igual: la recomendación era
+        mentira.
+        """
+        cluster = self._vencido(session, medios)
+        with patch.object(synthesis, "enviar_alerta"):
+            synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        session.refresh(cluster)
+        assert cluster.noticias_al_sintetizar == synthesis.MARCA_CADUCADO
+        assert synthesis.clusters_pendientes(session) == []
+
+        # El operador sube el plazo, como dice el mail.
+        with patch.object(settings, "HORAS_MAXIMAS_SIN_SINTETIZAR",
+                          settings.HORAS_MAXIMAS_SIN_SINTETIZAR + 24):
+            assert [c.id for c in synthesis.clusters_pendientes(session)] == [cluster.id]
+
+    def test_el_aviso_no_se_lo_puede_tragar_el_cooldown(
+        self, session: Session, medios
+    ):
+        """
+        El descarte es terminal: si el cooldown silencia el mail, esa
+        información no aparece nunca más. El pipeline corre cada 15 minutos y el
+        cooldown es de 60.
+        """
+        self._vencido(session, medios)
+
+        with patch.object(synthesis, "enviar_alerta") as alerta:
+            synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        assert alerta.call_args.kwargs["ignorar_cooldown"] is True
+
+    def test_no_toca_los_que_ya_se_intentaron(self, session: Session, medios):
+        """
+        Con la marca puesta ya se los miró: si no publicaron fue por criterio,
+        no por caducidad.
+        """
+        cluster = self._vencido(session, medios)
+        cluster.noticias_al_sintetizar = 2
+        session.add(cluster)
+        session.commit()
+
+        with patch.object(synthesis, "enviar_alerta") as alerta:
+            assert synthesis.descartar_vencidos_sin_sintetizar(session) == 0
+        assert not alerta.called
 
 
 class TestSintetizarCluster:
@@ -244,7 +386,8 @@ class TestComparativaValidada:
                 topico=Topico.SOCIEDAD,
                 topico_secundario=TopicoSecundario(NINGUNO),
                 comparativa_enfoques=[
-                    EnfoqueMedio(medio="La Nacion", destaco="X", omitio="Y", cita="z")
+                    EnfoqueMedio(medio="La Nacion", destaco="X", omitio="Y", cita="z"),
+                    EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
                 ],
                 notas=[1, 2],
             )
@@ -270,6 +413,7 @@ class TestComparativaValidada:
                 topico_secundario=TopicoSecundario(NINGUNO),
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
+                    EnfoqueMedio(medio="La Nación", destaco="X", omitio="Y", cita="z"),
                     EnfoqueMedio(medio="Clarín", destaco="X", omitio="Y", cita="z"),
                 ],
                 notas=[1, 2],
@@ -280,7 +424,141 @@ class TestComparativaValidada:
             synthesis.sintetizar_cluster(session, cluster)
 
         guardada = session.exec(select(Sintesis)).one()
-        assert list(guardada.comparativa_enfoques) == ["TN"]
+        assert sorted(guardada.comparativa_enfoques) == ["La Nación", "TN"]
+
+    def test_si_al_sacar_al_inventado_queda_una_sola_voz_no_se_publica(
+        self, session: Session, medios
+    ):
+        """
+        Consecuencia de combinar los dos filtros, y es la correcta: si una de
+        las dos voces era inventada, no había dos voces.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[
+            AnguloGenerado(
+                titulo_angulo="El hecho",
+                resumen_neutro="...",
+                puntos_clave=[],
+                topico=Topico.SOCIEDAD,
+                topico_secundario=TopicoSecundario(NINGUNO),
+                comparativa_enfoques=[
+                    EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
+                    EnfoqueMedio(medio="Clarín", destaco="X", omitio="Y", cita="z"),
+                ],
+                notas=[1, 2],
+            )
+        ])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            stats = synthesis.sintetizar_cluster(session, cluster)
+
+        assert stats["descartados"] == 1
+        assert session.exec(select(Sintesis)).all() == []
+
+
+class TestComparativaCompleta:
+    """
+    Una publicación que dice comparar y muestra una sola voz no es el producto.
+    Medido en una corrida real: dos ángulos tenían notas de La Nación y El
+    Cronista —así que pasaban el filtro de noticias— pero el modelo escribió una
+    sola entrada de comparativa, y salían igual.
+    """
+
+    def _cluster_de_dos_medios(self, session, medios):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        return cluster
+
+    def test_descarta_el_angulo_con_una_sola_voz(self, session: Session, medios):
+        cluster = self._cluster_de_dos_medios(session, medios)
+        # Notas de dos medios, pero el modelo describe uno solo.
+        respuesta = RespuestaSintesis(angulos=[angulo(notas=(1, 2), voces=("TN",))])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            stats = synthesis.sintetizar_cluster(session, cluster)
+
+        assert stats["creados"] == 0
+        assert stats["descartados"] == 1
+        assert session.exec(select(Sintesis)).all() == []
+
+    def test_publica_cuando_estan_las_dos_voces(self, session: Session, medios):
+        cluster = self._cluster_de_dos_medios(session, medios)
+        respuesta = RespuestaSintesis(angulos=[angulo(notas=(1, 2))])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            stats = synthesis.sintetizar_cluster(session, cluster)
+
+        assert stats["creados"] == 1
+        guardada = session.exec(select(Sintesis)).one()
+        assert sorted(guardada.comparativa_enfoques) == ["La Nación", "TN"]
+
+    def test_descarta_al_medio_que_no_aporto_notas_a_ese_angulo(
+        self, session: Session, medios
+    ):
+        """
+        La comparativa se valida contra los medios de ESTE ángulo, no contra los
+        del cluster. Con el alcance amplio, un ángulo podía publicarse
+        describiendo a un medio que no aparece en sus `fuentes`: un enfoque sin
+        una sola nota que lo respalde.
+        """
+        cluster = self._cluster_de_dos_medios(session, medios)   # La Nación + TN
+        crear_noticia(session, medios[2], 3, cluster)            # Ciudad, en el cluster
+
+        # El ángulo se apoya solo en las notas 1 y 2, pero el modelo describe a
+        # Ciudad, que está en el cluster pero no en este ángulo.
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(notas=(1, 2), voces=("TN", "La Nación", "Ciudad"))]
+        )
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        medios_de_las_notas = {m.nombre for m in
+                               [session.get(Medio, n.medio_id) for n in guardada.noticias]}
+        assert set(guardada.comparativa_enfoques) <= medios_de_las_notas
+
+    def test_una_resintesis_no_le_quita_medios_a_lo_ya_publicado(
+        self, session: Session, medios
+    ):
+        """
+        specs/webhook_contract.md le promete al back-end que la comparativa suma
+        medios y no los quita. Antes se pisaba entera, así que una re-síntesis
+        podía degradar un ángulo publicado de dos voces a una — peor que no
+        haberlo publicado.
+        """
+        cluster = self._cluster_de_dos_medios(session, medios)
+        n3 = crear_noticia(session, medios[1], 3, cluster)
+        publicada = Sintesis(
+            cluster_id=cluster.id,
+            titulo_angulo="El hecho",
+            resumen_neutro="Original.",
+            comparativa_enfoques={
+                "TN": {"destaco": "X", "omitio": "Y", "cita": "z"},
+                "La Nación": {"destaco": "A", "omitio": "B", "cita": "c"},
+            },
+            enviado_backend=True,
+        )
+        publicada.noticias = [n3]
+        session.add(publicada)
+        session.commit()
+        session.refresh(publicada)
+
+        # El modelo vuelve a describir solo a TN.
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(notas=(1, 2), id_existente=publicada.id, voces=("TN",))]
+        )
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            stats = synthesis.sintetizar_cluster(session, cluster)
+
+        assert stats["actualizados"] == 1
+        session.refresh(publicada)
+        assert sorted(publicada.comparativa_enfoques) == ["La Nación", "TN"]
+        # Y la entrada de TN sí se actualiza con lo nuevo.
+        assert publicada.comparativa_enfoques["TN"]["cita"] == "una frase"
 
 
 class TestTopico:
@@ -438,8 +716,18 @@ class TestDescomposicionCongelada:
     def test_un_id_inventado_se_trata_como_angulo_nuevo(self, session: Session, medios):
         cluster, original = self._con_angulo_publicado(session, medios)
         crear_noticia(session, medios[2], 3, cluster)
+        # Las tres voces porque el orden de `enviadas` lo decide el preproceso:
+        # no se sabe de antemano a qué medios pertenecen las notas 1 y 3, y la
+        # comparativa se valida contra los medios de ESE ángulo.
         respuesta = RespuestaSintesis(
-            angulos=[angulo(titulo="Ángulo nuevo", notas=(1, 3), id_existente=9999)]
+            angulos=[
+                angulo(
+                    titulo="Ángulo nuevo",
+                    notas=(1, 3),
+                    id_existente=9999,
+                    voces=("TN", "La Nación", "Ciudad"),
+                )
+            ]
         )
 
         with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
@@ -485,6 +773,7 @@ class TestManejoDeFallos:
             stats = synthesis.sintetizar_pendientes(session)
 
         assert stats == {
+            "vencidos_sin_publicar": 0,
             "pendientes": 2, "sintetizados": 1, "creados": 1,
             "actualizados": 0, "descartados": 0, "bloqueados": 0, "fallidos": 1,
         }

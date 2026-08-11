@@ -10,7 +10,7 @@ El motor **no expone las síntesis por polling**: las empuja apenas las genera. 
 
 La unidad que se publica **no es la noticia ni el evento, sino el ángulo**.
 
-El motor agrupa toda la cobertura de un mismo hecho en un *cluster*, y después un modelo lee esos textos y los separa en los ángulos distintos que encuentra (el hecho central, sus consecuencias, las reacciones). **Un hecho puede producir varias publicaciones**, y lo hace seguido: en la última corrida real, 8 hechos dieron 11 publicaciones.
+El motor agrupa toda la cobertura de un mismo hecho en un *cluster*, y después un modelo lee esos textos y los separa en los ángulos distintos que encuentra (el hecho central, sus consecuencias, las reacciones). **Un hecho puede producir varias publicaciones**: en la última corrida real, 39 hechos dieron 47 publicaciones, y 7 de esos hechos aportaron más de un ángulo.
 
 Cada publicación trae, además del resumen neutro, **la comparativa de cómo lo contó cada medio** — qué destacó, qué omitió y una cita textual que lo respalda. Eso es el producto.
 
@@ -88,7 +88,7 @@ Este ejemplo es real, generado por el motor sobre la cobertura del 9/8 (recortad
 }
 ```
 
-Tamaño real medido: **~7,5 KB** para una publicación con 4 medios y 14 fuentes.
+El ejemplo de arriba pesa 7.530 bytes y es **el más grande de los 47**: la mediana está en **2.431 bytes**, y el percentil 90 en 3.756.
 
 ### Campos
 
@@ -99,13 +99,13 @@ Tamaño real medido: **~7,5 KB** para una publicación con 4 medios y 14 fuentes
 | `sintesis.id` | int | **La clave.** Estable para siempre, ver punto 5 |
 | `sintesis.titulo` | string | Qué recorte del hecho cubre esta publicación. Es el título que ve el usuario |
 | `sintesis.resumen` | string | Redacción neutra, solo hechos que sostenga más de un medio |
-| `sintesis.puntos_clave` | string[] | Entre 1 y 5 en la práctica. No asuman cantidad fija |
+| `sintesis.puntos_clave` | string[] | Entre 2 y 4 sobre 47 publicaciones reales, casi siempre 3. No asuman cantidad fija |
 | `sintesis.topico` | string | De la lista cerrada del punto 4 |
 | `sintesis.topico_secundario` | string \| null | De la misma lista. Ver punto 4 |
 | `sintesis.fecha_generacion` | ISO 8601 UTC | Ver punto 7 (entregas cruzadas) |
 | `hecho.id` | int | Agrupa los ángulos de una misma historia. Ver la advertencia de abajo |
 | `hecho.abierto` | bool | El hecho todavía puede sumar ángulos o actualizar los que tiene. Alcanza para mostrarlo como "en desarrollo" |
-| `comparativa[]` | array | **Una entrada por medio**, no por nota. Ordenada alfabéticamente por nombre |
+| `comparativa[]` | array | **Una entrada por medio**, no por nota. Ordenada alfabéticamente por nombre. Todo medio que aparezca acá tiene al menos una nota en `fuentes` — ver punto 5 |
 | `fuentes[]` | array | **Una entrada por nota.** Un medio puede aparecer varias veces. Ordenadas por fecha de publicación |
 
 **Sobre `hecho`: mandamos el id pero deliberadamente no un título.** Internamente el cluster tiene un nombre, pero es el titular de la primera nota que lo formó — o sea, el encuadre de un medio puntual. Mostrarlo como nombre "del hecho" sería presentar como neutro justo lo que el producto se propone no hacer. Si necesitan una etiqueta para agrupar en pantalla, avisen y la generamos neutra; no reciclen ese campo.
@@ -134,7 +134,11 @@ ciencia         lifestyle
 
 Sugerencia de uso: **filtren por `topico OR topico_secundario`, ordenen y armen la navegación por `topico`.**
 
-El tópico lo decide el modelo leyendo los textos, no la sección de la URL. Medido sobre las 11 publicaciones reales: en 7 coincide con lo que declararon los medios y en 4 se aparta, siempre porque los medios discrepaban entre sí o porque la sección declarada se quedaba corta.
+El tópico lo decide el modelo leyendo los textos, no la sección de la URL.
+
+Para dimensionar la navegación, así se repartieron las 47 publicaciones reales: espectáculos 17, deportes 8, economía 7, policiales 6, política 4, sociedad 3, y una de lifestyle y otra de ciencia. Internacional y tecnología no aparecieron en esta corrida, pero van a aparecer.
+
+**19 de las 47 traen `topico_secundario`**, o sea un 40%. Es bastante más de lo que esperábamos al diseñar el campo, así que conviene que el filtro por `topico OR topico_secundario` esté desde el principio y no como un agregado posterior.
 
 **El tópico no cambia entre entregas** (ver punto 5).
 
@@ -159,6 +163,14 @@ Qué puede cambiar entre entregas del mismo id:
 | ❌ No cambia | `titulo`, `topico`, `topico_secundario`, `hecho.id` |
 
 Que el título y el tópico estén congelados es la misma decisión: renombrar una publicación, o moverla de Deportes a Espectáculos entre una entrega y la siguiente, confunde a quien ya la vio.
+
+### Coherencia entre comparativa y fuentes
+
+**Todo medio que aparece en `comparativa` tiene al menos una nota suya en `fuentes`.** Vale en la primera entrega y en todas las siguientes.
+
+Lo aclaramos porque hasta hace poco *no* era cierto: el motor validaba la comparativa contra todos los medios del hecho y no contra los que aportaron notas a ese ángulo puntual, así que podía llegarles un enfoque de un medio sin una sola nota que lo respalde. Está corregido y verificado sobre las 47 publicaciones actuales: **ninguna** tiene ese desajuste.
+
+Consecuencia práctica: si modelan `comparativa` y `fuentes` con una FK al mismo `medio`, no necesitan tolerar el caso huérfano.
 
 ---
 
@@ -215,14 +227,16 @@ Después de agotar los reintentos, la síntesis queda pendiente en nuestra base 
 
 ## 8. Volumen esperado
 
-Medido sobre corridas reales con 6 medios:
+Medido sobre corridas reales con 6 medios y 1.852 notas ingeridas:
 
 - El pipeline corre **cada 15 minutos**
-- Una corrida activa genera del orden de **1 a 11 publicaciones**
-- Cada request pesa **~7,5 KB**
-- Sobre 57 clusters, 11 llegaron a publicar
+- Peso del request: **mediana 2,4 KB**, percentil 90 3,8 KB, el más grande 7,5 KB
+- De 93 hechos detectados, **39 llegaron a publicar**
+- Una corrida tranquila no genera nada; la última corrida grande generó **30 publicaciones nuevas** y entregó 47 en unos 10 segundos, porque también salen las que habían quedado pendientes
 
-O sea: ráfagas cortas de pocos requests cada 15 minutos. No hay nada que justifique una cola del lado de ustedes por volumen — sí por no bloquear la respuesta.
+O sea: ráfagas cortas y espaciadas. El pico a dimensionar no es sostenido sino **del orden de 50 requests seguidos cada 15 minutos**. No hay nada que justifique una cola del lado de ustedes *por volumen* — sí por no bloquear la respuesta.
+
+Y va a crecer: hoy son 6 medios y el cuello de botella del producto es justamente ese. Si sumamos medios, sube la cantidad de hechos que alcanzan dos voces y con eso las publicaciones por corrida. **No dimensionen para 47.**
 
 ---
 

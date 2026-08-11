@@ -18,6 +18,7 @@ import numpy as np
 from sqlmodel import Session, select
 
 from ..config import settings
+from ..tiempo import ahora_utc
 from ..models import Cluster, Noticia, Sintesis
 from .categorias import categoria_no_evento
 
@@ -156,7 +157,7 @@ def agrupar_pendientes(session: Session) -> dict:
     cubra el mismo hecho. Por eso el alcance es la ventana de clusters abiertos
     y no una ventana de minutos atada a la frecuencia del scheduler.
     """
-    ahora = datetime.utcnow()
+    ahora = ahora_utc()
     desde = ahora - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
 
     clusters = _cargar_clusters_abiertos(session, desde)
@@ -291,7 +292,7 @@ def fusionar_clusters_duplicados(session: Session) -> dict:
     Que empiece a fusionar seguido es señal de que la regla de asignación se
     rompió: sirve de canario.
     """
-    ahora = datetime.utcnow()
+    ahora = ahora_utc()
     desde = ahora - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
 
     en_memoria = _cargar_clusters_abiertos(session, desde)
@@ -367,7 +368,7 @@ def cerrar_clusters_vencidos(session: Session) -> dict:
     fijo, esa historia produce varios clusters sucesivos, que además es más
     correcto: no es un evento, es una serie de eventos.
     """
-    limite = datetime.utcnow() - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
+    limite = ahora_utc() - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
 
     vencidos = session.exec(
         select(Cluster).where(

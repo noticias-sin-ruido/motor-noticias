@@ -19,6 +19,7 @@ from .services.search import buscar_noticias_similares, listar_clusters
 from .services.synthesis import sintetizar_pendientes
 from .services.vectorization import vectorizar_pendientes
 from .services.webhook_delivery import entregar_pendientes
+from .tiempo import ahora_local
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ def _job_ingesta_programada() -> None:
     hasta el punto fijo— así que la corrida siguiente retoma sola donde quedó.
     Esa idempotencia es la contingencia real; las alertas son para enterarse.
     """
+    # Hora argentina, que es la que mira quien opera esto. Ver `src/tiempo.py`.
+    arranque = ahora_local()
+    logger.info(f"=== Pipeline arranca {arranque:%d/%m %H:%M:%S} (UTC-3) ===")
+
     with Session(get_engine()) as session:
         _correr_paso(session, "ingesta", ingerir_todos_los_medios)
         _correr_paso(session, "vectorización", vectorizar_pendientes)
@@ -92,6 +97,12 @@ def _job_ingesta_programada() -> None:
         # corridas anteriores no tiene por qué esperar a que se arregle la
         # fusión. Por lo mismo tampoco necesita un job de reintento aparte.
         _correr_paso(session, "entrega al backend", entregar_pendientes)
+
+    fin = ahora_local()
+    logger.info(
+        f"=== Pipeline termina {fin:%d/%m %H:%M:%S} (UTC-3) — "
+        f"{(fin - arranque).total_seconds():.1f} s ==="
+    )
 
 
 @asynccontextmanager
@@ -121,7 +132,12 @@ app = FastAPI(
 
 @app.get("/")
 def root():
-    return {"status": "ok", "environment": settings.ENVIRONMENT}
+    """Salud del servicio. La hora sirve para verificar el reloj del contenedor."""
+    return {
+        "status": "ok",
+        "environment": settings.ENVIRONMENT,
+        "hora_local": ahora_local().isoformat(timespec="seconds"),
+    }
 
 
 @app.post("/ingest")

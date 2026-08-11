@@ -93,6 +93,10 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 
 **A vigilar:** el modelo sobreescribió una vez una señal unánime de tópico (los dos medios dijeron `internacional`, él puso `policiales + internacional`). Se sostiene, pero es una sola observación — mirar si se repite.
 
+**Medido en la primera corrida completa con la fase cerrada** (1.354 noticias, 39 s punta a punta, US$ 0,0034): el embudo es angosto —15,5% de las notas entra a un cluster y 3,7% respalda una publicación— y **13 de 17 publicaciones tienen exactamente 2 medios**. No es falla del clustering: 1.116 notas no tienen par en ningún otro medio. La palanca es **sumar medios**, no bajar el umbral. Detalle en `change_logs.md`.
+
+**Cola pendiente de decisión de producto:** El Cronista agrupa solo el 5,7% de sus notas y Ciudad Magazine no participó de ninguna publicación. Con 6 medios el producto es, en los hechos, La Nación contra TN.
+
 **Pendiente de observación** (no bloquea): un cluster de economía juntó inflación y mora, dos hechos distintos pegados por vocabulario compartido. El modelo los separó bien en dos ángulos, pero el agrupamiento no debió unirlos. Una sola observación — mirar si se repite antes de tocar nada.
 
 ---
@@ -105,3 +109,6 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 - [ ] Caching (Redis)
 - [ ] Rate limiting
 - [ ] Resolver los puntos de quiebre pendientes de `tech_stack.md` (pool de conexiones, scheduler multi-réplica, memoria de embeddings)
+- [ ] **Consultas que no escalan**, detectadas en la revisión de código al cerrar Fase 4. No molestan con los volúmenes de hoy pero crecen sin techo:
+  - `synthesis.clusters_pendientes` carga la tabla `SintesisNoticia` entera en cada corrida
+  - `search.listar_clusters` y `synthesis.descartar_vencidos_sin_sintetizar` hacen N+1 consultas

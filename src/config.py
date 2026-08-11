@@ -124,6 +124,21 @@ class Settings(BaseSettings):
     # entrada en el peor caso, contra el millón que admite un request.
     SINTESIS_MAX_NOTAS: int = 30
 
+    # Antigüedad a partir de la cual un cluster deja de ser candidato a
+    # sintetizarse. Existe para que arrancar el sistema sobre una base con
+    # historia no dispare la síntesis de todo el backlog de una.
+    #
+    # Antes esto era `HORAS_CLUSTER_ABIERTO * 2` (24 h), y ese acoplamiento no
+    # tenía razón de ser: son dos preguntas distintas. Medido sobre datos
+    # reales, con 24 h **30 clusters publicables con 85 notas se perdieron sin
+    # que se intentara sintetizarlos nunca**. 72 h le da margen a una caída de
+    # fin de semana largo (viernes a la noche a lunes a la mañana son ~60 h).
+    #
+    # Lo que caduca ya no se recupera solo: eso es a propósito —una noticia de
+    # hace tres días no es noticia— pero ahora avisa en vez de desaparecer en
+    # silencio. Ver `descartar_vencidos_sin_sintetizar`.
+    HORAS_MAXIMAS_SIN_SINTETIZAR: int = 72
+
     # --- Síntesis con Gemini (Fase 4) ---
     # Medido: 68.534 tokens de entrada para 21 clusters publicables, o sea del
     # orden de US$0,01 por corrida completa. Verificá los precios vigentes.
