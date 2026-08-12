@@ -148,11 +148,12 @@ def construir_payload(session: Session, sintesis: Sintesis) -> dict:
             "titulo": sintesis.titulo_angulo,
             "resumen": sintesis.resumen_neutro,
             "puntos_clave": list(sintesis.puntos_clave or []),
-            # De la lista cerrada de `services/topicos.py`. El secundario es
-            # null salvo que la cobertura pertenezca con el mismo derecho a dos
-            # temas. Ninguno de los dos cambia entre entregas.
-            "topico": sintesis.topico,
-            "topico_secundario": sintesis.topico_secundario,
+            # De las listas cerradas de `services/topicos.py`. `topicos` es una
+            # o dos categorías pares (no una principal y otra secundaria);
+            # `subtopicos` es un recorte más fino dentro de esas categorías y
+            # puede venir vacío. Ninguna de las dos cambia entre entregas.
+            "topicos": list(sintesis.topicos or []),
+            "subtopicos": list(sintesis.subtopicos or []),
             # Permite descartar una entrega que llegó tarde: si dos requests de
             # la misma síntesis se cruzan, gana la de fecha más nueva.
             "fecha_generacion": _iso(sintesis.fecha_generacion),

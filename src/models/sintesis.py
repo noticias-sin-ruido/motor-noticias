@@ -58,22 +58,26 @@ class Sintesis(SQLModel, table=True):
     puntos_clave: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
     comparativa_enfoques: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONVariant))
 
-    # De qué tema es. Valores de la lista cerrada de `services/topicos.py`: es
-    # lo que le permite al back-end armar secciones y filtros, y con texto libre
-    # esa navegación se rompe sola.
+    # De qué tema(s) es y con qué detalle. Valores de las listas cerradas de
+    # `services/topicos.py`: es lo que le permite al back-end armar secciones y
+    # filtros, y con texto libre esa navegación se rompe sola.
     #
-    # Se guarda como string y no como Enum de base para poder agregar una
-    # categoría sin migrar la tabla; la garantía de que el valor es válido la da
-    # el `response_schema` del modelo, que sólo admite los de la lista.
+    # Listas y no un principal + secundario: esa pareja mezclaba dos preguntas
+    # distintas bajo el mismo campo -- "de qué otra categoría es esto además"
+    # (deportes Y espectáculos, pares) y "qué recorte más fino tiene dentro de
+    # una categoría" (fútbol, DENTRO de deportes). `topicos` son 1 o 2
+    # categorías pares; `subtopicos` son 0 o más recortes finos, cada uno con
+    # un padre fijo en `SUBTOPICO_PADRE` que el código garantiza que esté
+    # presente en `topicos` -- ver `con_padres_completos`.
     #
-    # El secundario existe porque hay coberturas que pertenecen con igual
-    # derecho a dos temas: la muerte del padre de Messi la publicaron TN en
-    # deportes y Paparazzi en espectáculos, y las dos son correctas. Con un solo
-    # tópico, la publicación desaparecería de una de las dos secciones.
+    # Se guardan como JSON y no como columnas de Enum para poder agregar una
+    # categoría sin migrar la tabla; la garantía de que los valores son válidos
+    # la da el `response_schema` del modelo, que sólo admite los de la lista.
     #
-    # Nulos en las síntesis generadas antes de que existiera el campo.
-    topico: Optional[str] = Field(default=None, index=True)
-    topico_secundario: Optional[str] = Field(default=None, index=True)
+    # Vacíos (no nulos) en las síntesis generadas antes de este rediseño y en
+    # las anteriores al campo original.
+    topicos: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
+    subtopicos: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
 
     fecha_generacion: datetime = Field(
         default_factory=ahora_utc, sa_column=Column(DateTime, nullable=False)

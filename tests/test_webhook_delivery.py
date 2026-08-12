@@ -94,8 +94,8 @@ def sintesis(session: Session, medios) -> Sintesis:
             "TN": {"destaco": "El operativo", "omitio": "El comunicado", "cita": "una frase"},
             "La Nación": {"destaco": "El comunicado", "omitio": "El operativo", "cita": "otra frase"},
         },
-        topico="deportes",
-        topico_secundario="espectaculos",
+        topicos=["deportes", "espectaculos"],
+        subtopicos=["futbol"],
         fecha_generacion=datetime(2026, 8, 9, 12, 0, 0),
     )
     item.noticias = noticias
@@ -163,22 +163,22 @@ class TestPayload:
         assert "Inventado" not in nombres
         assert len(nombres) == 2
 
-    def test_lleva_el_topico_para_que_el_backend_pueda_filtrar(
+    def test_lleva_los_topicos_para_que_el_backend_pueda_filtrar(
         self, session: Session, sintesis: Sintesis
     ):
         payload = construir_payload(session, sintesis)
 
-        assert payload["sintesis"]["topico"] == "deportes"
-        assert payload["sintesis"]["topico_secundario"] == "espectaculos"
+        assert payload["sintesis"]["topicos"] == ["deportes", "espectaculos"]
+        assert payload["sintesis"]["subtopicos"] == ["futbol"]
 
-    def test_el_topico_secundario_viaja_como_null_si_no_hay(
+    def test_subtopicos_viaja_como_lista_vacia_si_no_hay(
         self, session: Session, sintesis: Sintesis
     ):
-        sintesis.topico_secundario = None
+        sintesis.subtopicos = []
         session.add(sintesis)
         session.commit()
 
-        assert construir_payload(session, sintesis)["sintesis"]["topico_secundario"] is None
+        assert construir_payload(session, sintesis)["sintesis"]["subtopicos"] == []
 
     def test_no_manda_el_titulo_del_cluster(self, session: Session, sintesis: Sintesis):
         """

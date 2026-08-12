@@ -52,8 +52,8 @@ Este ejemplo es real, generado por el motor sobre la cobertura del 9/8 (recortad
       "Lionel Messi viajó de urgencia desde Estados Unidos junto a su esposa, Antonela Roccuzzo, y sus hijos.",
       "El velorio se realizó en el cementerio El Prado en un ambiente de hermetismo, con fuerte custodia policial."
     ],
-    "topico": "deportes",
-    "topico_secundario": "espectaculos",
+    "topicos": ["deportes", "espectaculos"],
+    "subtopicos": [],
     "fecha_generacion": "2026-08-09T22:47:24Z"
   },
 
@@ -100,8 +100,8 @@ El ejemplo de arriba pesa 7.530 bytes y es **el más grande de los 47**: la medi
 | `sintesis.titulo` | string | Qué recorte del hecho cubre esta publicación. Es el título que ve el usuario |
 | `sintesis.resumen` | string | Redacción neutra, solo hechos que sostenga más de un medio |
 | `sintesis.puntos_clave` | string[] | Entre 2 y 4 sobre 47 publicaciones reales, casi siempre 3. No asuman cantidad fija |
-| `sintesis.topico` | string | De la lista cerrada del punto 4 |
-| `sintesis.topico_secundario` | string \| null | De la misma lista. Ver punto 4 |
+| `sintesis.topicos` | string[] | 1 o 2, de la lista cerrada del punto 4. **No asuman orden significativo** — son un conjunto, no una principal + una secundaria |
+| `sintesis.subtopicos` | string[] | 0 o más, recorte más fino dentro de los tópicos elegidos. Puede venir vacío. Ver punto 4 |
 | `sintesis.fecha_generacion` | ISO 8601 UTC | Ver punto 7 (entregas cruzadas) |
 | `hecho.id` | int | Agrupa los ángulos de una misma historia. Ver la advertencia de abajo |
 | `hecho.abierto` | bool | El hecho todavía puede sumar ángulos o actualizar los que tiene. Alcanza para mostrarlo como "en desarrollo" |
@@ -114,7 +114,11 @@ El ejemplo de arriba pesa 7.530 bytes y es **el más grande de los 47**: la medi
 
 ---
 
-## 4. Tópicos
+## 4. Tópicos y subtópicos
+
+> **Cambio de forma sobre una versión anterior de este contrato**: `topico` + `topico_secundario` (dos strings, una principal y otra secundaria) pasaron a `topicos` + `subtopicos` (dos arrays). El campo viejo mezclaba dos preguntas distintas bajo una jerarquía que no correspondía — ver el porqué más abajo. Avisen si esto ya estaba integrado de su lado.
+
+### Tópicos: 1 o 2, categorías **pares**
 
 Lista **cerrada**. Si el valor pudiera ser texto libre terminarían con "Deportes", "deportes" y "Fútbol" conviviendo, y la navegación se rompe sola.
 
@@ -130,17 +134,51 @@ ciencia         lifestyle
 - **No hay `opinion` ni `columnistas`.** Eso es género, no tema: una columna sobre inflación es `economia`.
 - Si necesitan una categoría nueva, es un cambio nuestro de una línea. Pídanla.
 
-**`topico_secundario` puede venir en null**, y viene con valor solo cuando la cobertura pertenece con igual derecho a dos temas. El caso real que motivó el campo: el velorio de Jorge Messi lo publicó TN en deportes y Paparazzi en espectáculos, y las dos secciones tienen razón. Con un solo tópico, esa publicación desaparecería de una de las dos.
+`topicos` trae **más de una entrada solo cuando la cobertura pertenece con igual derecho a dos temas** — nunca una principal y otra secundaria. El caso real que motivó el diseño: el velorio de Jorge Messi lo publicó TN en deportes y Paparazzi en espectáculos, y las dos secciones tienen razón. La versión anterior de este contrato representaba eso como `topico: "deportes", topico_secundario: "espectaculos"`, una jerarquía que no existe en la realidad — las dos categorías son igual de válidas. Ahora es `topicos: ["deportes", "espectaculos"]`, dos entradas pares.
 
-Sugerencia de uso: **filtren por `topico OR topico_secundario`, ordenen y armen la navegación por `topico`.**
+### Subtópicos: 0 o más, recorte fino DENTRO de un tópico
 
-El tópico lo decide el modelo leyendo los textos, no la sección de la URL.
+Lista cerrada y separada, para la pregunta que `topico_secundario` no distinguía de la anterior: no "de qué otra categoría es esto", sino "qué recorte más específico tiene dentro de una categoría ya elegida".
 
-Para dimensionar la navegación, así se repartieron las 47 publicaciones reales: espectáculos 17, deportes 8, economía 7, policiales 6, política 4, sociedad 3, y una de lifestyle y otra de ciencia. Internacional y tecnología no aparecieron en esta corrida, pero van a aparecer.
+```
+deportes:       futbol, rugby, hockey, tenis, automovilismo, basquetbol
+espectaculos:   teve, musica, cine, chimentos
+economia:       negocios, campo
+internacional:  estados_unidos
+sociedad:       salud, educacion
+lifestyle:      propiedades, autos, cocina
+```
 
-**19 de las 47 traen `topico_secundario`**, o sea un 40%. Es bastante más de lo que esperábamos al diseñar el campo, así que conviene que el filtro por `topico OR topico_secundario` esté desde el principio y no como un agregado posterior.
+`salud` y `educacion` son la excepción a "medido, no inventado": se sumaron por decisión editorial pese a volumen bajo o nulo en el corpus medido, porque son categorías que se buscan específicamente y no tenerlas desde el día uno dejaría esas búsquedas sin filtro fino. Mismo criterio que ya se aplicó con los deportes minoritarios (rugby, hockey, etc.).
 
-**El tópico no cambia entre entregas** (ver punto 5).
+Política, policiales, tecnología y ciencia no tienen subtópicos todavía — no hay suficiente volumen medido para justificar una lista cerrada ahí. Puede sumarse más adelante.
+
+**Garantía**: todo subtópico en `subtopicos` tiene su categoría correspondiente presente en `topicos`. No lo decide el modelo caso por caso — lo asegura el motor después de generar la síntesis, agregando la categoría si hiciera falta. Nunca van a recibir `subtopicos: ["futbol"]` sin `"deportes"` en `topicos`.
+
+Ejemplo real con subtópico poblado:
+
+```jsonc
+{
+  "sintesis": {
+    "titulo": "Rumores de romance entre Griselda Siciliani y Emiliano Brancciari y la desmentida de ambos",
+    "topicos": ["espectaculos"],
+    "subtopicos": ["chimentos"]
+    // ...
+  }
+}
+```
+
+### Cómo usarlos
+
+**Filtren por `topicos` como conjunto** (¿contiene X?), no traten el primer elemento como "el principal" — no hay orden garantizado. Para navegación más fina, agreguen `subtopicos` como filtro opcional encima; para la navegación principal alcanza con `topicos`.
+
+El tópico y el subtópico los decide el modelo leyendo los textos, no la sección de la URL.
+
+Para dimensionar la navegación, así se reparten los tópicos sobre las 80 publicaciones reales medidas tras el rediseño: espectáculos 33, sociedad 16, economía 16, deportes 13, policiales 11, política 10, lifestyle 5, internacional 5, ciencia 2 (suman más de 80 porque algunas tienen 2). Tecnología no apareció en esta corrida, pero va a aparecer.
+
+**31 de las 80 traen un segundo tópico**, un 39% — en línea con lo que ya veíamos con `topico_secundario`. Los subtópicos recién empiezan a poblarse (la taxonomía es de esta misma revisión del contrato): esperen que la proporción crezca corrida a corrida a medida que el volumen de cada categoría lo justifique.
+
+**Ni los tópicos ni los subtópicos cambian entre entregas** (ver punto 5).
 
 ---
 
@@ -160,9 +198,9 @@ Qué puede cambiar entre entregas del mismo id:
 |---|---|
 | ✅ Cambia | `resumen`, `puntos_clave`, `fecha_generacion` |
 | ✅ Puede sumar | `comparativa` (medios nuevos), `fuentes` (solo suma, nunca quita) |
-| ❌ No cambia | `titulo`, `topico`, `topico_secundario`, `hecho.id` |
+| ❌ No cambia | `titulo`, `topicos`, `subtopicos`, `hecho.id` |
 
-Que el título y el tópico estén congelados es la misma decisión: renombrar una publicación, o moverla de Deportes a Espectáculos entre una entrega y la siguiente, confunde a quien ya la vio.
+Que el título y los tópicos estén congelados es la misma decisión: renombrar una publicación, o moverla de Deportes a Espectáculos entre una entrega y la siguiente, confunde a quien ya la vio.
 
 ### Coherencia entre comparativa y fuentes
 

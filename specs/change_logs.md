@@ -781,3 +781,116 @@ Antes `GET /` devolvía siempre `200 {"status": "ok", ...}` — confirmaba que U
 ### Resultado
 
 221/221 tests (215 + 6 nuevos: 3 de `listar_clusters` en `tests/test_search.py`, 2 de no-escalamiento en `synthesis.py`, más el de healthcheck degradado), 95,5% de cobertura. `docker compose up --build` validado de punta a punta contra Postgres real, con caída y recuperación de la base incluida.
+
+---
+
+## Rediseño de tópicos: de principal/secundario a tópicos + subtópicos
+
+### El problema: `topico_secundario` mezclaba dos preguntas distintas
+
+Señalado por el usuario mirando un payload real: *"no me parece correcto que si el tópico principal es deporte, el secundario pueda ser espectáculo"*. Tenía razón, y el motivo no era el ejemplo puntual sino el diseño del campo.
+
+`topico` + `topico_secundario` (Fase 4) representaba con la misma pareja principal/secundario dos cosas que no son lo mismo:
+
+1. **Otra categoría igual de válida** — el velorio de Jorge Messi es deportes Y espectáculos, sin que una sea subordinada de la otra. Las dos secciones tienen la misma razón.
+2. **Un recorte más fino DENTRO de una categoría** — una cobertura de deportes que específicamente es sobre fútbol.
+
+Meter las dos bajo un campo "secundario" produce combinaciones que no describen bien ninguna de las dos preguntas: `topico=deportes, topico_secundario=espectaculos` parece decir que espectáculos es menos importante que deportes, cuando en realidad son pares. Y no había ningún lugar para representar "fútbol dentro de deportes" en absoluto.
+
+### El diseño: dos listas independientes, con la jerarquía garantizada por código, no por el modelo
+
+- **`topicos: List[Topico]`**, 1 o 2 categorías, **pares** (no principal + secundaria). El caso Messi pasa a ser `topicos=["deportes", "espectaculos"]`, sin jerarquía falsa.
+- **`subtopicos: List[Subtopico]`**, 0 o más recortes finos, cada uno con un padre fijo en `SUBTOPICO_PADRE`.
+
+La pieza que de verdad resuelve la objeción del usuario: **la jerarquía no depende de que el modelo la respete, la garantiza `con_padres_completos` después**. Si el modelo elige `subtopicos=[futbol]` sin haber incluido `deportes` en `topicos`, el código se lo agrega. Nunca puede quedar un subtópico huérfano de su categoría — es una regla mecánica, no un criterio que el modelo pueda aplicar bien o mal.
+
+```python
+def con_padres_completos(topicos, subtopicos) -> List[Topico]:
+    resultado = list(topicos)
+    for subtopico in subtopicos:
+        padre = SUBTOPICO_PADRE[subtopico]
+        if padre not in resultado:
+            resultado.append(padre)
+    return resultado
+```
+
+Puede devolver más de 2 tópicos en el caso límite de que el modelo ya haya llenado el tope de 2 sin incluir el padre de un subtópico elegido. Se prioriza la consistencia sobre el tope: el tope de 2 es una guía de prompt para no diluir la señal, no una regla dura que valga más que "un subtópico sin categoría".
+
+### Decisiones de diseño confirmadas con el usuario antes de tocar código
+
+Tres eran genuinamente su call, no algo para decidir en silencio (regla de `mission.md`):
+
+1. **Enum de subtópicos plano y único, no uno por categoría.** Gemini estructurado no puede acotar un enum según el valor de otro campo del mismo objeto — un enum por categoría no evitaría la validación en código y solo complicaría el prompt. Confirmado además que la conversión de Pydantic a schema de Gemini (`origin.model_json_schema()`, vía `google.genai._transformers.process_schema`) preserva `min_length`/`max_length` como `minItems`/`maxItems` del lado de la API — probado localmente antes de comprometerse al diseño.
+2. **Tope de 2 tópicos por ángulo**, igual al límite implícito del diseño anterior. Sin tope la señal se diluye y el filtro por categoría deja de servir para navegar.
+3. **Taxonomía de subtópicos construida en el momento**, no diferida. Se midió contra la base real en vez de inventarse.
+
+### La taxonomía: medida, no de memoria
+
+Primera pasada: contar el primer segmento de URL contra `SECCIONES` (la tabla ya existente para `topico_declarado`). Resultado inesperado: varias entradas de `SECCIONES` que parecían buenas candidatas a subtópico —`futbol`, `famosos`— **tenían cero notas** en el roster de medios activos. Eran de una evaluación de medios anterior (Fase 2/3), no de los 6 medios que ingerimos hoy. Contar de memoria en vez de medir habría producido una taxonomía con entradas muertas.
+
+Segunda pasada, la que importó: mirar el **segundo segmento** de URL bajo las secciones grandes (`deportes`, `economia`, `sociedad`, `espectaculos`, `internacional`), sobre 1.995 noticias reales:
+
+| sección | 2do segmento | notas |
+|---|---|---:|
+| deportes | futbol | 246 |
+| deportes | rugby / hockey / tenis / automovilismo / basquetbol | 12 / 5 / 5 / 4 / 3 |
+| espectaculos | personajes | 13 |
+| espectaculos | teatro | 6 |
+| espectaculos | musica | 5 |
+| espectaculos | cine | 3 |
+| economia | campo | 31 |
+| economia | negocios | 8 |
+| sociedad | psicologia / jardineria | 8 / 6 |
+
+Combinado con lo que ya aportaba el primer segmento (`teve` 55, `musica` 18, `romances` 13, `cine-y-series` 12, `negocios` 54, `campo` 11, `estados-unidos` 97, `propiedades` 31, `autos` 23, `cocina` 15), la taxonomía final quedó en **16 subtópicos sobre 5 categorías**:
+
+```
+deportes:       futbol, rugby, hockey, tenis, automovilismo, basquetbol
+espectaculos:   teve, musica, cine, chimentos
+economia:       negocios, campo
+internacional:  estados_unidos
+lifestyle:      propiedades, autos, cocina
+```
+
+Política, policiales, tecnología y ciencia quedan **sin subtópicos a propósito**: no apareció ninguna sección de URL que se distinga con fuerza de la categoría misma. Es preferible que el modelo no elija nada a que elija de una lista sin respaldo — mismo criterio que ya rige `topico_declarado` devolviendo `None`.
+
+Judgment calls editoriales, no medidos, confirmados con el usuario:
+
+- **`chimentos`** agrupa `romances` (13) + `personajes` (13) — contenido de farándula/rumores. El nombre es una elección de estilo, no un dato.
+- **Los deportes minoritarios entraron igual** (rugby 12, hockey 5, tenis 5, automovilismo 4, basquetbol 3) pese a volumen bajo, por decisión explícita del usuario — completitud editorial por sobre la evidencia estricta en este caso puntual.
+- **`salud` y `educacion` (bajo sociedad), agregadas en una segunda pasada.** Bajo `sociedad` solo habían aparecido `psicologia` (8) y `jardineria` (6) con volumen medido, ninguno con espalda suficiente. Pero revisando el resultado, el usuario señaló que salud y educación son categorías que alguien busca específicamente, y no tenerlas de entrada dejaría esas búsquedas sin filtro fino desde el día uno — mismo criterio que los deportes minoritarios, aplicado retroactivamente. Medido en el corpus de 6 medios activos: `salud` con 18 notas de primer segmento (mismo orden que `musica`, que sí había entrado); `educacion` con **0** — está en `SECCIONES` desde Fase 4 pero ningún medio activo la usa hoy como sección propia. Se sumó igual, siguiendo el mismo criterio ya aceptado: la completitud editorial pesa más que la evidencia estricta cuando el usuario lo pide explícitamente.
+
+`subtopico_declarado(url)` (nuevo en `topicos.py`) es el mismo patrón que `topico_declarado`, pero mira los primeros **dos** segmentos de la ruta en vez de uno: medido, el 87% de las notas de deportes con un segundo segmento útil lo tienen en `/deportes/futbol/...`, no en `/futbol/...`.
+
+### Migración de datos: el secundario viejo se vuelve un tópico par, no un subtópico
+
+`Sintesis.topico` + `Sintesis.topico_secundario` (dos strings nullable) pasan a `Sintesis.topicos` + `Sintesis.subtopicos` (dos listas JSONB) — migración `27e6744ee0b2`, escrita a mano por los mismos motivos que la de `feeds_rss` en Fase 5: hay datos que backfillear, y un autogenerate habría hecho add + drop perdiendo el tópico de cada síntesis ya publicada.
+
+Backfill: `topico` pasa a ser el primer elemento de `topicos`; si había `topico_secundario`, se agrega como **segundo tópico par**, no como subtópico — es la traducción correcta bajo el diseño nuevo, porque bajo el viejo esos valores YA eran categorías de pleno derecho, nunca un recorte fino. `subtopicos` queda en `[]` para todo lo existente: no hay forma de reconstruir un recorte que el diseño anterior no capturaba.
+
+Verificado contra la base real tras aplicar la migración (77 síntesis existentes): 30 con 2 tópicos (las que tenían secundario), 47 con uno solo, las 77 con `subtopicos` vacío. Ninguna perdió su tópico.
+
+### `_persistir`: la congelación se generaliza a listas sin cambiar la semántica
+
+El tópico ya estaba congelado desde su publicación (Fase 4: mover una publicación de Deportes a Espectáculos entre entregas confunde a quien ya la vio). Esa semántica se preserva idéntica con listas: en una actualización, `topicos`/`subtopicos` solo se completan si `sintesis.topicos` está vacío (síntesis previa al campo o al rediseño); si ya tiene valor, no se toca, sin importar qué haya elegido el modelo esta vez.
+
+### Validado contra Gemini real, no solo mockeado
+
+Sobre 4 clusters reales sin síntesis previa (para forzar la rama de creación con el schema nuevo):
+
+| cluster | resultado |
+|---|---|
+| Rumores Griselda Siciliani / Emiliano Brancciari | `topicos=["espectaculos"]`, `subtopicos=["chimentos"]` |
+| Thiago Medina imputado | `topicos=["policiales"]`, `subtopicos=[]` |
+| Tren choca cerca de "la Bombonera" | `topicos=["sociedad", "policiales"]`, `subtopicos=[]` |
+| Crédito en dólares (Gobierno/bancos) | 4 ángulos generados, 4 descartados por cobertura insuficiente — sin relación con tópicos |
+
+Dos cosas para el registro: el modelo **ya incluyó el padre correcto por su cuenta** en el caso de Griselda (`espectaculos` junto con `chimentos`), así que `con_padres_completos` no tuvo que intervenir en ningún caso real — la garantía mecánica queda como red de seguridad probada por unit tests, no como algo que se dispare seguido. Y el caso del tren cerca de "la Bombonera" es una buena señal de que el modelo lee el texto y no hace pattern-matching de superficie: pese a la mención del estadio, no lo etiquetó como deportes.
+
+Confirmado además, antes de comprometerse al `max_length=2` en el schema: `google.genai` convierte un `List[Enum]` de Pydantic con `Field(min_length=1, max_length=2)` a un `ARRAY` con `minItems`/`maxItems` en el schema real que recibe la API — no es un supuesto, se probó localmente contra la librería instalada.
+
+### Contrato del webhook actualizado
+
+`specs/webhook_contract.md` — `topico`/`topico_secundario` pasan a `topicos`/`subtopicos`, con la taxonomía completa de subtópicos, la garantía de que todo subtópico tiene su padre presente, y un ejemplo real con subtópico poblado. **Sin entrega real todavía** (falta URL y secreto del otro equipo), así que el cambio no rompe nada en producción — pero como es un documento compartido, queda marcado explícitamente como cambio de forma sobre una versión anterior para que el otro equipo lo vea si ya había empezado a integrar contra el contrato viejo.
+
+241/241 tests (221 + 20 netos nuevos: `test_topicos.py` reescrito con 41 tests y cobertura 100% del módulo `topicos.py`; `test_synthesis.py` y `test_webhook_delivery.py` actualizados a las listas nuevas, con casos nuevos para la garantía de `con_padres_completos`). 96% de cobertura total.

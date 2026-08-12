@@ -2,8 +2,8 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. 221/221 tests, 95,5% de cobertura.
-**Siguiente:** operar el motor con el back-end real y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
+**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos) que siguió: 241/241 tests, 96% de cobertura.
+**Siguiente:** avisar al equipo de back-end del cambio de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`), operar el motor con el back-end real, y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
 
 ---
 
@@ -82,7 +82,7 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 - [x] **Probado contra Gemini real** con `gemini-3.5-flash-lite`: 6.747 tokens de entrada, 879 de salida, 0 de razonamiento; separó un cluster en dos ángulos correctos con comparativa citada. Detalle y correcciones en `change_logs.md`
 - [x] **Categorías sin hecho** (`categorias.py`): horóscopos, recetas y quiniela quedan fuera del agrupamiento — no hay enfoques que comparar. Qué se hace con ellas es del back-end
 - [x] **Validado de punta a punta con datos reales**: 11 publicaciones sobre 8 hechos, tres de ellos con dos ángulos cada uno
-- [x] **Tópico por publicación** (`topicos.py`): taxonomía cerrada de 10 categorías, principal + secundario opcional. La sección declarada por cada medio entra al prompt como pista y el modelo decide leyendo los textos — los medios discrepan y esa discrepancia es editorial, no ruido a promediar (migración `eb625bff05fc`)
+- [x] **Tópico por publicación** (`topicos.py`): taxonomía cerrada de 10 categorías. La sección declarada por cada medio entra al prompt como pista y el modelo decide leyendo los textos — los medios discrepan y esa discrepancia es editorial, no ruido a promediar (migración `eb625bff05fc`). **Rediseñado en Fase 5**: `topico`/`topico_secundario` (principal + secundaria) pasaron a `topicos`/`subtopicos` (categorías pares + recorte fino de 16 subtópicos en 5 categorías, con la jerarquía garantizada por código). Ver `change_logs.md`.
 - [x] **Entrega al backend por webhook** (`webhook_delivery.py`): firma HMAC-SHA256 sobre `timestamp.cuerpo`, un request por síntesis, `POST /deliver` manual con `forzar`. El paso es un **barrido de todo lo pendiente**, así que el job de reintento planificado no hizo falta
 - [x] **Contrato documentado para el equipo de back-end**: `specs/webhook_contract.md`, con payload real, validación de firma y semántica de reintentos
 - [ ] Validación de neutralidad de lo que devuelve el modelo — **no es detectable por código de forma confiable**; se ataca con el prompt y revisión manual sobre corridas reales
