@@ -2,8 +2,8 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 4 (Síntesis Neutra con IA) ✅ **completa**. El motor produce publicaciones reales de punta a punta y las entrega al back-end: ingesta → vectorización → clustering → fusión → síntesis por ángulo con Gemini → webhook firmado. Validado contra 1.296 noticias y 195/195 tests.
-**Siguiente:** Fase 5 (Deployment y Escalabilidad).
+**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. 221/221 tests, 95,5% de cobertura.
+**Siguiente:** operar el motor con el back-end real y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
 
 ---
 
@@ -101,14 +101,29 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 
 ---
 
-## Fase 5: Deployment y Escalabilidad (Por Hacer)
+## Fase 5: Deployment y Escalabilidad ✅ COMPLETA (alcance mínimo)
 
-- [ ] Kubernetes manifests
-- [ ] CI/CD (GitHub Actions)
-- [ ] Monitoring (Prometheus, Grafana) — métricas: latencia de ingesta, precisión de clustering, cobertura de síntesis, errores por fuente
-- [ ] Caching (Redis)
-- [ ] Rate limiting
-- [ ] Resolver los puntos de quiebre pendientes de `tech_stack.md` (pool de conexiones, scheduler multi-réplica, memoria de embeddings)
-- [ ] **Consultas que no escalan**, detectadas en la revisión de código al cerrar Fase 4. No molestan con los volúmenes de hoy pero crecen sin techo:
-  - `synthesis.clusters_pendientes` carga la tabla `SintesisNoticia` entera en cada corrida
-  - `search.listar_clusters` y `synthesis.descartar_vencidos_sin_sintetizar` hacen N+1 consultas
+Alcance decidido tras calibración con el usuario: **VPS único con Docker Compose** (no Kubernetes) y **stack mínimo viable**, dado que el proyecto es de desarrollo propio con límite de costos duro y `mission.md` pide explícitamente no resolver problemas de escala que todavía no existen. El roadmap original listaba Kubernetes, Prometheus/Grafana, Redis y rate limiting — una plantilla genérica escrita al arrancar el proyecto, sin relación con el volumen real de uso (interno, sin tráfico externo). Detalle completo de la decisión y de cada elección técnica en `change_logs.md`.
+
+- [x] **CI con GitHub Actions** (`.github/workflows/ci.yml`): job `tests` corre `pytest` con cobertura ≥80% en cada push/PR a `main`, sin servicio de Postgres — verificado que la suite entera (221 tests) pasa contra SQLite en memoria, sin tocar la base real. Job `migraciones`, separado, aplica `alembic upgrade head` contra Postgres+pgvector real (`pgvector/pgvector:pg16`, el mismo que usa `docker-compose.yml`) — es el riesgo real no cubierto por los tests unitarios, y ya mordió una vez en Fase 4.
+- [x] **`docker-compose.yml` completo**: servicio `app` agregado junto a `db`, con `depends_on: condition: service_healthy` y migración de Alembic al arrancar (`alembic upgrade head && uvicorn ...` en el mismo `command`). Validado en vivo: build exitoso, `app` esperó a que `db` estuviera healthy, `GET /` respondió `200` con `database: ok`, y al cortar `db` a mano el contenedor pasó a `unhealthy` y `GET /` devolvió `503` — y se recuperó solo al reiniciar `db`, sin reiniciar `app`.
+- [x] **Las 3 consultas que no escalaban** (detectadas al cerrar Fase 4): `synthesis.clusters_pendientes`, `search.listar_clusters` y `synthesis.descartar_vencidos_sin_sintetizar` — resueltas con `selectinload` en vez de N+1 o carga de tabla completa. Apareció un cuarto punto no previsto en el diseño original: `descartar_vencidos_sin_sintetizar` seguía siendo N+1 después del `session.commit()`, porque SQLAlchemy expira los atributos de los objetos al commitear y el código volvía a leer `c.id`/`c.noticias` después — se resolvió capturando esos valores antes del commit. Los tres fixes tienen test de no-escalamiento (N chico vs. N grande da el mismo número de queries).
+- [x] **Pool de conexiones configurado**: `DB_POOL_SIZE=5` / `DB_MAX_OVERFLOW=10` / `DB_POOL_TIMEOUT=30` / `DB_POOL_RECYCLE=1800`, nuevos en `config.py`, calibrados contra un solo proceso Uvicorn (Dockerfile sin `--workers`).
+- [x] **Healthcheck real**: `GET /` verifica conectividad a la base (`SELECT 1` vía `verificar_conexion`) y devuelve `503` si falla, en vez de solo confirmar que Uvicorn responde. Es lo que usa el `HEALTHCHECK` del Dockerfile para que Compose pueda reiniciar el contenedor.
+
+**Validado**: 221/221 tests, 95,5% de cobertura. `docker compose up --build` probado de punta a punta contra Postgres real, incluida la caída y recuperación de la base.
+
+**Diferido a propósito** (no se implementó en esta fase; se retoma cuando haya tráfico real que lo justifique — ver `mission.md`, "no resolver problemas de escala que todavía no existen"):
+- **Kubernetes**: un VPS único con Docker Compose alcanza para el volumen de uso actual (interno, sin usuarios externos).
+- **Redis / caching**: no hay endpoint con carga de lectura que lo justifique hoy.
+- **Prometheus / Grafana**: sin operación 24/7 con guardia, las métricas no tienen quién las mire todavía; los logs + las alertas por mail (`alerts.py`) cubren el caso de uso actual.
+- **Rate limiting**: la API no es pública. Se retoma si eso cambia (ver `mission.md`, sección Seguridad).
+- **Autenticación pública de la API**: mismo motivo.
+- **Scheduler multi-réplica, memoria de embeddings por worker, engine async** (`tech_stack.md`, puntos 1, 4 y 6 de Escalabilidad): quedan abiertos porque siguen sin resolverse — son problemas de *más de una réplica*, y esta fase fija una sola.
+- **`agrupar_pendientes` cuadrático** (`tech_stack.md`, punto 9): no entra en esta fase — es un problema de volumen de noticias, no de deployment, y no se observó todavía con los 6 medios actuales.
+
+---
+
+## Backlog post-1.0 (rama nueva, no bloquea Fase 5)
+
+**Segunda vía de ingesta: extracción de artículo por URL para Clarín y Perfil**, vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded`. Medido y viable — plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Diferido a propósito: se retoma recién con Fase 5 cerrada, el back-end integrado y probado, y una versión 1.0 estable etiquetada. No se toca la ingesta mientras compite por atención con cerrar la comunicación real con el back-end.

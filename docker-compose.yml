@@ -17,5 +17,29 @@ services:
       timeout: 5s
       retries: 5
 
+  app:
+    build: .
+    container_name: sin_ruido_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # El .env local (fuera de Docker) apunta a localhost:5432 para
+      # desarrollo sin contenedores; acá se pisa solo esta variable porque
+      # dentro de la red de compose la app resuelve "db", no localhost.
+      DATABASE_URL: postgresql+psycopg://usuario:password@db:5432/sin_ruido
+    ports:
+      - "8000:8000"
+    # alembic upgrade head antes de uvicorn, en el mismo comando en vez de un
+    # service `migrate` aparte: es idempotente (no-op si ya está al día) y
+    # falla rápido y ruidoso si la migración está rota -- el contenedor no
+    # arranca, que es la señal correcta. Un service separado es más "puro"
+    # pero es una segunda definición de servicio para lo mismo; en un VPS
+    # único no compra nada.
+    command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
+
 volumes:
   sin_ruido_pgdata:

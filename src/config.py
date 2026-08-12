@@ -183,6 +183,52 @@ class Settings(BaseSettings):
     # las vuelve a incluir cuando el problema del otro lado está resuelto.
     WEBHOOK_MAX_INTENTOS: int = 5
 
+    # --- Base de datos (Fase 5) ---
+    # Ver specs/tech_stack.md, punto 2 de Escalabilidad. Quedaba sin definir a
+    # propósito hasta fijar el despliegue real: el valor correcto depende de
+    # cuántos procesos compiten por conexiones, y eso lo decide Fase 5 (un
+    # solo proceso Uvicorn, sin `--workers` -- ver Dockerfile).
+
+    # Conexiones que el pool mantiene siempre abiertas. Aunque los endpoints
+    # son síncronos, FastAPI los corre en el threadpool de Starlette, así que
+    # un solo proceso Uvicorn sí atiende varias requests a la vez, cada una
+    # con su propia conexión vía `get_session`. El job del scheduler suma una
+    # conexión más, sostenida durante todo el pipeline. 5 alcanza con margen:
+    # hoy no hay tráfico público (ver mission.md, "no resolver problemas de
+    # escala que todavía no existen").
+    DB_POOL_SIZE: int = 5
+
+    # Conexiones extra que el pool abre por encima de `DB_POOL_SIZE` ante un
+    # pico, y cierra después. Con 10 más el techo de este proceso queda en 15
+    # conexiones -- lejos del `max_connections` por defecto de Postgres (100),
+    # con margen para conectarse a mano (psql, un script) sin agotar el pool
+    # de la app.
+    DB_MAX_OVERFLOW: int = 10
+
+    # Segundos que una request espera una conexión libre del pool antes de
+    # fallar. Es el valor por defecto de SQLAlchemy -- se deja explícito acá
+    # para que quede documentado y no dependa de un default implícito de la
+    # librería. Si esto empieza a saltar, el diagnóstico correcto es "el pool
+    # quedó chico o algo lo está reteniendo", no subir el número a ciegas.
+    DB_POOL_TIMEOUT: int = 30
+
+    # Segundos tras los que una conexión se descarta y se reabre, aunque del
+    # lado de la app siga viéndose viva. Protege contra conexiones que
+    # Postgres (o un firewall/NAT del VPS) cierra del otro lado por
+    # inactividad sin avisar: `pool_pre_ping` (ya activo) recién detecta la
+    # conexión muerta al intentar usarla; esto la renueva antes de que pase.
+    # 30 min es conservador para el tráfico de hoy y no genera reconexiones
+    # perceptibles.
+    DB_POOL_RECYCLE: int = 1800
+
+    # Si más adelante se suman réplicas de la API (tech_stack.md, punto 4 de
+    # Escalabilidad -- hoy fuera de alcance): cada réplica abre su propio
+    # pool, así que N réplicas piden hasta N * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+    # conexiones. Con estos valores, a partir de ~6 réplicas ya se acerca al
+    # `max_connections` por defecto de Postgres (100), y ahí hay que bajar el
+    # pool por réplica, subir `max_connections`, o sumar un pooler (PgBouncer)
+    # -- ninguna de las tres hace falta con una sola réplica.
+
 
 # Instancia única de configuración, importada en el resto de la aplicación.
 settings = Settings()

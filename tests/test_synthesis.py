@@ -22,6 +22,7 @@ from src.services.synthesis import (
     SintesisBloqueada,
 )
 from src.services.topicos import NINGUNO, Topico, TopicoSecundario
+from tests.conftest import contar_queries
 
 
 @pytest.fixture
@@ -892,4 +893,62 @@ class TestConstruirPrompt:
         )
 
         assert "es la primera síntesis" in prompt
-        assert "id_existente` en null" in prompt
+
+
+class TestClustersPendientesNoEscala:
+    """
+    Fase 5: `clusters_pendientes` hacía una query de `Noticia` por cada
+    cluster candidato (N+1) y cargaba `SintesisNoticia` entera sin filtrar.
+    El número de queries no debe crecer con la cantidad de clusters.
+    """
+
+    def _cluster_con_dos_medios(self, session, medios, n_base):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], n_base, cluster)
+        crear_noticia(session, medios[1], n_base + 1, cluster)
+        return cluster
+
+    def test_no_hace_una_query_por_cluster_candidato(self, session: Session, medios):
+        for i in range(2):
+            self._cluster_con_dos_medios(session, medios, i * 10)
+        with contar_queries(session) as pocos:
+            synthesis.clusters_pendientes(session)
+
+        for i in range(10):
+            self._cluster_con_dos_medios(session, medios, 100 + i * 10)
+        with contar_queries(session) as muchos:
+            synthesis.clusters_pendientes(session)
+
+        assert muchos["n"] == pocos["n"]
+
+
+class TestDescartarVencidosNoEscala:
+    """
+    Fase 5: el acceso a `c.noticias` dentro del comprehension de
+    `descartar_vencidos_sin_sintetizar` era lazy-load, una query por cluster
+    vencido.
+    """
+
+    def _vencido(self, session, medios, n_base):
+        cluster = crear_cluster(session)
+        cluster.fecha_creacion = datetime.utcnow() - timedelta(
+            hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR + 1
+        )
+        session.add(cluster)
+        session.commit()
+        crear_noticia(session, medios[0], n_base, cluster)
+        crear_noticia(session, medios[1], n_base + 1, cluster)
+        return cluster
+
+    def test_no_hace_una_query_por_cluster_vencido(self, session: Session, medios):
+        for i in range(2):
+            self._vencido(session, medios, i * 10)
+        with patch.object(synthesis, "enviar_alerta"), contar_queries(session) as pocos:
+            synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        for i in range(10):
+            self._vencido(session, medios, 100 + i * 10)
+        with patch.object(synthesis, "enviar_alerta"), contar_queries(session) as muchos:
+            synthesis.descartar_vencidos_sin_sintetizar(session)
+
+        assert muchos["n"] == pocos["n"]

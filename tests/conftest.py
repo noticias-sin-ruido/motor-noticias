@@ -2,10 +2,12 @@
 Configuración y fixtures compartidas para todos los tests.
 """
 import os
+from contextlib import contextmanager
 from typing import Generator
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
@@ -46,3 +48,24 @@ def client_fixture(session: Session) -> TestClient:
     yield client
 
     app.dependency_overrides.clear()
+
+
+@contextmanager
+def contar_queries(session: Session):
+    """
+    Cuenta las sentencias SQL ejecutadas dentro del bloque `with`. La usan los
+    tests que fijan un techo a los fixes de N+1 de Fase 5: el número de
+    queries no debe crecer con la cantidad de filas, solo quedar en una
+    constante chica. Ver specs/change_logs.md, Fase 5.
+    """
+    engine = session.get_bind()
+    contador = {"n": 0}
+
+    def _contar(conn, cursor, statement, parameters, context, executemany):
+        contador["n"] += 1
+
+    event.listen(engine, "before_cursor_execute", _contar)
+    try:
+        yield contador
+    finally:
+        event.remove(engine, "before_cursor_execute", _contar)

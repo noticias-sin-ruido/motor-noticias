@@ -4,10 +4,11 @@ from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query
+from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from .config import settings
-from .database import get_engine, get_session, init_db
+from .database import get_engine, get_session, init_db, verificar_conexion
 from .services.alerts import enviar_alerta
 from .services.clustering import (
     agrupar_pendientes,
@@ -131,13 +132,22 @@ app = FastAPI(
 
 
 @app.get("/")
-def root():
-    """Salud del servicio. La hora sirve para verificar el reloj del contenedor."""
-    return {
-        "status": "ok",
+def root(session: Session = Depends(get_session)):
+    """
+    Salud del servicio. Verifica conectividad real a la base -- es lo que usa
+    el HEALTHCHECK del Dockerfile para decidir si el contenedor está sano. La
+    hora sirve para verificar el reloj del contenedor.
+    """
+    db_ok = verificar_conexion(session)
+    payload = {
+        "status": "ok" if db_ok else "degradado",
+        "database": "ok" if db_ok else "error",
         "environment": settings.ENVIRONMENT,
         "hora_local": ahora_local().isoformat(timespec="seconds"),
     }
+    if not db_ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 @app.post("/ingest")

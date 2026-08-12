@@ -9,6 +9,7 @@ la base con el operador `<=>` en vez de traer los vectores a Python.
 import logging
 from typing import List, Optional
 
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from ..models import Medio, Noticia
@@ -77,7 +78,13 @@ def listar_clusters(
     """
     from ..models import Cluster  # import local para evitar ciclos
 
-    consulta = select(Cluster)
+    # `selectinload` encadenado trae, en dos consultas adicionales (no una por
+    # cluster), todas las noticias de todos los clusters y el medio de todas
+    # esas noticias -- antes esto era 1 + N consultas, hasta 101 con
+    # `limite=100`.
+    consulta = select(Cluster).options(
+        selectinload(Cluster.noticias).selectinload(Noticia.medio)
+    )
     if estado:
         consulta = consulta.where(Cluster.estado == estado)
 
@@ -87,28 +94,23 @@ def listar_clusters(
 
     resultado = []
     for cluster in clusters:
-        filas = session.exec(
-            select(Noticia, Medio)
-            .join(Medio, Medio.id == Noticia.medio_id)
-            .where(Noticia.cluster_id == cluster.id)
-        ).all()
-
+        noticias = cluster.noticias
         resultado.append(
             {
                 "id": cluster.id,
                 "titulo_evento": cluster.titulo_evento,
                 "estado": cluster.estado,
                 "fecha_creacion": iso_local(cluster.fecha_creacion),
-                "cantidad_noticias": len(filas),
-                "medios": sorted({medio.nombre for _, medio in filas}),
+                "cantidad_noticias": len(noticias),
+                "medios": sorted({n.medio.nombre for n in noticias}),
                 "noticias": [
                     {
-                        "id": noticia.id,
-                        "titulo": noticia.titulo,
-                        "url": noticia.url,
-                        "medio": medio.nombre,
+                        "id": n.id,
+                        "titulo": n.titulo,
+                        "url": n.url,
+                        "medio": n.medio.nombre,
                     }
-                    for noticia, medio in filas
+                    for n in noticias
                 ],
             }
         )

@@ -18,7 +18,22 @@ class TestRoot:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
+        assert data["database"] == "ok"
         assert "environment" in data
+
+    def test_root_reporta_degradado_si_la_base_no_responde(self, client: TestClient):
+        """
+        El healthcheck del Dockerfile depende de esto para reiniciar el
+        contenedor si Postgres se cae -- antes `GET /` solo confirmaba que
+        Uvicorn respondía, no que la base estuviera viva.
+        """
+        with patch("src.main.verificar_conexion", return_value=False):
+            response = client.get("/")
+
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "degradado"
+        assert data["database"] == "error"
 
 
 class TestIngestEndpoint:

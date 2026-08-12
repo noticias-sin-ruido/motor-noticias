@@ -583,7 +583,7 @@ Por eso los candidatos correctos son Clarín y Perfil: son nacionales y **ya se 
 | Clarín | 4.207 car | 0/6 | 0,3 s | permite las rutas de artículo |
 | Perfil | 4.402 car | 0/6 | 0,3-0,5 s | permite las rutas de artículo |
 
-Eso los deja en el medio del pelotón de lo que ya tenemos (El Cronista 4.574, La Nación 3.805, TN 2.648, Ciudad 2.281). Adoptarlo **cambiaría la regla dura de Fase 2** —"el feed debe traer el artículo completo"— por una segunda vía de ingesta: un request HTTP por artículo en vez de uno por feed, con la fragilidad de depender del maquetado de cada medio. Queda como decisión abierta.
+Eso los deja en el medio del pelotón de lo que ya tenemos (El Cronista 4.574, La Nación 3.805, TN 2.648, Ciudad 2.281). Adoptarlo **cambiaría la regla dura de Fase 2** —"el feed debe traer el artículo completo"— por una segunda vía de ingesta: un request HTTP por artículo en vez de uno por feed, con la fragilidad de depender del maquetado de cada medio. Queda como decisión abierta — retomada y con plan de implementación al cierre de esta fase, ver "Segunda vía de ingesta: extracción por URL" más abajo.
 
 ### Revisión del código con las fases cerradas
 Con Fase 4 terminada se revisó todo el motor. Lo que apareció no fueron bugs sueltos sino **tres lugares donde el código no hacía lo que su propia documentación decía**, todos introducidos en las últimas correcciones. Vale anotarlo como patrón: el riesgo no estuvo en lo viejo sino en lo recién escrito.
@@ -677,3 +677,107 @@ Detalle de implementación: el secundario es un enum aparte que incluye el valor
 - El vuelco de la lancha frente a la Estatua de la Libertad: los dos medios dijeron `internacional` y el modelo puso `policiales + internacional`. **Es el único caso donde sobreescribió una señal unánime.** Se sostiene (un accidente con víctimas es policiales, y dejó internacional como secundario), pero es el patrón a vigilar.
 
 **El tópico se congela igual que el título.** Mover una publicación de Deportes a Espectáculos entre una entrega y la siguiente es el mismo problema que renombrarla: del otro lado ya está en una sección, con lectores encima. La única excepción son las síntesis anteriores a que el campo existiera, donde no hay nada que preservar.
+
+### Segunda vía de ingesta: extracción por URL — **diferida a después de la 1.0**
+
+Retomando la decisión abierta más arriba. Reconfirmado con una segunda corrida, dos días después de la primera:
+
+| | 1ª corrida (6 art.) | 2ª corrida (6 art.) | fallos |
+|---|---:|---:|---:|
+| Clarín | 4.207 car | 4.419 car | 0/6, 0/6 |
+| Perfil | 4.402 car | 2.741 car | 0/6, 0/6 |
+
+**Clarín se sostiene entre corridas; Perfil se movió 38%** — con la segunda muestra entró una entrevista de 17.398 caracteres que arrastra la mediana. Con *n*=6 por corrida el número no es estable; lo que sí se repitió sin excepción en las dos rondas: 0 fallos sobre 12 artículos, ninguno por debajo de 400 caracteres, 0,3-0,5 s por artículo, `robots.txt` de ambos permite las rutas de artículo sin `crawl-delay` declarado. La lectura cualitativa ("el método funciona y devuelve un artículo, no basura") está firme; la lectura cuantitativa exacta no — antes de decidir con el número hace falta correrlo sobre 40-50 artículos por medio, no 6.
+
+**Medido el volumen que agregaría por ciclo:**
+
+| | items del feed | ventana temporal | ritmo | por ciclo de 15 min |
+|---|---:|---:|---:|---:|
+| Clarín (`/rss/lo-ultimo/`) | 10 | 0,7 h | 14,0 notas/h | ~3,5 |
+| Perfil (`/feed/politica`) | 70 | 36,7 h | 1,9 notas/h | ~0,5 |
+
+Del orden de 4 requests extra por ciclo — insignificante como carga. **Pero el feed de Clarín cubre apenas 42 minutos**, contra las 7 horas de La Nación. El margen de tolerancia a una caída del pipeline pasa de 28× a 2,8×: tres ciclos salteados y lo publicado en ese hueco se pierde sin dejar rastro, porque el feed ya lo rotó. Es justo el caso para el que se dejó la capacidad de `Medio.feeds_rss` al revertir los feeds de sección (ver arriba) — no como archivo redundante, sino como red de contención para un feed general demasiado corto.
+
+**Por qué es viable sin poner en riesgo lo que ya funciona:** la costura ya existe. En `ingestion._procesar_items`, cuando `_parsear_entry` devuelve `None` por falta de `content:encoded`, hoy se descarta la nota (`stats["sin_contenido"] += 1`). Ese es el punto donde entraría la extracción — y el contrato de salida es un string `contenido_limpio` idéntico al que ya produce `limpiar_html`. De ahí en más (vectorización, clustering, síntesis, tópicos, webhook) nada distingue el origen del texto: **no hay nada que adaptar río abajo.**
+
+Lo que sí exige diseño, en orden de lo menos al más obvio:
+
+1. **El orden de filtrado tiene que invertirse.** Extraer antes de deduplicar bajaría la página de artículos que ya tenemos en cada corrida (el feed de Clarín re-sirve los mismos 10 items siempre) — de ~3,5 requests útiles por ciclo a 10, mayoría desperdiciados. `es_en_vivo` y la deduplicación por `guid`/`url` solo necesitan campos que el RSS sí trae, así que van antes; la extracción va al final, solo para lo que sobrevivió a los dos filtros.
+2. **El scheduler no tiene margen documentado.** `main.py` registra el job con `add_job(..., "interval", ...)` sin `max_instances`, `coalesce` ni `misfire_grace_time`. El default de APScheduler es `max_instances=1`: si una corrida se pasa de los 15 minutos, la siguiente **se descarta en silencio**, con un warning que nadie mira. Hoy es imposible (6 requests de feed). Con extracción de artículos de por medio, sigue siendo lejano pero deja de ser "no puede pasar" — y si pasa justo con Clarín, se combina con el punto anterior (ventana de 42 min) para perder noticias sin alerta.
+3. **La degradación pasa de ruidosa a silenciosa.** Hoy "sin cuerpo" es visible: cuenta en `stats["sin_contenido"]` y dispara un warning si el feed entero vino vacío. Si un medio rediseña su maquetado, `trafilatura` no falla — devuelve algo corto (menú, aviso de cookies) que *parece* contenido y contamina embeddings y prompts en silencio. Hace falta un piso de caracteres con alerta propia; no es un detalle, es parte del cambio.
+4. **La política de reintentos no se puede reusar tal cual.** `_descargar_feed` tolera hasta ~20 s de backoff por feed; multiplicado por artículo empujaría directo al punto 2. El extractor necesita la suya, más corta, y que un artículo caído se saltee solo ese artículo sin tirar el feed.
+5. **Tiene que activarse por medio, no global**, para no mandarle requests de página a los medios que ya entregan cuerpo completo por RSS (los 6 actuales). Eso es una columna nueva en `Medio` y su migración — chica, pero es esquema.
+
+**No entra en la app hasta validar que suma pares reales.** Diario Crónica fue la advertencia: 500 items por feed, bien formados, cero pares porque su agenda no se cruza con la nuestra. Para Clarín y Perfil hay indicio a favor (se los vio cubriendo CAME/Galperin y Milei/Lula, hechos que ya publicamos) pero es indicio, no medición — falta extraer un día completo de los dos, vectorizar contra el corpus real y contar pares por encima del umbral antes de escribir una sola línea de producción.
+
+**Se decidió explícitamente diferir todo esto a después del cierre de Fase 5.** Con el back-end integrado, probado y una versión 1.0 estable, se retoma en una rama nueva. Motivo: tocar la ingesta ahora compite por atención con la comunicación real con el back-end y sus pruebas, que es lo que cierra el producto mínimo. Esta sección documenta la discusión completa para no tener que rehacerla — decisión de diseño e implementación planeada, ejecución pendiente.
+
+---
+
+## Fase 5 — Deployment y Escalabilidad (alcance mínimo)
+
+### Kubernetes, Prometheus/Grafana, Redis y rate limiting quedan afuera — no es indecisión, es la escala real
+
+El roadmap traía esos cuatro ítems desde que se escribió el proyecto, sin relación con el volumen de uso real: un motor interno, sin tráfico público, corriendo hoy en un solo contenedor sin siquiera un servicio `app` en `docker-compose.yml`. `mission.md` lo dice explícito: *"no resuelvas problemas de escala que todavía no existen"*, y el proyecto tiene además una restricción dura de costos por ser desarrollo propio — Kubernetes y un stack de Prometheus/Grafana autoalojado son gasto de infraestructura real, no solo trabajo de más.
+
+Calibrado con el usuario: **VPS único con Docker Compose**, **stack mínimo viable**. Los cuatro quedan documentados en `roadmap.md` como diferidos a propósito, con el motivo de cada uno, no simplemente borrados — para que quien retome la fase sepa que fue una decisión y no un olvido.
+
+Alcance que sí quedó accionable: CI, completar `docker-compose.yml`, las 3 consultas que no escalaban, y el pool de conexiones. De paso, un healthcheck real — necesario para que el `HEALTHCHECK` del Dockerfile tenga algo que verificar de verdad.
+
+### El CI no lleva Postgres para correr los tests — y eso no es un atajo
+
+`tests/conftest.py` arma un engine SQLite en memoria (`StaticPool`) para toda la suite. Verificado antes de diseñar el workflow: los 215 tests que existían pasaban así, sin `DATABASE_URL`, sin Postgres levantado. Por qué eso es legítimo y no un hueco de cobertura:
+
+- `GET /search` mockea `buscar_noticias_similares` completo — el propio código ya documentaba que es porque usa el operador `<=>` de pgvector, que SQLite no soporta.
+- `pgvector.sqlalchemy.Vector` es un `UserDefinedType` genérico: en SQLite serializa a texto sin fallar al crear la columna ni al insertar, y solo fallaría si se usara el operador de distancia — que ningún test dispara.
+- `synthesis.clusters_pendientes` y `descartar_vencidos_sin_sintetizar` están probadas directo contra la sesión SQLite, sin mock: son SQL portable.
+- `search.listar_clusters` **no tenía tests** (no existía `tests/test_search.py`). Esta fase lo cerró.
+
+Sumar un servicio Postgres al job de tests no habría agregado cobertura real — habría sido ceremonia. Lo que sí es un riesgo genuino, y ya mordió una vez (la migración `979689aeb928` de Fase 4 rompía contra una base con datos por un `NOT NULL` sin `server_default`), es que las migraciones de Alembic apliquen limpias contra Postgres+pgvector real. Por eso el CI tiene **dos jobs con objetivos distintos**:
+
+- `tests`: `pytest --cov=src --cov-fail-under=80`, sin Postgres.
+- `migraciones`: un servicio `pgvector/pgvector:pg16` real, y el único paso es `alembic upgrade head`.
+
+Confirmado además que `alembic/env.py` importa solo `src.models` y `src.config` (no `src.services`), así que aplicar migraciones no dispara carga de spaCy/sentence-transformers/Gemini — el job de migraciones corre en segundos, no minutos. Y que `.dockerignore` no excluye `alembic/` ni `alembic.ini`, así que la imagen ya podía migrarse desde adentro sin tocarlo.
+
+Fuera de este workflow a propósito: build de la imagen Docker completa en CI. Sería la validación más fiel al Dockerfile real, pero agrega minutos de build (compilación de `numpy`/`scikit-learn`, descarga de `es_core_news_md`) sin que hubiera evidencia de que el Dockerfile se rompa. Se agrega si eso llega a pasar.
+
+### `docker-compose.yml`: migración en el mismo `command`, no un servicio aparte
+
+`app` corre `alembic upgrade head && uvicorn ...` como un solo comando, en vez de un servicio `migrate` separado con `depends_on: condition: service_completed_successfully`. La alternativa "pura" —un servicio dedicado— es una segunda definición de servicio para lo mismo, y en un VPS único con una sola réplica no compra nada: `alembic upgrade head` ya es idempotente (no-op si el esquema está al día) y falla rápido y ruidoso si una migración está rota — el contenedor no arranca, que es exactamente la señal que hace falta.
+
+`app` depende de `db` con `condition: service_healthy`, no solo `depends_on: [db]`: sin la condición, Compose arranca `app` en cuanto el contenedor de `db` existe, no cuando Postgres ya acepta conexiones — y la primera migración fallaría por una carrera, no por un error real.
+
+**Validado en vivo, con Postgres real** (no solo revisado a mano): `docker compose build app` compiló sin errores; `docker compose up -d` mostró que `app` esperó a que `db` pasara a `Healthy` antes de arrancar; los logs confirmaron `alembic upgrade head` corriendo (no-op, ya migrada) seguido de `Uvicorn running`; `curl http://localhost:8000/` devolvió `200` con `database: ok`; al cortar `db` con `docker compose stop db`, `GET /` pasó a devolver `503` con `status: degradado`, y Docker marcó el contenedor `app` como `unhealthy` en el siguiente ciclo del `HEALTHCHECK` (~30s); al reiniciar `db`, `app` se recuperó solo, sin reiniciarse — el `pool_pre_ping` hizo su trabajo.
+
+### Pool de conexiones: los valores y qué pasa si se agregan réplicas
+
+`DB_POOL_SIZE=5` / `DB_MAX_OVERFLOW=10` / `DB_POOL_TIMEOUT=30` / `DB_POOL_RECYCLE=1800`, nuevos en `config.py`, con el mismo estilo de comentario largo que el resto del archivo.
+
+Calibrados contra el hecho conocido de que hoy hay **un solo proceso Uvicorn** (el Dockerfile no pasa `--workers`): aunque los endpoints son síncronos, FastAPI los corre en el threadpool de Starlette, así que ese único proceso sí atiende varias requests a la vez, cada una con su propia conexión vía `get_session`, más la que sostiene el scheduler durante todo el pipeline. 5 conexiones de base + 10 de overflow (15 en total) da margen sin acercarse al `max_connections` por defecto de Postgres (100), dejando lugar para conectarse a mano (`psql`, un script) sin agotar el pool de la app.
+
+`pool_recycle=1800` no duplica a `pool_pre_ping` (que ya estaba activo): `pool_pre_ping` detecta una conexión muerta recién al intentar usarla; `pool_recycle` la descarta y renueva antes de que eso pase, protegiendo contra que Postgres o un firewall/NAT del VPS la cierren del otro lado por inactividad sin avisar.
+
+Qué pasa si más adelante se suman réplicas (fuera de alcance de esta fase, ver `tech_stack.md` punto 4): cada réplica abre su propio pool, así que N réplicas piden hasta N × 15 conexiones. A partir de ~6 réplicas eso ya se acerca al `max_connections` por defecto de Postgres, y ahí hace falta bajar el pool por réplica, subir `max_connections`, o sumar un pooler (PgBouncer) — ninguna de las tres hace falta con una sola réplica, así que no se resuelve ahora.
+
+### Las 3 consultas que no escalaban — y una cuarta que el diseño original no vio
+
+Detectadas en la revisión de código al cerrar Fase 4, documentadas como pendientes en `roadmap.md`. Las tres se resolvieron con el mismo patrón: reemplazar el acceso lazy a una relación dentro de un loop (o una carga de tabla completa) por `sqlalchemy.orm.selectinload`, que trae la relación de todas las filas padre en una consulta adicional acotada (`WHERE <fk> IN (...)`) en vez de una por fila. Se eligió `selectinload` sobre `joinedload` porque hay fan-out (un cluster tiene varias noticias) y `joinedload` habría duplicado filas del padre por cada hijo.
+
+- **`synthesis.clusters_pendientes`**: cargaba `SintesisNoticia.noticia_id` de **toda la tabla** sin filtrar (crecía con el historial del producto, no con el tamaño de la corrida), y hacía un `SELECT Noticia` por cada cluster candidato. Pasó a `selectinload(Cluster.noticias)` sobre los candidatos, y el filtro de `SintesisNoticia` acotado a los ids de noticias realmente en juego. De `2 + N` queries a 3 constantes.
+- **`search.listar_clusters`**: hacía `SELECT Noticia JOIN Medio` por cada cluster listado — hasta 101 queries con `limite=100` (el máximo del endpoint). Pasó a `selectinload(Cluster.noticias).selectinload(Noticia.medio)`, usando las relaciones que ya existían en los modelos en vez de un join manual. De `1 + N` a 3 constantes. De paso quedó con su primer test directo (`tests/test_search.py`, no existía — antes solo se probaba mockeada en `test_api.py`).
+- **`synthesis.descartar_vencidos_sin_sintetizar`**: el fix más chico a primera vista — precargar `Cluster.noticias` antes del comprehension que la recorría.
+
+El cuarto caso, no anticipado en el diseño: el test de no-escalamiento de `descartar_vencidos_sin_sintetizar` seguía fallando **después** de aplicar `selectinload`. La causa no estaba en la query de lectura sino en lo que pasa después: la función hace `session.commit()` para persistir `MARCA_CADUCADO`, y SQLAlchemy expira todos los atributos de los objetos al commitear por defecto (`expire_on_commit=True`) — incluidos `id` y las relaciones ya precargadas. El código seguía leyendo `c.id` y `c.noticias` (para el cuerpo del mail de alerta) **después** del commit, y cada lectura post-expiración dispara una recarga individual: el mismo N+1 que `selectinload` acababa de eliminar, reapareciendo un par de líneas más abajo. Se resolvió capturando `ids_perdidos` y `notas_perdidas` **antes** del commit. Vale anotarlo como el mismo patrón que ya apareció en la revisión de Fase 4: el bug estaba en código que ya se había tocado en esta misma pasada, no en lo viejo.
+
+Los tres (cuatro) fixes tienen test de no-escalamiento: se compara el número de queries entre pocas filas y muchas, y se exige que sea igual, en vez de fijar un número mágico (`assert queries <= 3`) — más robusto a que una futura query constante legítima no rompa el test sin que el N+1 haya vuelto de verdad. El helper `contar_queries` (nuevo en `tests/conftest.py`) engancha el evento `before_cursor_execute` de SQLAlchemy para contarlas dentro de un bloque `with`.
+
+### El healthcheck pasa a devolver 503, no un campo informativo
+
+Antes `GET /` devolvía siempre `200 {"status": "ok", ...}` — confirmaba que Uvicorn respondía, nada más. Con `app` corriendo dentro de Docker eso significa que el `HEALTHCHECK` del Dockerfile (`curl -f http://localhost:8000/`) nunca podía detectar una base caída: el proceso seguía vivo y respondiendo 200 aunque cada request real fallara río abajo.
+
+`verificar_conexion` (nuevo en `database.py`) corre `SELECT 1` contra la sesión de la request. Si falla, `GET /` devuelve `503` con `status: degradado` y `database: error` — `curl -f` interpreta cualquier código ≥400 como fallo, así que Docker marca el contenedor `unhealthy` con la misma señal que ya usaba, sin tocar el Dockerfile. Confirmado en la validación en vivo (sección de arriba) que el ciclo completo funciona: base caída → 503 → contenedor `unhealthy` → base recuperada → 200 sin reiniciar `app`.
+
+### Resultado
+
+221/221 tests (215 + 6 nuevos: 3 de `listar_clusters` en `tests/test_search.py`, 2 de no-escalamiento en `synthesis.py`, más el de healthcheck degradado), 95,5% de cobertura. `docker compose up --build` validado de punta a punta contra Postgres real, con caída y recuperación de la base incluida.

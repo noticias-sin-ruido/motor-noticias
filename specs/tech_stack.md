@@ -128,17 +128,19 @@ Medio (1) ─────→ (∞) Noticia
 Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica hoy — son decisiones válidas a la escala actual (4 medios, uso interno) que hay que revisar **antes** de escalar. Cada punto indica en qué fase conviene resolverlo (ver `roadmap.md`).
 
 1. **Engine de BD síncrono** (revisar en Fase 3+): `database.py` usa `create_engine` síncrono. Bajo carga real (ingesta corriendo a la vez que se atienden queries de usuarios) esto bloquea el event loop de FastAPI. Migrar a `AsyncEngine`/`asyncpg` si la latencia se vuelve un problema medible.
-2. **Pool de conexiones sin configurar** (Fase 3+): `get_engine()` no fija `pool_size`/`max_overflow` explícitamente. Con varios workers de Uvicorn el pool por defecto puede agotarse. Definir al fijar el despliegue real (Fase 5).
+2. ~~**Pool de conexiones sin configurar**~~ ✅ **RESUELTO en Fase 5**: `DB_POOL_SIZE=5` / `DB_MAX_OVERFLOW=10` / `DB_POOL_TIMEOUT=30` / `DB_POOL_RECYCLE=1800`, configurables por `.env`. Calibrados contra un solo proceso Uvicorn (el único que hay: Dockerfile sin `--workers`). El razonamiento completo, incluida la cuenta de qué pasa si se agregan réplicas, está en `config.py` (comentario largo, como el resto del archivo) y en `change_logs.md`.
 3. **Índice de pgvector** (revisar cuando crezca el volumen): sigue sin haber índice HNSW/IVFFlat sobre `Noticia.embedding`, **a propósito**. A la escala actual el scan secuencial se resuelve en milisegundos, y con un `WHERE` restrictivo el índice ANN pierde parte de su ventaja igual. Además el clustering ni siquiera usa el KNN de la base: compara centroides en memoria. El único consumidor real del KNN es `GET /search`. Crear el índice cuando la tabla `noticia` llegue al orden de las decenas de miles de filas.
-4. **Scheduler embebido, un solo proceso** (Fase 5): si en el futuro se escala la API a varias réplicas, cada una levantaría su propio scheduler y pollearía los feeds por separado (N veces el mismo trabajo). Separar en proceso propio si eso llega a pasar.
+4. **Scheduler embebido, un solo proceso** (diferido tras Fase 5 — ver roadmap.md, "Diferido a propósito"): si en el futuro se escala la API a varias réplicas, cada una levantaría su propio scheduler y pollearía los feeds por separado (N veces el mismo trabajo). Fase 5 fijó el despliegue en una sola réplica a propósito, así que esto sigue sin resolverse. Separar en proceso propio si eso llega a pasar.
 5. **Costo y rate limit del LLM de síntesis** (Fase 4): ✅ **decidido** — la síntesis se precalcula al alcanzar 2 medios, nunca on-demand por request, así que un pico de tráfico no dispara costo. Queda vigente el **rate limit**: en una corrida se sintetizan todos los clusters publicables de una (medido: 21), y la capa gratuita de Gemini limita por minuto. Necesita backoff con `tenacity`, igual que la ingesta.
 6. **Modelo de embeddings en memoria** (Fase 3/5): `sentence-transformers` carga el modelo en RAM por proceso; con varios workers de Uvicorn eso multiplica el consumo de memoria. Decidir si se comparte un único proceso de embeddings o se acepta el costo por worker.
 7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `mission.md`, "BD y migraciones".
 8. ~~**El pipeline se auto-repara pero es mudo**~~ ✅ **RESUELTO**: `services/alerts.py` avisa por mail ante el fallo de cualquier paso, con cooldown para no inundar la casilla, y en el scheduler cada paso corre aislado (la fusión es la única que corta la cadena, para no publicar duplicados). La contingencia de fondo sigue siendo la idempotencia de todos los pasos: un crash a mitad se recupera solo en la corrida siguiente. Queda pendiente el logging estructurado y las métricas, que cubre Monitoring en Fase 5.
 
-9. **`agrupar_pendientes` es cuadrático** (Fase 5): compara cada noticia suelta contra todas las demás de la ventana. Medido: 3,6 s con ~200 sueltas; proyectado, ~14 s con 400 y cerca de un minuto con 800. Con 6 medios y ventana de 12 h no se llega ni cerca, pero es el primer lugar que se va a poner lento al sumar medios. La salida sería acotar los candidatos con el KNN de pgvector en vez de comparar contra todo (ver punto 3, que hoy es el único motivo por el que el índice no hace falta).
+9. **`agrupar_pendientes` es cuadrático** (queda fuera de Fase 5 a propósito — es volumen de noticias, no deployment): compara cada noticia suelta contra todas las demás de la ventana. Medido: 3,6 s con ~200 sueltas; proyectado, ~14 s con 400 y cerca de un minuto con 800. Con 6 medios y ventana de 12 h no se llega ni cerca, pero es el primer lugar que se va a poner lento al sumar medios. La salida sería acotar los candidatos con el KNN de pgvector en vez de comparar contra todo (ver punto 3, que hoy es el único motivo por el que el índice no hace falta).
 
 10. **Los eventos de varios días generan clusters sucesivos** (Fase 4): un cluster cierra a las 12 h de creado, así que la cobertura del día siguiente arma uno nuevo, y la fusión solo toca clusters abiertos. Una historia larga (la muerte de Jorge Messi cubrió varios días) produce un segundo conjunto de publicaciones. En parte es correcto —el velorio es otro hecho— pero puede haber solapamiento. Revisar con síntesis reales a la vista.
+
+11. ~~**3 consultas que no escalaban**~~ ✅ **RESUELTO en Fase 5**: `synthesis.clusters_pendientes` (cargaba `SintesisNoticia` entera sin filtrar + N+1 sobre `Noticia`), `search.listar_clusters` (N+1 con join manual, hasta 101 queries con `limite=100`) y `synthesis.descartar_vencidos_sin_sintetizar` (N+1 vía relationship lazy-loaded). Los tres resueltos con `selectinload` acotado por `IN`. Apareció un cuarto caso no anticipado: en `descartar_vencidos_sin_sintetizar`, `session.commit()` expira los atributos por defecto (`expire_on_commit=True`), y el código volvía a leer `c.id`/`c.noticias` después del commit — mismo N+1, corriendo después en vez de antes. Se resolvió capturando esos valores antes de commitear. Detalle y las queries antes/después en `change_logs.md`.
 
 ---
 
@@ -172,18 +174,28 @@ uvicorn src.main:app --reload
 
 Guía completa y queries de verificación contra Postgres real: `VALIDACION_FASE2.md`.
 
-### Producción (con Docker)
+### Producción (Fase 5: VPS único con Docker Compose)
+
+`docker-compose.yml` ya define los dos servicios, `db` y `app`. `app` espera a que `db` esté healthy, aplica las migraciones de Alembic y recién ahí levanta Uvicorn — todo en un solo `command`, sin un service `migrate` aparte (ver `change_logs.md` para por qué).
 
 ```bash
-# Build imagen
-docker build -t sin-ruido:latest .
+# Build + levantar los dos servicios
+docker compose up -d --build
 
-# Run contenedor
-docker run -p 8000:8000 \
-  -e DATABASE_URL=postgresql+psycopg://... \
-  -e ENVIRONMENT=production \
-  sin-ruido:latest
+# Ver que app terminó de migrar y arrancó
+docker logs sin_ruido_app
+
+# Healthcheck real: devuelve 503 si la base no responde, no solo "el proceso vive"
+curl http://localhost:8000/
 ```
+
+El `.env` real (nunca commiteado) se inyecta al contenedor `app` vía `env_file`; `DATABASE_URL` se pisa dentro del compose para que apunte a `db` (el nombre del servicio en la red interna de Docker) en vez de `localhost`.
+
+### CI (GitHub Actions)
+
+`.github/workflows/ci.yml` corre en cada push/PR a `main`, con dos jobs de propósito distinto:
+- **`tests`**: `pytest` con cobertura ≥80%, sin Postgres — la suite completa (221 tests) pasa contra SQLite en memoria.
+- **`migraciones`**: `alembic upgrade head` contra un servicio `pgvector/pgvector:pg16` real, para atrapar una migración autogenerada que se rompe contra un esquema con datos (ya pasó una vez en Fase 4).
 
 ### Manejo del tiempo
 
@@ -202,6 +214,7 @@ En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— si
 - `ENVIRONMENT` — `development` | `production`
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)
 - `WEBHOOK_URL` / `WEBHOOK_SECRET` — entrega de síntesis al back-end. **Sin ellas la entrega no corre**: las síntesis se acumulan en la base con `enviado_backend=False` y salen cuando se configuran (ver `webhook_contract.md`)
+- `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` / `DB_POOL_RECYCLE` — pool de conexiones (Fase 5), calibrados contra un solo proceso Uvicorn. Tienen default razonable en `config.py`, no son obligatorias para arrancar.
 
 ---
 

@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from sqlalchemy import inspect, text
@@ -5,6 +6,8 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 _engine: Optional[Engine] = None
 
@@ -32,6 +35,10 @@ def get_engine() -> Engine:
             settings.DATABASE_URL,
             echo=settings.ENVIRONMENT == "development",
             pool_pre_ping=True,
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+            pool_timeout=settings.DB_POOL_TIMEOUT,
+            pool_recycle=settings.DB_POOL_RECYCLE,
         )
 
     return _engine
@@ -69,3 +76,18 @@ def get_session():
     """Generador de sesiones de base de datos, usado como dependencia en los endpoints de FastAPI."""
     with Session(get_engine()) as session:
         yield session
+
+
+def verificar_conexion(session: Session) -> bool:
+    """
+    Confirma que la sesión puede hablar con la base. La usa `GET /` -- antes
+    ese endpoint solo confirmaba que Uvicorn respondía, así que un Postgres
+    caído o un pool agotado no se notaba hasta que fallaba el primer endpoint
+    que sí toca la base.
+    """
+    try:
+        session.exec(text("SELECT 1"))
+        return True
+    except Exception as error:
+        logger.error(f"Health check: no se pudo consultar la base: {error}")
+        return False

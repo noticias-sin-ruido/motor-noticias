@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from tenacity import (
     retry,
@@ -142,20 +143,36 @@ def clusters_pendientes(session: Session) -> List[Cluster]:
     """
     limite = ahora_utc() - timedelta(hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR)
 
+    # `selectinload` trae las noticias de TODOS los candidatos en una sola
+    # consulta adicional (WHERE cluster_id IN (...)), no una por cluster --
+    # antes era N+1 acá abajo.
     candidatos = session.exec(
-        select(Cluster).where(
+        select(Cluster)
+        .options(selectinload(Cluster.noticias))
+        .where(
             Cluster.estado.in_([ESTADO_ABIERTO, ESTADO_PROCESADO]),
             Cluster.fecha_creacion >= limite,
         )
     ).all()
 
-    ya_con_angulo = set(session.exec(select(SintesisNoticia.noticia_id)).all())
+    if not candidatos:
+        return []
+
+    # Acotado a las noticias realmente en juego, no la tabla `SintesisNoticia`
+    # entera -- esa crecía sin techo con el historial del producto, no con el
+    # tamaño de esta corrida.
+    ids_noticias = [n.id for cluster in candidatos for n in cluster.noticias]
+    ya_con_angulo = set(
+        session.exec(
+            select(SintesisNoticia.noticia_id).where(
+                SintesisNoticia.noticia_id.in_(ids_noticias)
+            )
+        ).all()
+    )
 
     pendientes: List[Cluster] = []
     for cluster in candidatos:
-        noticias = session.exec(
-            select(Noticia).where(Noticia.cluster_id == cluster.id)
-        ).all()
+        noticias = cluster.noticias
 
         # `MARCA_CADUCADO` no cuenta como intento: si el cluster volvió a entrar
         # en la ventana de fecha —porque se subió el plazo— tiene que poder
@@ -202,8 +219,13 @@ def descartar_vencidos_sin_sintetizar(session: Session) -> int:
     """
     limite = ahora_utc() - timedelta(hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR)
 
+    # `selectinload` precarga `c.noticias` de todos los vencidos en una sola
+    # consulta -- sin esto, el acceso lazy en el comprehension de abajo
+    # disparaba una query por cluster.
     vencidos = session.exec(
-        select(Cluster).where(
+        select(Cluster)
+        .options(selectinload(Cluster.noticias))
+        .where(
             Cluster.estado.in_([ESTADO_ABIERTO, ESTADO_PROCESADO]),
             Cluster.fecha_creacion < limite,
             Cluster.noticias_al_sintetizar.is_(None),
@@ -215,16 +237,23 @@ def descartar_vencidos_sin_sintetizar(session: Session) -> int:
         if len({n.medio_id for n in c.noticias}) >= settings.MIN_MEDIOS_CLUSTER
     ]
 
+    # Capturado ANTES del commit: `session.commit()` expira los atributos de
+    # los objetos por defecto, y volver a leer `c.id`/`c.noticias` después
+    # dispararía una query de recarga por cluster -- el mismo N+1 que
+    # `selectinload` acababa de evitar, solo que corriendo después en vez de
+    # antes.
+    ids_perdidos = [c.id for c in perdidos]
+    notas_perdidas = sum(len(c.noticias) for c in perdidos)
+
     for cluster in vencidos:
         cluster.noticias_al_sintetizar = MARCA_CADUCADO
         session.add(cluster)
     session.commit()
 
     if perdidos:
-        notas = sum(len(c.noticias) for c in perdidos)
         logger.error(
             f"{len(perdidos)} clusters publicables caducaron sin sintetizarse "
-            f"({notas} noticias): {[c.id for c in perdidos]}"
+            f"({notas_perdidas} noticias): {ids_perdidos}"
         )
         enviar_alerta(
             asunto=f"[Sin Ruido] {len(perdidos)} clusters publicables caducaron sin publicar",
@@ -232,8 +261,8 @@ def descartar_vencidos_sin_sintetizar(session: Session) -> int:
                 f"Alcanzaron {settings.MIN_MEDIOS_CLUSTER} medios pero pasaron "
                 f"{settings.HORAS_MAXIMAS_SIN_SINTETIZAR} h sin que la síntesis los "
                 f"mirara, así que ya no son candidatos.\n\n"
-                f"Clusters: {[c.id for c in perdidos]}\n"
-                f"Noticias involucradas: {notas}\n\n"
+                f"Clusters: {ids_perdidos}\n"
+                f"Noticias involucradas: {notas_perdidas}\n\n"
                 "Si esto aparece sin que haya habido una caída, el plazo de "
                 "HORAS_MAXIMAS_SIN_SINTETIZAR quedó corto: subirlo los vuelve a "
                 "poner en carrera en la corrida siguiente."
