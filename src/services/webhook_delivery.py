@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 import httpx
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -157,6 +158,19 @@ def construir_payload(session: Session, sintesis: Sintesis) -> dict:
             # Permite descartar una entrega que llegó tarde: si dos requests de
             # la misma síntesis se cruzan, gana la de fecha más nueva.
             "fecha_generacion": _iso(sintesis.fecha_generacion),
+            # Null salvo que Gemini haya marcado este ángulo de relevancia
+            # nacional (`AnguloGenerado.relevancia_social`) -- no todo ángulo
+            # tiene copy para redes. No se retracta si una resíntesis
+            # posterior deja de considerarlo relevante: ver
+            # specs/change_logs.md, "Copy para redes sociales".
+            "publicacion_redes": (
+                {
+                    "resumen": sintesis.publicacion_redes.resumen_redes,
+                    "hashtags": list(sintesis.publicacion_redes.hashtags or []),
+                }
+                if sintesis.publicacion_redes is not None
+                else None
+            ),
         },
         "hecho": {
             # Solo el id: es lo que necesita el back-end para agrupar los
@@ -290,7 +304,14 @@ def sintesis_pendientes(session: Session, forzar: bool = False) -> List[Sintesis
     if not forzar:
         condiciones.append(Sintesis.intentos_envio < settings.WEBHOOK_MAX_INTENTOS)
 
-    return list(session.exec(select(Sintesis).where(*condiciones).order_by(Sintesis.id)).all())
+    return list(
+        session.exec(
+            select(Sintesis)
+            .options(selectinload(Sintesis.publicacion_redes))
+            .where(*condiciones)
+            .order_by(Sintesis.id)
+        ).all()
+    )
 
 
 def entregar_pendientes(session: Session, forzar: bool = False) -> dict:

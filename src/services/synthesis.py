@@ -31,7 +31,7 @@ from tenacity import (
 
 from ..config import settings
 from ..tiempo import ahora_utc
-from ..models import Cluster, Medio, Noticia, Sintesis, SintesisNoticia
+from ..models import Cluster, Noticia, PublicacionRedes, Sintesis, SintesisNoticia
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO, ESTADO_PROCESADO
 from .preprocessing import construir_evidencia
@@ -100,6 +100,19 @@ class AnguloGenerado(BaseModel):
     # más.
     topicos: List[Topico] = PydanticField(min_length=1, max_length=2)
     subtopicos: List[Subtopico] = PydanticField(default_factory=list)
+
+    # Copy para redes sociales (Twitter/Facebook), generado solo para el
+    # subconjunto de ángulos de relevancia nacional -- no todo ángulo se
+    # publica ahí. No hay forma de expresar en el `response_schema`
+    # estructurado "obligatorio solo si `relevancia_social` es true": esa
+    # condición vive en el texto del prompt, y `_persistir` la refuerza
+    # después ignorando estos dos campos si el modelo los llenó igual pese a
+    # marcar `relevancia_social=false`. Ver specs/change_logs.md, "Copy para
+    # redes sociales".
+    relevancia_social: bool
+    resumen_redes: Optional[str] = PydanticField(default=None, max_length=240)
+    hashtags: List[str] = PydanticField(default_factory=list, max_length=6)
+
     comparativa_enfoques: List[EnfoqueMedio]
     notas: List[int] = PydanticField(description="Números de las notas que lo respaldan")
 
@@ -373,6 +386,18 @@ Para cada ángulo:
   solo de categorías que ya pusiste en `topicos` -- si el subtópico que más
   encaja pertenece a una categoría que no elegiste, agregá esa categoría a
   `topicos` en vez de forzar un subtópico huérfano.
+- `relevancia_social`: `true` solo si el hecho nombra una persona con
+  reconocimiento público (figura política, del deporte, del espectáculo,
+  empresarial) o una institución pública o privada de renombre nacional. Ante
+  la duda, `false` -- no es un tema más amplio, es un filtro más angosto.
+- `resumen_redes` y `hashtags`: completalos SOLO si `relevancia_social` es
+  `true`. Si no, dejá `resumen_redes` en `null` y `hashtags` en una lista
+  vacía. `resumen_redes` es un párrafo corto (menos de 240 caracteres)
+  pensado para redes sociales: no repitas `resumen_neutro` palabra por
+  palabra, es una bajada distinta pero igual de neutra, sin adjetivos
+  valorativos. `hashtags` son entre 2 y 5, en minúscula y sin el símbolo `#`
+  (lo agrega quien publique), basados en los temas y actores del hecho -- no
+  asumas que están en tendencia hoy, esa decisión es de quien los publique.
 - `comparativa_enfoques`: **una entrada por cada medio que aportó notas a ese
   ángulo**, sin saltearte ninguno, con qué destacó, qué omitió y una `cita`
   textual del cuerpo que lo respalde. Omití las diferencias que no sean
@@ -581,6 +606,29 @@ def _persistir(
         sintesis.puntos_clave = angulo.puntos_clave
         sintesis.comparativa_enfoques = comparativa
         sintesis.fecha_generacion = ahora_utc()
+
+        # No se congela como el título/tópicos: es contenido de marketing,
+        # descartable, así que una resíntesis lo puede reemplazar sin romper
+        # nada del lado del back-end. Si `relevancia_social` da `false` -acá
+        # o en una resíntesis posterior- se deja lo que ya hubiera: no se
+        # retracta un copy que puede estar publicado en redes, mismo criterio
+        # que "el motor nunca retracta una publicación entregada" (ver
+        # specs/webhook_contract.md, punto 9).
+        resumen_redes = (angulo.resumen_redes or "").strip()
+        if angulo.relevancia_social and resumen_redes:
+            if sintesis.publicacion_redes is None:
+                sintesis.publicacion_redes = PublicacionRedes(
+                    resumen_redes=resumen_redes, hashtags=list(angulo.hashtags)
+                )
+            else:
+                sintesis.publicacion_redes.resumen_redes = resumen_redes
+                sintesis.publicacion_redes.hashtags = list(angulo.hashtags)
+                sintesis.publicacion_redes.fecha_generacion = ahora_utc()
+        elif angulo.relevancia_social:
+            logger.warning(
+                f"relevancia_social=true sin resumen_redes, se ignora: {angulo.titulo_angulo}"
+            )
+
         session.add(sintesis)
 
     return stats
@@ -593,7 +641,10 @@ def sintetizar_cluster(session: Session, cluster: Cluster) -> dict:
     if not enviadas:
         return {"creados": 0, "actualizados": 0, "descartados": 0}
 
-    medios = {m.id: m.nombre for m in session.exec(select(Medio)).all()}
+    # `construir_evidencia` ya consultó los medios y las noticias del cluster
+    # -- reusar eso en vez de volver a pedirlo evita duplicar dos queries por
+    # cada cluster que se sintetiza.
+    medios = evidencia["medios_por_id"]
     prompt = construir_prompt(evidencia, enviadas, medios, cluster.sintesis)
 
     respuesta = llamar_modelo(prompt)
@@ -601,9 +652,7 @@ def sintetizar_cluster(session: Session, cluster: Cluster) -> dict:
 
     # La marca se pone aunque no se haya publicado nada: es lo que evita que un
     # cluster sin ángulos válidos se reintente en cada corrida para siempre.
-    cluster.noticias_al_sintetizar = len(
-        session.exec(select(Noticia).where(Noticia.cluster_id == cluster.id)).all()
-    )
+    cluster.noticias_al_sintetizar = evidencia["total_noticias"]
     session.add(cluster)
     session.commit()
 

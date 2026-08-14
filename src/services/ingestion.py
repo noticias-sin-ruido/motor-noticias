@@ -6,7 +6,7 @@ diseño detrás de cada paso.
 """
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 import feedparser
 import httpx
@@ -110,23 +110,33 @@ def enviar_alerta(medio: Medio, feed_url: str, error: Exception) -> None:
     )
 
 
-def _ya_esta(session: Session, guid: str, url: str) -> bool:
+def _existentes(session: Session, guids: Set[str], urls: Set[str]) -> Tuple[Set[str], Set[str]]:
     """
-    Si esa nota ya está en la base, por `guid` o por `url`.
+    Guids y urls de ese conjunto que ya están en la base.
 
-    Se miran **las dos** claves, y con varios feeds por medio eso dejó de ser
-    redundante: el mismo artículo aparece en el feed general y en el de su
-    sección, y nada garantiza que los dos le pongan el mismo `guid`. Con solo
-    mirar el guid, la segunda copia llegaría al `INSERT` y reventaría contra el
-    índice único de `url`, tirando la ingesta entera del medio.
+    Una sola consulta para **todo el feed**, no una por item: antes `_ya_esta`
+    corría un `SELECT` por cada entry, y con varios feeds por medio (el general
+    y el de cada sección) eso eran cientos de queries por corrida, la mayoría
+    para descubrir que la nota ya existía.
 
-    La sesión tiene `autoflush`, así que esta consulta también ve las noticias
-    agregadas en esta misma corrida y todavía sin commitear — que es lo que
-    hace falta para deduplicar entre dos feeds del mismo ciclo.
+    Se miran **las dos** claves porque nada garantiza que dos feeds del mismo
+    medio le pongan el mismo `guid` a la misma nota -- con solo mirar el guid,
+    la segunda copia llegaría al `INSERT` y reventaría contra el índice único
+    de `url`, tirando la ingesta entera del medio.
+
+    Como cada feed se commitea antes de procesar el siguiente (`ingerir_feed`),
+    esta consulta ya ve lo que trajeron los feeds anteriores del mismo medio
+    sin depender de `autoflush`.
     """
-    return session.exec(
-        select(Noticia.id).where((Noticia.guid == guid) | (Noticia.url == url))
-    ).first() is not None
+    if not guids and not urls:
+        return set(), set()
+
+    filas = session.exec(
+        select(Noticia.guid, Noticia.url).where(
+            Noticia.guid.in_(guids) | Noticia.url.in_(urls)
+        )
+    ).all()
+    return {g for g, _ in filas}, {u for _, u in filas}
 
 
 def _registrar_fallo(stats: dict, feed_url: str, error: Exception) -> None:
@@ -175,6 +185,7 @@ def _procesar_items(
     if feed.bozo:
         logger.warning(f"Aviso al parsear {feed_url}: {feed.bozo_exception}")
 
+    candidatos = []
     sin_contenido_aca = 0
     for entry in feed.entries:
         datos = _parsear_entry(entry)
@@ -190,18 +201,45 @@ def _procesar_items(
             stats["en_vivo"] += 1
             continue
 
-        if _ya_esta(session, datos["guid"], datos["url"]):
-            stats["duplicadas"] += 1
-            continue
-
-        session.add(Noticia(medio_id=medio.id, **datos))
-        stats["nuevas"] += 1
+        candidatos.append(datos)
 
     if feed.entries and sin_contenido_aca == len(feed.entries):
         logger.warning(
             f"{medio.nombre}: ningún item de {feed_url} tenía contenido completo "
             f"({len(feed.entries)} items en la ventana del feed)."
         )
+
+    if not candidatos:
+        return
+
+    guids_existentes, urls_existentes = _existentes(
+        session,
+        {d["guid"] for d in candidatos},
+        {d["url"] for d in candidatos},
+    )
+
+    # Además de lo que ya está en la base, hay que descartar duplicados DENTRO
+    # del propio feed (el mismo artículo listado dos veces): la consulta de
+    # arriba es de una sola vez, así que no ve lo que se va agregando en este
+    # mismo loop.
+    vistos_guid: Set[str] = set()
+    vistos_url: Set[str] = set()
+
+    for datos in candidatos:
+        ya_existia = (
+            datos["guid"] in guids_existentes
+            or datos["url"] in urls_existentes
+            or datos["guid"] in vistos_guid
+            or datos["url"] in vistos_url
+        )
+        if ya_existia:
+            stats["duplicadas"] += 1
+            continue
+
+        session.add(Noticia(medio_id=medio.id, **datos))
+        vistos_guid.add(datos["guid"])
+        vistos_url.add(datos["url"])
+        stats["nuevas"] += 1
 
 
 def ingerir_medio(session: Session, medio: Medio) -> dict:

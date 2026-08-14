@@ -15,6 +15,7 @@ from src.config import settings
 from src.models import Cluster, Medio, Noticia, Sintesis
 from src.services import clustering
 from src.services.categorias import categoria_no_evento
+from tests.conftest import contar_queries
 
 DIMENSIONES = 384
 
@@ -534,3 +535,154 @@ class TestFusionarClustersDuplicados:
         stats = clustering.fusionar_clusters_duplicados(session)
 
         assert stats["fusionados"] == 1
+
+
+def _vector_ortogonal(indice: int) -> list:
+    """
+    Vector unitario en una dimensión propia de `indice`: similitud coseno 0
+    contra cualquier otro vector construido con un índice distinto.
+
+    Los tests de no-escalamiento de abajo no evalúan la lógica de asignación
+    ni de fusión -- solo cuántas queries dispara cargar los clusters. Con
+    `vector_con_angulo` (un círculo de 2 dimensiones) no hay forma de separar
+    más de un puñado de clusters por encima del umbral de fusión; con una
+    dimensión propia por cluster, ninguno se parece a otro sin importar
+    cuántos haya.
+    """
+    vector = [0.0] * DIMENSIONES
+    vector[indice % DIMENSIONES] = 1.0
+    return vector
+
+
+def _cluster_abierto_con_noticias(session, medios, n_noticias, sufijo, indice, vencido=False):
+    cluster = Cluster(
+        titulo_evento=f"Hecho {sufijo}",
+        estado=clustering.ESTADO_ABIERTO,
+        fecha_creacion=datetime.utcnow() - timedelta(
+            hours=settings.HORAS_CLUSTER_ABIERTO + 1 if vencido else 1
+        ),
+    )
+    session.add(cluster)
+    session.commit()
+    session.refresh(cluster)
+    vector = _vector_ortogonal(indice)
+    for i in range(n_noticias):
+        crear_noticia(
+            session, medios[i % len(medios)], f"{sufijo}-{i}", vector, cluster_id=cluster.id,
+        )
+    return cluster
+
+
+class TestCargaDeClustersAbiertosNoEscala:
+    """
+    `_cargar_clusters_abiertos` traía las noticias de cada cluster con una
+    query aparte -- un N+1 que no se tocó en la revisión de Fase 5 (esa pasada
+    solo miró `synthesis.py` y `search.py`). La usan tanto `agrupar_pendientes`
+    como `fusionar_clusters_duplicados`, así que se prueban las dos.
+    """
+
+    def test_agrupar_pendientes_no_escala_con_clusters_abiertos(self, session, medios):
+        for i in range(2):
+            _cluster_abierto_con_noticias(session, medios, 2, f"pocos-{i}", indice=i)
+        with contar_queries(session) as pocos:
+            clustering.agrupar_pendientes(session)
+
+        for i in range(15):
+            _cluster_abierto_con_noticias(session, medios, 2, f"muchos-{i}", indice=100 + i)
+        with contar_queries(session) as muchos:
+            clustering.agrupar_pendientes(session)
+
+        assert muchos["n"] == pocos["n"]
+
+    def test_fusionar_no_escala_con_clusters_abiertos(self, session, medios):
+        for i in range(2):
+            _cluster_abierto_con_noticias(session, medios, 2, f"pocos-{i}", indice=i)
+        with contar_queries(session) as pocos:
+            clustering.fusionar_clusters_duplicados(session)
+
+        for i in range(15):
+            _cluster_abierto_con_noticias(session, medios, 2, f"muchos-{i}", indice=100 + i)
+        with contar_queries(session) as muchos:
+            clustering.fusionar_clusters_duplicados(session)
+
+        assert muchos["n"] == pocos["n"]
+
+
+class TestCerrarClustersVencidosNoEscala:
+    def test_no_hace_una_query_por_cluster(self, session, medios):
+        for i in range(2):
+            _cluster_abierto_con_noticias(
+                session, medios, 2, f"pocos-{i}", indice=i, vencido=True
+            )
+        with contar_queries(session) as pocos:
+            clustering.cerrar_clusters_vencidos(session)
+
+        for i in range(15):
+            _cluster_abierto_con_noticias(
+                session, medios, 2, f"muchos-{i}", indice=100 + i, vencido=True
+            )
+        with contar_queries(session) as muchos:
+            clustering.cerrar_clusters_vencidos(session)
+
+        assert muchos["n"] == pocos["n"]
+
+
+class TestCrearClusterNuevoNoEscala:
+    """
+    Ninguno de los tests de arriba pasa por acá: todos parten de clusters ya
+    existentes. Crear un cluster nuevo (`agrupar_pendientes`, rama del `else`)
+    hacía `session.commit()` para conseguirle el id -- y `commit()` expira por
+    defecto los atributos de TODOS los objetos que la sesión tiene cargados,
+    no solo el cluster nuevo. Cada `.embedding`/`.cluster_id` que el resto del
+    loop leía después (comparando la siguiente suelta contra las demás en
+    `_mejor_match`) disparaba su propia recarga fila por fila. Medido en una
+    corrida real contra Postgres: 8.345 queries de esas sobre 329 noticias
+    sueltas y 25 clusters nuevos -- el 85% de las queries de la corrida.
+
+    El invariante correcto acá NO es "misma cantidad de queries sin importar
+    cuántos clusters se creen" -- cada cluster nuevo es una fila real, un
+    INSERT genuino, y eso escala con la cantidad de clusters por diseño. El
+    invariante que sí tiene que valer, y que es justo lo que rompía el bug, es
+    que la cantidad de queries **no dependa de cuántas noticias sueltas más
+    haya para comparar** una vez que ya se creó el primer cluster. Por eso los
+    tests de abajo mantienen `clusters_creados` fijo en 2 y varían solo el
+    ruido de sueltas que no matchean con nada.
+    """
+
+    def _par_suelto(self, session, medios, indice, sufijo):
+        vector = _vector_ortogonal(indice)
+        crear_noticia(session, medios[0], f"{sufijo}-a", vector, horas_atras=2)
+        crear_noticia(session, medios[1], f"{sufijo}-b", vector, horas_atras=2)
+
+    def _singleton_sin_match(self, session, medios, indice, sufijo):
+        crear_noticia(session, medios[0], sufijo, _vector_ortogonal(indice), horas_atras=1)
+
+    def test_no_escala_con_la_cantidad_de_sueltas_restantes(self, session, medios):
+        # Un cluster abierto de fondo: sin esto, `_cargar_clusters_abiertos`
+        # hace 1 query en la primera pasada (nada que cargar) y 2 en la
+        # segunda (ya hay clusters), y esa diferencia de 1 no tiene nada que
+        # ver con lo que se está probando acá.
+        _cluster_abierto_con_noticias(session, medios, 1, "fondo", indice=999)
+
+        for i in range(2):
+            self._par_suelto(session, medios, i, f"pocas-par-{i}")
+        for i in range(3):
+            self._singleton_sin_match(session, medios, 50 + i, f"pocas-suelta-{i}")
+        with contar_queries(session) as pocas:
+            stats_pocas = clustering.agrupar_pendientes(session)
+        assert stats_pocas["clusters_creados"] == 2
+        assert stats_pocas["sin_match"] == 3
+
+        for i in range(2):
+            self._par_suelto(session, medios, 200 + i, f"muchas-par-{i}")
+        for i in range(50):
+            self._singleton_sin_match(session, medios, 300 + i, f"muchas-suelta-{i}")
+        with contar_queries(session) as muchas:
+            stats_muchas = clustering.agrupar_pendientes(session)
+        assert stats_muchas["clusters_creados"] == 2
+        # >= y no ==: las sueltas de la corrida anterior que no matchearon se
+        # reevalúan de nuevo a propósito (ver el docstring de
+        # `agrupar_pendientes`), así que las 3 de "pocas" se suman acá.
+        assert stats_muchas["sin_match"] >= 50
+
+        assert muchas["n"] == pocas["n"]

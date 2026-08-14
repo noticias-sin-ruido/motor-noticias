@@ -9,5 +9,13 @@ from .medio import Medio
 from .noticia import Noticia
 from .cluster import Cluster
 from .sintesis import Sintesis, SintesisNoticia
+from .publicacion_redes import PublicacionRedes
 
-__all__ = ["Medio", "Noticia", "Cluster", "Sintesis", "SintesisNoticia"]
+__all__ = [
+    "Medio",
+    "Noticia",
+    "Cluster",
+    "Sintesis",
+    "SintesisNoticia",
+    "PublicacionRedes",
+]

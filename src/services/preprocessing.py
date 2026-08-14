@@ -20,6 +20,7 @@ import numpy as np
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from spacy.language import Language
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ..config import settings
@@ -88,10 +89,15 @@ def get_vectorizador(session: Session) -> TfidfVectorizer:
 
     Se cachea y se reajusta recién cuando el corpus creció lo suficiente como
     para que los pesos cambien de verdad, porque reajustar es lo caro de acá.
+
+    El tamaño del corpus se pide con `count()` y no trayendo los ids a Python:
+    esta función se llama una vez por cluster sintetizado, así que traer del
+    orden de miles de filas solo para un `len()` es un costo que se paga en
+    cada síntesis aunque no haga falta reajustar nada.
     """
     global _vectorizador, _corpus_entrenado
 
-    total = len(session.exec(select(Noticia.id)).all())
+    total = session.exec(select(func.count()).select_from(Noticia)).one()
 
     if _vectorizador is None or total > _corpus_entrenado * (1 + settings.TFIDF_REFIT_RATIO):
         logger.info(f"Ajustando TF-IDF sobre {total} noticias")
@@ -345,14 +351,26 @@ def construir_evidencia(session: Session, cluster: Cluster) -> dict:
 
     Nada de esto es una conclusión: son candidatos a verificar contra el cuerpo
     del artículo. Ver el encabezado del módulo.
+
+    De paso trae `medios_por_id` y `total_noticias`: `sintetizar_cluster` los
+    necesita después (para el prompt y para la marca del cluster) y, como esta
+    función ya hizo esas dos consultas, reusarlas evita pedirlas de nuevo por
+    cada cluster que se sintetiza.
     """
     noticias = session.exec(
         select(Noticia).where(Noticia.cluster_id == cluster.id)
     ).all()
-    if not noticias:
-        return {"cluster_id": cluster.id, "medios": [], "nucleo_comun": {}, "por_medio": {}}
-
     medios = {m.id: m.nombre for m in session.exec(select(Medio)).all()}
+    if not noticias:
+        return {
+            "cluster_id": cluster.id,
+            "medios": [],
+            "nucleo_comun": {},
+            "por_medio": {},
+            "medios_por_id": medios,
+            "total_noticias": 0,
+        }
+
     nombres_medios = {nombre.lower() for nombre in medios.values()}
 
     # El medio es la unidad de comparación, no el artículo: un medio puede haber
@@ -411,4 +429,6 @@ def construir_evidencia(session: Session, cluster: Cluster) -> dict:
         },
         "por_medio": detalle,
         "noticias": seleccionadas,
+        "medios_por_id": medios,
+        "total_noticias": len(noticias),
     }

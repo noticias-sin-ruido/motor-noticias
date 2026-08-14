@@ -2,8 +2,8 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos) que siguió: 241/241 tests, 96% de cobertura.
-**Siguiente:** avisar al equipo de back-end del cambio de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`), operar el motor con el back-end real, y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
+**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos) y el copy para redes sociales (`publicacion_redes`) que siguieron: 250/250 tests, 96% de cobertura.
+**Siguiente:** avisar al equipo de back-end de los dos cambios de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`, y el campo nuevo `sintesis.publicacion_redes`), operar el motor con el back-end real, y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
 
 ---
 
@@ -85,6 +85,7 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 - [x] **Tópico por publicación** (`topicos.py`): taxonomía cerrada de 10 categorías. La sección declarada por cada medio entra al prompt como pista y el modelo decide leyendo los textos — los medios discrepan y esa discrepancia es editorial, no ruido a promediar (migración `eb625bff05fc`). **Rediseñado en Fase 5**: `topico`/`topico_secundario` (principal + secundaria) pasaron a `topicos`/`subtopicos` (categorías pares + recorte fino de 16 subtópicos en 5 categorías, con la jerarquía garantizada por código). Ver `change_logs.md`.
 - [x] **Entrega al backend por webhook** (`webhook_delivery.py`): firma HMAC-SHA256 sobre `timestamp.cuerpo`, un request por síntesis, `POST /deliver` manual con `forzar`. El paso es un **barrido de todo lo pendiente**, así que el job de reintento planificado no hizo falta
 - [x] **Contrato documentado para el equipo de back-end**: `specs/webhook_contract.md`, con payload real, validación de firma y semántica de reintentos
+- [x] **Copy para redes sociales** (`AnguloGenerado.relevancia_social` + tabla `PublicacionRedes`): en la misma llamada de síntesis, Gemini marca si el ángulo es de relevancia nacional y, solo en ese caso, redacta un párrafo corto para Twitter/Facebook y hasta 5 hashtags. Tabla aparte (no columnas en `Sintesis`, no es 1:1) y sin llamada extra a la API — el costo de Gemini lo domina la entrada, no la salida. No se congela como título/tópicos (se actualiza en cada resíntesis) pero tampoco se retracta si una resíntesis posterior deja de marcarlo relevante. Viaja como `sintesis.publicacion_redes` (nullable) en el mismo payload del webhook, sin pipeline de entrega aparte. Ver `change_logs.md`
 - [ ] Validación de neutralidad de lo que devuelve el modelo — **no es detectable por código de forma confiable**; se ataca con el prompt y revisión manual sobre corridas reales
 
 **Entregables:** `src/services/preprocessing.py`, `synthesis.py`, `categorias.py`, `topicos.py`, `alerts.py`, `webhook_delivery.py`, `POST /synthesize`, `POST /deliver`, `specs/webhook_contract.md`.
@@ -92,6 +93,8 @@ Diseño calibrado contra 620 noticias reales — parámetros y razonamiento comp
 **Pendiente de validación con el otro equipo:** el webhook está probado contra un receptor mockeado, no contra el back-end real. Falta acordar la URL y el secreto, y hacer la primera entrega punta a punta.
 
 **A vigilar:** el modelo sobreescribió una vez una señal unánime de tópico (los dos medios dijeron `internacional`, él puso `policiales + internacional`). Se sostiene, pero es una sola observación — mirar si se repite.
+
+**Límite conocido de `publicacion_redes`, decidido no resolver por ahora:** `relevancia_social` solo se evalúa cuando un cluster tiene cobertura nueva. Un hecho que ya cerró no vuelve a pasar por Gemini nunca, así que se queda sin `publicacion_redes` para siempre aunque sea claramente relevante — caso real: el fallecimiento de Jorge Messi (síntesis 23) sigue en `null`. Se evaluó un backfill puntual y se descartó a propósito; documentado para retomar si hace falta de verdad. Ver `change_logs.md`.
 
 **Medido en la primera corrida completa con la fase cerrada** (1.354 noticias, 39 s punta a punta, US$ 0,0034): el embudo es angosto —15,5% de las notas entra a un cluster y 3,7% respalda una publicación— y **13 de 17 publicaciones tienen exactamente 2 medios**. No es falla del clustering: 1.116 notas no tienen par en ningún otro medio. La palanca es **sumar medios**, no bajar el umbral. Detalle en `change_logs.md`.
 

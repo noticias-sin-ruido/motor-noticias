@@ -11,10 +11,12 @@ entre corridas, lo que no encaja con el ciclo de vida abierto/procesado.
 Ver specs/change_logs.md, Fase 3, para la calibración de los parámetros.
 """
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from ..config import settings
@@ -73,22 +75,45 @@ class _ClusterEnMemoria:
 
 
 def _cargar_clusters_abiertos(session: Session, desde: datetime) -> Dict[int, _ClusterEnMemoria]:
-    """Carga los clusters abiertos vigentes junto a los embeddings de sus miembros."""
+    """
+    Carga los clusters abiertos vigentes junto a los embeddings de sus miembros.
+
+    Trae las noticias de TODOS los clusters candidatos con una sola consulta
+    adicional (`cluster_id IN (...)`), no una por cluster -- la usan tanto
+    `agrupar_pendientes` como `fusionar_clusters_duplicados`, así que sin esto
+    el N+1 se pagaba dos veces por corrida.
+
+    Se arma a mano y NO con `selectinload(Cluster.noticias)`: cargar esa
+    relación acá choca con la fusión. `fusionar_clusters_duplicados` reasigna
+    `noticia.cluster_id` por fuera de la relación y después borra el cluster
+    absorbido; si `Cluster.noticias` ya estaba cargada, el cascade por
+    defecto de SQLAlchemy (save-update) vuelve a poner en `NULL` esa columna
+    al hacer flush del delete, porque la relación cargada todavía las cuenta
+    como hijas del cluster que se está borrando -- pisa el UPDATE directo.
+    Sin cargar la relación acá, ese conflicto no existe. Atrapado por
+    `TestFusionarClustersDuplicados`, no fue una hipótesis.
+    """
     clusters = session.exec(
         select(Cluster).where(
             Cluster.estado == ESTADO_ABIERTO,
             Cluster.fecha_creacion >= desde,
         )
     ).all()
+    if not clusters:
+        return {}
+
+    noticias_por_cluster: Dict[int, List[Noticia]] = defaultdict(list)
+    for noticia in session.exec(
+        select(Noticia).where(
+            Noticia.cluster_id.in_([c.id for c in clusters]),
+            Noticia.embedding.is_not(None),
+        )
+    ).all():
+        noticias_por_cluster[noticia.cluster_id].append(noticia)
 
     en_memoria: Dict[int, _ClusterEnMemoria] = {}
     for cluster in clusters:
-        miembros = session.exec(
-            select(Noticia).where(
-                Noticia.cluster_id == cluster.id,
-                Noticia.embedding.is_not(None),
-            )
-        ).all()
+        miembros = noticias_por_cluster.get(cluster.id, [])
         if miembros:
             en_memoria[cluster.id] = _ClusterEnMemoria(
                 cluster.id,
@@ -205,10 +230,21 @@ def agrupar_pendientes(session: Session) -> dict:
             # El cluster se crea recién con el segundo artículo: la mayoría de las
             # noticias no tiene par, y crear un cluster por cada una llenaría la
             # tabla de grupos de un solo miembro para después descartarlos.
+            #
+            # `flush()` y no `commit()`: alcanza para que Postgres asigne el id
+            # autoincremental (lo que hace falta para asignárselo a las dos
+            # noticias de abajo), pero no expira los atributos de todo lo que
+            # la sesión tiene cargado -- que es lo que hacía `commit()` acá.
+            # Con `commit()`, cada `.embedding`/`.cluster_id` que se lee
+            # después de crear el primer cluster nuevo (en `_mejor_match`,
+            # sobre el resto de `sueltas`) disparaba su propio `SELECT` de
+            # recarga fila por fila: medido en una corrida real, 8.345
+            # queries de esas sobre 329 noticias sueltas y 25 clusters
+            # nuevos -- el 85% de todas las queries de la corrida. El commit
+            # único que ya cierra la función alcanza para persistir todo.
             cluster = Cluster(titulo_evento=suelta.titulo, estado=ESTADO_ABIERTO)
             session.add(cluster)
-            session.commit()
-            session.refresh(cluster)
+            session.flush()
 
             suelta.cluster_id = cluster.id
             noticia.cluster_id = cluster.id
@@ -370,8 +406,12 @@ def cerrar_clusters_vencidos(session: Session) -> dict:
     """
     limite = ahora_utc() - timedelta(hours=settings.HORAS_CLUSTER_ABIERTO)
 
+    # `selectinload` precarga las noticias de todos los vencidos en una sola
+    # consulta -- antes era una query por cluster dentro del loop de abajo.
     vencidos = session.exec(
-        select(Cluster).where(
+        select(Cluster)
+        .options(selectinload(Cluster.noticias))
+        .where(
             Cluster.estado == ESTADO_ABIERTO,
             Cluster.fecha_creacion < limite,
         )
@@ -380,10 +420,7 @@ def cerrar_clusters_vencidos(session: Session) -> dict:
     stats = {"evaluados": len(vencidos), "procesados": 0, "descartados": 0}
 
     for cluster in vencidos:
-        noticias = session.exec(
-            select(Noticia).where(Noticia.cluster_id == cluster.id)
-        ).all()
-        medios_distintos = len({n.medio_id for n in noticias})
+        medios_distintos = len({n.medio_id for n in cluster.noticias})
 
         if medios_distintos >= settings.MIN_MEDIOS_CLUSTER:
             cluster.estado = ESTADO_PROCESADO

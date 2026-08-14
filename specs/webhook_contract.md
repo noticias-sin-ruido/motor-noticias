@@ -103,6 +103,7 @@ El ejemplo de arriba pesa 7.530 bytes y es **el más grande de los 47**: la medi
 | `sintesis.topicos` | string[] | 1 o 2, de la lista cerrada del punto 4. **No asuman orden significativo** — son un conjunto, no una principal + una secundaria |
 | `sintesis.subtopicos` | string[] | 0 o más, recorte más fino dentro de los tópicos elegidos. Puede venir vacío. Ver punto 4 |
 | `sintesis.fecha_generacion` | ISO 8601 UTC | Ver punto 7 (entregas cruzadas) |
+| `sintesis.publicacion_redes` | objeto \| `null` | `null` en la mayoría de las síntesis. Ver punto 9 |
 | `hecho.id` | int | Agrupa los ángulos de una misma historia. Ver la advertencia de abajo |
 | `hecho.abierto` | bool | El hecho todavía puede sumar ángulos o actualizar los que tiene. Alcanza para mostrarlo como "en desarrollo" |
 | `comparativa[]` | array | **Una entrada por medio**, no por nota. Ordenada alfabéticamente por nombre. Todo medio que aparezca acá tiene al menos una nota en `fuentes` — ver punto 5 |
@@ -198,6 +199,7 @@ Qué puede cambiar entre entregas del mismo id:
 |---|---|
 | ✅ Cambia | `resumen`, `puntos_clave`, `fecha_generacion` |
 | ✅ Puede sumar | `comparativa` (medios nuevos), `fuentes` (solo suma, nunca quita) |
+| ✅ Puede aparecer o cambiar de contenido | `publicacion_redes` -- ver punto 9, no se retracta una vez que aparece |
 | ❌ No cambia | `titulo`, `topicos`, `subtopicos`, `hecho.id` |
 
 Que el título y los tópicos estén congelados es la misma decisión: renombrar una publicación, o moverla de Deportes a Espectáculos entre una entrega y la siguiente, confunde a quien ya la vio.
@@ -278,7 +280,39 @@ Y va a crecer: hoy son 6 medios y el cuello de botella del producto es justament
 
 ---
 
-## 9. Lo que este contrato **no** cubre
+## 9. Publicación en redes sociales (`publicacion_redes`)
+
+**Aditivo, no rompe nada de lo que ya integraron.** Es un campo nuevo dentro de `sintesis`, `null` salvo que aplique.
+
+No toda síntesis está pensada para publicarse en redes (Twitter/Facebook). El mismo modelo que genera la síntesis evalúa, hecho por hecho, si nombra una persona con reconocimiento público o una institución pública o privada de renombre nacional. Si no, `publicacion_redes` viaja `null` — es el caso de la mayoría.
+
+```jsonc
+{
+  "sintesis": {
+    "titulo": "Fallecimiento y velorio de Jorge Messi en Rosario",
+    // ...
+    "publicacion_redes": {
+      "resumen": "Murió Jorge Messi, padre de Lionel, a los 68 años. Fue velado en Rosario en una ceremonia íntima con fuerte custodia.",
+      "hashtags": ["messi", "rosario", "futbol"]
+    }
+  }
+}
+```
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `publicacion_redes.resumen` | string | Menos de 240 caracteres. **No es el mismo texto que `sintesis.resumen`** — es una bajada distinta, pensada para acompañar un posteo, pero igual de neutra (sin adjetivos valorativos) |
+| `publicacion_redes.hashtags` | string[] | Entre 2 y 5, en minúscula y sin `#`. Basados en los temas y actores del hecho — **no asuman que están en tendencia hoy**, eso es una decisión de quien publique, no algo que el motor pueda saber |
+
+**No está congelado como `titulo`/`topicos`.** Es contenido de marketing, no la identidad publicada del ángulo: una resíntesis lo puede reemplazar con contenido más actualizado sin que eso rompa nada de su lado.
+
+**Pero tampoco se retracta.** Si una resíntesis posterior deja de considerar el hecho relevante, `publicacion_redes` **no desaparece** ni pasa a `null` — queda con el último contenido que tuvo. Mismo criterio que con el borrado (punto 10): el motor no retracta lo que ya entregó, porque puede estar publicado en redes del otro lado.
+
+**Qué decide con este campo es una conversación aparte con marketing** — el motor da la señal y el copy crudo; cuándo y cómo publicarlo, con qué cadencia, y si los hashtags se curan antes de salir, es lógica de negocio que todavía no está definida.
+
+---
+
+## 10. Lo que este contrato **no** cubre
 
 - **Categorías sin hecho** (horóscopos, recetas, quiniela). No pasan por síntesis porque no hay enfoques que comparar, y no salen por este webhook. Quedan etiquetadas en la base del motor y cómo se consumen es una conversación aparte.
 - **Imágenes.** No mandamos ninguna; las fuentes van como URL.

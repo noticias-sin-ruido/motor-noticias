@@ -2,6 +2,7 @@
 Tests del servicio de ingesta: parseo de feed, limpieza de HTML, filtro de
 notas en vivo, deduplicación por guid y manejo de fallos de red.
 """
+from datetime import datetime
 from unittest.mock import patch
 
 import httpx
@@ -10,6 +11,7 @@ from sqlmodel import Session, select
 
 from src.models import Medio, Noticia
 from src.services import ingestion
+from tests.conftest import contar_queries
 
 FEED_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -256,3 +258,97 @@ class TestIngerirTodosLosMedios:
         nombres = [r["medio"] for r in resultados]
         assert "Activo" in nombres
         assert "Inactivo" not in nombres
+
+
+def _feed_con_items(cantidad: int, prefijo: str) -> str:
+    items = "".join(
+        f"""<item>
+  <title>Noticia {prefijo}-{i}</title>
+  <link>https://test.com/{prefijo}-{i}</link>
+  <guid>guid-{prefijo}-{i}</guid>
+  <pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>
+  <content:encoded><![CDATA[<p>Cuerpo {i}.</p>]]></content:encoded>
+</item>"""
+        for i in range(cantidad)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n'
+        f"<channel><title>Medio</title>{items}</channel>\n</rss>"
+    )
+
+
+class TestDeduplicacionNoEscala:
+    """
+    `_ya_esta` corría un `SELECT` por cada item del feed. Con varios feeds por
+    medio, eso eran cientos de queries por corrida -- la mayoría para
+    descubrir que la nota ya existía. Ahora es una sola consulta por feed
+    (`guid IN (...) OR url IN (...)`), sin importar cuántos items tenga.
+    """
+
+    def _precargar(self, session: Session, medio: Medio, cantidad: int, prefijo: str) -> None:
+        """Deja ya en la base las mismas notas que va a traer el feed, todas duplicadas."""
+        for i in range(cantidad):
+            session.add(Noticia(
+                medio_id=medio.id,
+                titulo=f"Noticia {prefijo}-{i}",
+                url=f"https://test.com/{prefijo}-{i}",
+                guid=f"guid-{prefijo}-{i}",
+                contenido_limpio=f"Cuerpo {i}.",
+                fecha_publicacion=datetime.utcnow(),
+            ))
+        session.commit()
+
+    def test_no_hace_una_query_por_item_del_feed(self, session: Session, medio: Medio):
+        """
+        Con inserts de verdad, "muchos" siempre va a hacer más queries que
+        "pocos" -- cada nota nueva es un INSERT propio, y eso no es lo que se
+        arregló. Lo que se arregló es el `SELECT` de deduplicación, así que acá
+        se aísla precargando la base con las mismas notas que trae el feed: sin
+        ningún insert de por medio, la única diferencia entre "pocos" y
+        "muchos" es cuántos items hay que chequear.
+        """
+        self._precargar(session, medio, 3, "pocos")
+        with patch.object(ingestion, "_descargar_feed", return_value=_feed_con_items(3, "pocos")):
+            with contar_queries(session) as pocos:
+                stats_pocos = ingestion.ingerir_medio(session, medio)
+        assert stats_pocos == {"medio": medio.nombre, "feeds": 1, "feeds_fallados": 0,
+                                "nuevas": 0, "duplicadas": 3, "en_vivo": 0,
+                                "sin_contenido": 0, "errores": []}
+
+        self._precargar(session, medio, 40, "muchos")
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_con_items(40, "muchos")
+        ):
+            with contar_queries(session) as muchos:
+                stats_muchos = ingestion.ingerir_medio(session, medio)
+        assert stats_muchos["duplicadas"] == 40
+
+        assert muchos["n"] == pocos["n"]
+
+    def test_no_duplica_items_repetidos_dentro_del_mismo_feed(
+        self, session: Session, medio: Medio
+    ):
+        """
+        La consulta en lote se hace una sola vez al principio del feed, así que
+        no ve lo que se va agregando dentro del propio loop -- eso lo cubren
+        los sets `vistos_guid`/`vistos_url` en Python.
+        """
+        feed_con_repetido = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n'
+            "<channel><title>Medio</title>"
+            '<item><title>Repetida</title><link>https://test.com/rep</link>'
+            "<guid>guid-rep</guid><pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>"
+            "<content:encoded><![CDATA[<p>Cuerpo.</p>]]></content:encoded></item>"
+            '<item><title>Repetida</title><link>https://test.com/rep</link>'
+            "<guid>guid-rep</guid><pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>"
+            "<content:encoded><![CDATA[<p>Cuerpo.</p>]]></content:encoded></item>"
+            "</channel>\n</rss>"
+        )
+
+        with patch.object(ingestion, "_descargar_feed", return_value=feed_con_repetido):
+            stats = ingestion.ingerir_medio(session, medio)
+
+        assert stats["nuevas"] == 1
+        assert stats["duplicadas"] == 1

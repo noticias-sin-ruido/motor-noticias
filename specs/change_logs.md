@@ -894,3 +894,118 @@ Confirmado además, antes de comprometerse al `max_length=2` en el schema: `goog
 `specs/webhook_contract.md` — `topico`/`topico_secundario` pasan a `topicos`/`subtopicos`, con la taxonomía completa de subtópicos, la garantía de que todo subtópico tiene su padre presente, y un ejemplo real con subtópico poblado. **Sin entrega real todavía** (falta URL y secreto del otro equipo), así que el cambio no rompe nada en producción — pero como es un documento compartido, queda marcado explícitamente como cambio de forma sobre una versión anterior para que el otro equipo lo vea si ya había empezado a integrar contra el contrato viejo.
 
 241/241 tests (221 + 20 netos nuevos: `test_topicos.py` reescrito con 41 tests y cobertura 100% del módulo `topicos.py`; `test_synthesis.py` y `test_webhook_delivery.py` actualizados a las listas nuevas, con casos nuevos para la garantía de `con_padres_completos`). 96% de cobertura total.
+
+---
+
+## Copy para redes sociales: `relevancia_social` + `publicacion_redes`
+
+### El pedido
+
+El usuario propuso aprovechar que Gemini ya lee el cuerpo completo de cada síntesis para que además genere, para las publicaciones que lo ameriten, un párrafo corto para redes (Twitter/Facebook) — distinto del resumen neutro que ya se entrega — y una lista de hashtags. La lógica de negocio real (cuándo publicar, con qué cadencia, si los hashtags se curan) queda para más adelante con el equipo de marketing; acá solo se resuelve qué genera el motor y cómo se lo entrega al back-end.
+
+### Primer diseño descartado: dos llamadas a Gemini
+
+La primera idea fue partir el trabajo en dos: una llamada barata, en la síntesis de siempre, que solo *marca* si el ángulo es de relevancia nacional (`relevancia_social: bool`); y una segunda llamada, on-demand, que recién generaría el párrafo y los hashtags para los ángulos que el back-end decidiera publicar — así se evitaba gastar en redactar copy para ángulos que nunca se publican en redes.
+
+Se descartó al debatirlo: el costo de una llamada a Gemini lo domina el **tokens de entrada** (el cuerpo completo del cluster), no cuánto se le pide de salida. Una segunda llamada reenviaría ese mismo contexto de cero — sale más caro, no más barato. Generar el copy **condicional, en la misma llamada** que ya se hace para toda síntesis es estrictamente mejor: sigue siendo una llamada por cluster, sin duplicar contexto, y el texto de más que escribe el modelo para el subconjunto relevante es un costo marginal al lado del cuerpo de las noticias.
+
+### La condición vive en el prompt, no en el schema
+
+El `response_schema` estructurado que arma Gemini (vía `google.genai`, a partir del `AnguloGenerado` de Pydantic) no puede expresar "`resumen_redes` es obligatorio solo si `relevancia_social` es `true`" — esa lógica condicional no existe en JSON Schema tal como lo arma la librería. La instrucción vive como texto plano en `construir_prompt`: completar `resumen_redes`/`hashtags` solo si `relevancia_social` es `true`, si no dejarlos vacíos.
+
+Como no es una garantía dura, `_persistir` la refuerza en código — mismo principio que `con_padres_completos` con la jerarquía de tópicos: **el código, no el modelo, garantiza la coherencia.** Si `relevancia_social` da `false`, o si da `true` pero el modelo no llenó `resumen_redes` pese a la instrucción, no se crea ni se toca ninguna fila — se ignora en silencio (con un log) en vez de guardar contenido a medias.
+
+### Tabla aparte (`PublicacionRedes`), no columnas en `Sintesis`
+
+No es 1:1 con toda síntesis — la mayoría de los ángulos no son de relevancia nacional, así que la mayoría de las filas de `Sintesis` no tendrían nada que poner en columnas nuevas. Con columnas nullable, esas columnas quedarían vacías en la mayoría de las filas de la tabla más grande y más consultada del sistema. Con tabla aparte (`sintesis_id` único, FK a `sintesis.id`), solo existe fila donde hace falta.
+
+La migración (`3c175c27adde`) es autogenerada sin ajustes de datos, a diferencia de la de tópicos: es una tabla nueva, no hay nada que transformar. Se recortó a mano un `alter_column` que el autogenerate proponía sobre `sintesis.topicos`/`subtopicos` (los quería `nullable=True`) — es un drift preexistente entre el modelo, que no declara `nullable` en su `Column()`, y la base real (que los tiene `NOT NULL` desde la migración de tópicos). Ajeno a este cambio, no se tocó.
+
+### No se congela, pero tampoco se retracta
+
+A diferencia de `titulo_angulo`/`topicos` (congelados desde la primera síntesis — ver la sección de tópicos más arriba), `resumen_redes`/`hashtags` **sí se actualizan en cada resíntesis**: es contenido de marketing descartable, no la identidad publicada del ángulo, así que reemplazarlo con una versión más nueva no rompe nada del lado del back-end.
+
+Pero si una resíntesis posterior marca `relevancia_social=false` (el hecho creció y el modelo ya no lo considera de relevancia nacional, o cambió de criterio), la fila existente **no se borra ni se vacía** — se deja como está. Mismo principio que ya regía la entrega general: "el motor nunca retracta una publicación entregada" (`specs/webhook_contract.md`, antes punto 9, ahora 10). El copy pudo haber salido ya a Twitter; borrarlo de la base no lo despublica de ahí, y sí le rompe al back-end una fila que tenía.
+
+### Entrega: mismo payload, no un pipeline aparte
+
+`publicacion_redes` se suma como un campo más (nullable) dentro de `sintesis` en el payload que ya arma `webhook_delivery.construir_payload` — no se creó un endpoint ni un estado de entrega/reintento propio. Reutiliza el que ya tiene `Sintesis` (`enviado_backend`/`intentos_envio`): como es 1:1 con la síntesis y viaja en el mismo evento, no había necesidad real de una segunda máquina de estados solo para esto. `sintesis_pendientes` precarga la relación con `selectinload` para no sumar una query por fila al barrido.
+
+### Prompt
+
+`relevancia_social`: `true` solo si el hecho nombra una persona con reconocimiento público o una institución de renombre nacional — un filtro más angosto que el de tópicos, no una categoría más. `resumen_redes` tiene un tope de 240 caracteres (dentro del límite de Twitter con margen para un link) y no debe repetir `resumen_neutro` palabra por palabra. `hashtags` entre 2 y 5, en minúscula, sin `#` — con la aclaración explícita de que Gemini no tiene noción de qué está en tendencia hoy: es insumo crudo para que marketing lo cure, no el hashtag final.
+
+### Resultado
+
+250/250 tests (241 + 9 nuevos: `TestPublicacionRedes` en `test_synthesis.py` — creación condicional, safety net sin resumen, actualización en resíntesis, no-retractación — y dos tests de payload en `test_webhook_delivery.py`). 96% de cobertura total, `publicacion_redes.py` al 100%.
+
+### Validado con una corrida real completa — y un límite del diseño que expuso
+
+Corrida real de punta a punta (ingesta → vectorización → clustering → síntesis) contra Postgres y Gemini reales, 148,4 s, 27 clusters pendientes: 26 sintetizados (1 falló), 26 creados + 4 actualizados. Sobre las 120 síntesis totales de la base, **26 quedaron marcadas `relevancia_social=true`**, 0 filas vacías (el safety net no tuvo que descartar ninguna). Por tópico, la *tasa* de marcado más alta no fue la de mayor volumen: deportes 33% (6/18), política 29% (4/14), internacional 29% (2/7) contra espectáculos 24% (12/49) — coherente con el criterio del prompt ("persona/institución reconocida", no un tema en particular). Ejemplos reales: el reparto de los Fondos de Asistencia Laboral (CNV + Ministerio de Economía) y la reforma del Banco Central en Diputados salieron relevantes por nombrar instituciones de renombre nacional, no personas — el criterio del prompt cubre ambos casos, no solo famosos.
+
+**El límite real, no anticipado en el diseño**: `relevancia_social` solo se decide cuando un cluster tiene cobertura nueva (dispara `clusters_pendientes` → `sintetizar_cluster` → se le manda todo el cluster de nuevo a Gemini). Un cluster que ya cerró y no recibe noticias nuevas **no vuelve a pasar por Gemini nunca**, así que se queda con `publicacion_redes: null` para siempre, sin importar cuán relevante sea. Caso real de esta misma corrida: la síntesis 23 ("Fallecimiento y velorio de Jorge Messi en Rosario") sigue en `null` — el hecho que generó dos de las 26 marcadas relevantes (88 y 89, sobre las repercusiones) — porque el cluster original no volvió a sintetizarse.
+
+De las 94 síntesis sin `publicacion_redes`, solo 4 fueron evaluadas y descartadas explícitamente en esta corrida; las otras 90 son anteriores a que el campo existiera y siguen sin evaluar por el mismo motivo. Se evaluó un backfill puntual (script one-off que reevaluara `relevancia_social` sobre las síntesis viejas sin volver a mandar el cuerpo completo de las noticias) y se decidió **no hacerlo por ahora**: se documenta como límite conocido del diseño en vez de resolverlo, a la espera de que haga falta de verdad. Visualización completa de la corrida (proporción, tasa por tópico, las 26 relevantes con su copy) publicada como artifact para referencia.
+
+---
+
+## Auditoría de llamadas: RSS, base de datos y Gemini
+
+Pedido explícito del usuario: revisar cuántas llamadas hace el pipeline completo (RSS, DB, Gemini) y sacar las que sean evitables. Auditoría estática primero (sin Docker, leyendo el código), después los fixes validados contra la suite en SQLite, y por último una corrida real pendiente de que el usuario levante el contenedor.
+
+### RSS: nada que sacar
+
+Una request por feed (`ingestion._descargar_feed`), reintentos solo ante fallo. El costo ya es el mínimo posible.
+
+### Gemini: ya era 1 llamada por cluster
+
+Confirmado de nuevo sobre el código actual: `llamar_modelo` se llama una sola vez por cluster en `sintetizar_cluster`, sin duplicados. Nada para tocar acá — la revisión confirmó lo que ya se sabía de Fase 4.
+
+### Base de datos: 5 hallazgos, todos corregidos
+
+**1. `preprocessing.get_vectorizador`** — `total = len(session.exec(select(Noticia.id)).all())` traía **todos los ids de `noticia`** (miles de filas) solo para un `len()`, y corría una vez por cada cluster sintetizado. Se cambió a `select(func.count()).select_from(Noticia)`: mismo dato, sin traer una sola fila a Python.
+
+**2. `synthesis.sintetizar_cluster` — dos duplicados lisos por cluster**: `select(Medio)` corría dos veces (una adentro de `construir_evidencia`, otra al armar el prompt) y `select(Noticia).where(cluster_id==X)` también (una para la evidencia, otra al final solo para contar y actualizar `noticias_al_sintetizar`). Se resolvió haciendo que `construir_evidencia` devuelva `medios_por_id` y `total_noticias` ya calculados, y que `sintetizar_cluster` los reuse en vez de volver a pedirlos.
+
+**3 y 4. `clustering._cargar_clusters_abiertos` y `clustering.cerrar_clusters_vencidos`** — el mismo patrón de N+1 que se corrigió en Fase 5 para `synthesis.py`/`search.py`, pero que **no se tocó en esa revisión** porque no se miró `clustering.py`. Cada una traía las noticias de cada cluster con una query aparte, dentro de un loop; con 20-60 clusters abiertos son 20-60 queries evitables por corrida, y `_cargar_clusters_abiertos` la usan tanto `agrupar_pendientes` como `fusionar_clusters_duplicados`, así que el costo se pagaba dos veces.
+
+**5. `ingestion._ya_esta`** — un `SELECT` por cada item del feed (`_procesar_items`), buscando si esa nota ya existía por `guid` o `url`. Con varios feeds por medio son cientos de queries por corrida, la mayoría para descubrir que la nota ya estaba. Se cambió a una sola consulta por feed (`guid IN (...) OR url IN (...)`), con los duplicados **dentro** del mismo feed cubiertos por dos sets en Python (la consulta en lote es de una sola vez, no ve lo que se va agregando en el propio loop).
+
+### El bug que apareció al aplicar el fix 3 — y por qué no se resolvió con `selectinload`
+
+El primer intento de los puntos 3 y 4 fue el mismo patrón que ya usa el resto del código: `selectinload(Cluster.noticias)`. Rompió dos tests de `TestFusionarClustersDuplicados` — después de fusionar, las noticias del cluster absorbido volvían a `cluster_id = NULL` en vez de quedar en el superviviente.
+
+La causa: `fusionar_clusters_duplicados` reasigna `noticia.cluster_id` **por fuera de la relación** (una query aparte, no `cluster.noticias.append(...)`) y después borra el cluster absorbido con `session.delete()`. Si `Cluster.noticias` ya estaba cargada en el identity map —que es justo lo que hace `selectinload`—, SQLAlchemy sigue viendo esas noticias como hijas del cluster que se está borrando, y el cascade por defecto (`save-update`, sin `delete-orphan`) les pone `cluster_id = NULL` al hacer flush del `delete` — pisando el `UPDATE` directo que ya se había hecho.
+
+`cerrar_clusters_vencidos` no tiene este problema porque no borra el cluster ni reasigna las noticias de otro. Por eso el fix quedó distinto en cada función: `cerrar_clusters_vencidos` sí usa `selectinload(Cluster.noticias)`, y `_cargar_clusters_abiertos` (que alimenta tanto `agrupar_pendientes` como la fusión) arma el mapa cluster→noticias a mano con una query en lote (`cluster_id IN (...)`) sin tocar la relación del ORM — mismo resultado, 2 queries en vez de N+1, pero sin dejar un estado que el `delete` de la fusión pueda pisar. Atrapado por los tests existentes, no por inspección: si `TestFusionarClustersDuplicados` no hubiera estado ya escrito, este bug habría llegado a producción.
+
+### Validado con logs reales, antes/después — y un sexto hallazgo mucho más grande que los otros cinco
+
+Con el contenedor levantado, se corrió el pipeline completo dos veces contra Postgres y Gemini reales (con `echo=True` en SQLAlchemy) y se comparó statement por statement contra el log guardado de la corrida real de la sección anterior. Los tres patrones medibles dieron exactamente lo esperado:
+
+| Query | Antes | Después |
+|---|---|---|
+| Dedup por item en ingesta (fix 5) | 415 | **0** (reemplazadas por 6, una por feed) |
+| `select(Medio)` en síntesis (fix 2) | 55 (≈ 1 ingesta + 2×26 clusters) | **23**, exacto: 1 ingesta + 1×22 clusters |
+| `COUNT(*)` de `get_vectorizador` (fix 1) | 0 (antes traía filas, nunca contaba) | 22, una por cluster |
+| **Total de statements SQL** | **9.755** | **6.448** (−34%)|
+
+Pero el total solo bajó 34%, no lo que los tres fixes de arriba hacían esperar, porque apareció algo que no estaba en la auditoría original: `SELECT ... FROM noticia WHERE noticia.id = :pk` —una fila por vez— pasó de **8.345 a 5.778** ocurrencias. Es el **85-89% de todas las queries de las dos corridas**, con o sin los 5 fixes.
+
+**La causa: `agrupar_pendientes` hacía `session.commit()` por cada cluster nuevo**, para conseguirle el id autoincremental antes de asignárselo a las dos noticias que lo forman. `commit()` expira por defecto los atributos de **todos** los objetos que la sesión tiene cargados, no solo el cluster nuevo. El resto del loop sigue comparando cada noticia suelta contra todas las demás en `_mejor_match`, leyendo `.embedding`/`.cluster_id` de objetos que ya están expirados — cada lectura dispara su propia recarga fila por fila. Con 25 clusters nuevos y 329 sueltas evaluadas en la corrida real, eso cascadea a miles de queries.
+
+No apareció en la auditoría estática porque no se pensó como caso a mirar (no es una lectura en loop, es una escritura), y no lo agarraron los tests de no-escalamiento de los puntos 3 y 4 porque esos parten de clusters *ya existentes* — ninguno pasa por la rama de `agrupar_pendientes` que crea un cluster nuevo, que es la que dispara el `commit()`. Hueco real de cobertura, no mala suerte: se cerró con un test dedicado (`TestCrearClusterNuevoNoEscala`) antes de dar el fix por terminado.
+
+**El fix**: `session.commit(); session.refresh(cluster)` pasa a ser `session.flush()`. Alcanza para que Postgres asigne el id (que es lo único que hacía falta) sin expirar nada, y el `commit()` único que ya cierra la función sigue persistiendo todo al final.
+
+**El invariante correcto para el test no es "misma cantidad de queries sin importar cuántos clusters se creen"** — cada cluster nuevo es un `INSERT` genuino, y eso escala con la cantidad de clusters por diseño, no es N+1. Lo que sí tiene que valer, y es lo que rompía el bug, es que la cantidad de queries no dependa de cuántas noticias sueltas más haya para comparar una vez creado el primer cluster. El test fija `clusters_creados` en 2 en los dos casos y varía solo el ruido de sueltas sin match (3 vs 50): con el bug, más ruido después del primer cluster son más recargas; con el fix, cero de más.
+
+### Resultado
+
+256/256 tests (250 + 6 nuevos: `TestCargaDeClustersAbiertosNoEscala`, `TestCerrarClustersVencidosNoEscala` y `TestCrearClusterNuevoNoEscala` en `test_clustering.py`, `TestDeduplicacionNoEscala` en `test_ingestion.py`). 96% de cobertura total, `clustering.py` al 100%.
+
+El fix de `get_vectorizador` (COUNT en vez de traer filas) y los dos duplicados de `sintetizar_cluster` no tienen test de no-escalamiento propio: no son un N+1 que crezca con filas, son llamadas de más dentro de una sola unidad de trabajo. Se validaron con la comparación de logs de arriba, no con un test de escala.
+
+### Confirmado con una tercera corrida real: el patrón desaparece por completo
+
+Con el fix 6 aplicado, tercera corrida real (14,2 s — esta vez con poco material nuevo: 14 noticias vectorizadas, 1 cluster nuevo creado, 0 sintetizados, así que no es una comparación de carga pareja contra las dos anteriores). Lo que sí es comparable sin depender del volumen es el patrón puntual: **`SELECT ... FROM noticia WHERE noticia.id = :pk` pasó de 5.778 a 0.** Con un cluster nuevo de verdad creado en esta corrida (por la rama de código que antes disparaba el problema) y cero reloads, queda confirmado que el `flush()` en vez de `commit()` elimina el patrón entero, no solo lo atenúa.

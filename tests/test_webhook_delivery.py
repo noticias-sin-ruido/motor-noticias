@@ -19,7 +19,7 @@ import pytest
 from sqlmodel import Session
 
 from src.config import settings
-from src.models import Cluster, Medio, Noticia, Sintesis
+from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
 from src.services import webhook_delivery
 from src.services.webhook_delivery import (
     EntregaRechazada,
@@ -212,6 +212,29 @@ class TestPayload:
         fechas = [f["fecha_publicacion"] for f in payload["fuentes"]]
 
         assert fechas == sorted(fechas)
+
+    def test_publicacion_redes_viaja_null_si_no_es_relevante(
+        self, session: Session, sintesis: Sintesis
+    ):
+        """La mayoría de las síntesis no la tiene: no todo ángulo va a redes."""
+        assert construir_payload(session, sintesis)["sintesis"]["publicacion_redes"] is None
+
+    def test_publicacion_redes_viaja_completa_si_existe(
+        self, session: Session, sintesis: Sintesis
+    ):
+        sintesis.publicacion_redes = PublicacionRedes(
+            resumen_redes="Un párrafo corto para redes.",
+            hashtags=["messi", "futbol"],
+        )
+        session.add(sintesis)
+        session.commit()
+
+        payload = construir_payload(session, sintesis)
+
+        assert payload["sintesis"]["publicacion_redes"] == {
+            "resumen": "Un párrafo corto para redes.",
+            "hashtags": ["messi", "futbol"],
+        }
 
 
 class TestFirma:

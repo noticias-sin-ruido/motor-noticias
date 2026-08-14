@@ -13,7 +13,7 @@ import pytest
 from sqlmodel import Session, select
 
 from src.config import settings
-from src.models import Cluster, Medio, Noticia, Sintesis
+from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
 from src.services import synthesis
 from src.services.synthesis import (
     AnguloGenerado,
@@ -79,6 +79,9 @@ def angulo(
     topicos=(Topico.SOCIEDAD,),
     subtopicos=(),
     voces=("TN", "La Nación"),
+    relevancia_social=False,
+    resumen_redes=None,
+    hashtags=(),
 ) -> AnguloGenerado:
     """
     Un ángulo publicable por defecto.
@@ -87,6 +90,10 @@ def angulo(
     porque un ángulo con una sola voz **no se publica**: el filtro exige el
     mínimo de medios tanto en las noticias como en la comparativa escrita.
     Pasarle un solo medio es la forma de probar ese descarte.
+
+    `relevancia_social` en `False` por defecto: la mayoría de los ángulos no
+    va a redes, y así los tests que no la mencionan no crean una fila de
+    `PublicacionRedes` sin querer.
     """
     return AnguloGenerado(
         id_existente=id_existente,
@@ -95,6 +102,9 @@ def angulo(
         puntos_clave=["Un hecho verificado"],
         topicos=list(topicos),
         subtopicos=list(subtopicos),
+        relevancia_social=relevancia_social,
+        resumen_redes=resumen_redes,
+        hashtags=list(hashtags),
         comparativa_enfoques=[
             EnfoqueMedio(medio=m, destaco="X", omitio="Y", cita="una frase")
             for m in voces
@@ -386,6 +396,7 @@ class TestComparativaValidada:
                 puntos_clave=[],
                 topicos=[Topico.SOCIEDAD],
                 subtopicos=[],
+                relevancia_social=False,
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="La Nacion", destaco="X", omitio="Y", cita="z"),
                     EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
@@ -412,6 +423,7 @@ class TestComparativaValidada:
                 puntos_clave=[],
                 topicos=[Topico.SOCIEDAD],
                 subtopicos=[],
+                relevancia_social=False,
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
                     EnfoqueMedio(medio="La Nación", destaco="X", omitio="Y", cita="z"),
@@ -444,6 +456,7 @@ class TestComparativaValidada:
                 puntos_clave=[],
                 topicos=[Topico.SOCIEDAD],
                 subtopicos=[],
+                relevancia_social=False,
                 comparativa_enfoques=[
                     EnfoqueMedio(medio="TN", destaco="X", omitio="Y", cita="z"),
                     EnfoqueMedio(medio="Clarín", destaco="X", omitio="Y", cita="z"),
@@ -652,6 +665,140 @@ class TestTopico:
         guardada = session.exec(select(Sintesis)).one()
         assert set(guardada.topicos) == {"economia", "deportes"}
         assert guardada.subtopicos == ["futbol"]
+
+
+class TestPublicacionRedes:
+    """
+    Copy para redes sociales: lo genera Gemini en la misma llamada que el
+    resto del ángulo, pero solo para el subconjunto que marca de relevancia
+    nacional (`AnguloGenerado.relevancia_social`). No hay forma de expresar
+    esa condición en el `response_schema` estructurado, así que `_persistir`
+    la refuerza en código -- eso es lo que se prueba acá.
+    """
+
+    def test_no_crea_fila_si_no_es_relevante(self, session: Session, medios):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[angulo(relevancia_social=False)])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.publicacion_redes is None
+
+    def test_crea_la_fila_si_es_relevante(self, session: Session, medios):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[
+            angulo(
+                relevancia_social=True,
+                resumen_redes="Un párrafo corto para redes.",
+                hashtags=["messi", "futbol"],
+            )
+        ])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.publicacion_redes is not None
+        assert guardada.publicacion_redes.resumen_redes == "Un párrafo corto para redes."
+        assert guardada.publicacion_redes.hashtags == ["messi", "futbol"]
+
+    def test_ignora_relevancia_social_sin_resumen(self, session: Session, medios):
+        """
+        Safety net: si el modelo marca relevante pero no respetó la
+        instrucción de completar el resumen, no se crea una fila vacía.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(
+            angulos=[angulo(relevancia_social=True, resumen_redes=None)]
+        )
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        assert guardada.publicacion_redes is None
+
+    def test_una_resintesis_actualiza_el_contenido(self, session: Session, medios):
+        cluster = crear_cluster(session)
+        n1 = crear_noticia(session, medios[0], 1, cluster)
+        n2 = crear_noticia(session, medios[1], 2, cluster)
+        publicada = Sintesis(
+            cluster_id=cluster.id, titulo_angulo="El hecho", resumen_neutro="x"
+        )
+        publicada.noticias = [n1, n2]
+        publicada.publicacion_redes = PublicacionRedes(
+            resumen_redes="Viejo.", hashtags=["viejo"]
+        )
+        session.add(publicada)
+        session.commit()
+        session.refresh(publicada)
+        cluster.noticias_al_sintetizar = 2
+        session.add(cluster)
+        session.commit()
+        crear_noticia(session, medios[2], 3, cluster)
+
+        respuesta = RespuestaSintesis(angulos=[
+            angulo(
+                notas=(1, 2, 3),
+                id_existente=publicada.id,
+                relevancia_social=True,
+                resumen_redes="Nuevo.",
+                hashtags=["nuevo"],
+            )
+        ])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        session.refresh(publicada)
+        assert publicada.publicacion_redes.resumen_redes == "Nuevo."
+        assert publicada.publicacion_redes.hashtags == ["nuevo"]
+
+    def test_una_resintesis_no_relevante_no_retracta_lo_existente(
+        self, session: Session, medios
+    ):
+        """
+        Si una resíntesis posterior deja de marcar relevancia_social, la fila
+        ya generada se deja como está: no se retracta un copy que puede estar
+        ya publicado en redes. Mismo criterio que "el motor nunca retracta
+        una publicación entregada" (specs/webhook_contract.md, punto 9).
+        """
+        cluster = crear_cluster(session)
+        n1 = crear_noticia(session, medios[0], 1, cluster)
+        n2 = crear_noticia(session, medios[1], 2, cluster)
+        publicada = Sintesis(
+            cluster_id=cluster.id, titulo_angulo="El hecho", resumen_neutro="x"
+        )
+        publicada.noticias = [n1, n2]
+        publicada.publicacion_redes = PublicacionRedes(
+            resumen_redes="Ya publicado.", hashtags=["a"]
+        )
+        session.add(publicada)
+        session.commit()
+        session.refresh(publicada)
+        cluster.noticias_al_sintetizar = 2
+        session.add(cluster)
+        session.commit()
+        crear_noticia(session, medios[2], 3, cluster)
+
+        respuesta = RespuestaSintesis(angulos=[
+            angulo(notas=(1, 2, 3), id_existente=publicada.id, relevancia_social=False)
+        ])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        session.refresh(publicada)
+        assert publicada.publicacion_redes is not None
+        assert publicada.publicacion_redes.resumen_redes == "Ya publicado."
 
 
 class TestDescomposicionCongelada:

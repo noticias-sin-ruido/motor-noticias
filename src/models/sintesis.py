@@ -11,6 +11,7 @@ from ..tiempo import ahora_utc
 if TYPE_CHECKING:
     from .cluster import Cluster
     from .noticia import Noticia
+    from .publicacion_redes import PublicacionRedes
 
 
 class SintesisNoticia(SQLModel, table=True):
@@ -97,4 +98,9 @@ class Sintesis(SQLModel, table=True):
     cluster: "Cluster" = Relationship(back_populates="sintesis")
     noticias: List["Noticia"] = Relationship(
         back_populates="sintesis", link_model=SintesisNoticia
+    )
+    # Puede no existir: solo se genera para los ángulos que Gemini marca de
+    # relevancia nacional. Ver `PublicacionRedes`.
+    publicacion_redes: Optional["PublicacionRedes"] = Relationship(
+        back_populates="sintesis"
     )
