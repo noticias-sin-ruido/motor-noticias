@@ -1,6 +1,6 @@
-# ✅ Validación de Fase 2 contra Postgres real
+# ✅ Validación manual del pipeline contra Postgres real
 
-Guía para levantar el entorno completo (Postgres + pgvector) y correr el pipeline de ingesta contra los feeds RSS reales, con consultas para verificar los resultados en profundidad. Ver `CLAUDE.md` para las decisiones de diseño detrás de cada paso.
+Guía para levantar el entorno completo (Postgres + pgvector) y correr la ingesta contra los feeds RSS reales, con consultas para verificar los resultados en profundidad. Escrita originalmente al cerrar Fase 2 (Ingesta) — las queries de chequeo siguen siendo válidas hoy, pero la lista de medios y algunos números del ejemplo son de esa corrida puntual, no una foto del estado actual (ver `specs/roadmap.md` para eso). Ver `CLAUDE.md` para las decisiones de diseño detrás de cada paso.
 
 ---
 
@@ -51,7 +51,7 @@ En otra terminal:
 
 ```powershell
 .venv\Scripts\activate
-python seed_medios.py
+python scripts/seed_medios.py
 ```
 
 Crea los 4 medios: La Nación, Clarín, TN, El Cronista.
@@ -184,7 +184,7 @@ docker compose down -v
 
 - [ ] `docker compose up -d` levanta sano (`healthy`)
 - [ ] `uvicorn` arranca sin errores (extensión `vector` + tablas creadas en Postgres real)
-- [ ] `seed_medios.py` crea los 4 medios
+- [ ] `scripts/seed_medios.py` crea los medios
 - [ ] `POST /ingest` trae noticias nuevas de al menos algunos medios (no hace falta que los 4 den resultado en la misma corrida — ver nota sobre `sin_contenido`)
 - [ ] Sin duplicados por `guid`/`url`
 - [ ] Sin notas "en vivo" coladas

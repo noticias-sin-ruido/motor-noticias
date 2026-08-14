@@ -2,8 +2,8 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos) y el copy para redes sociales (`publicacion_redes`) que siguieron: 250/250 tests, 96% de cobertura.
-**Siguiente:** avisar al equipo de back-end de los dos cambios de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`, y el campo nuevo `sintesis.publicacion_redes`), operar el motor con el back-end real, y retomar el backlog post-1.0 cuando haya tráfico que lo justifique.
+**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) y la auditoría de llamadas del pipeline (RSS/DB/Gemini, 6 fixes) que siguieron: 256/256 tests, 96% de cobertura.
+**Siguiente:** avisar al equipo de back-end de los cambios de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`, y el campo nuevo `sintesis.publicacion_redes`) y operar el motor con el back-end real — es la precondición del punto 1 del backlog priorizado de abajo, que es el que de verdad mueve la aguja para sumar medios.
 
 ---
 
@@ -12,10 +12,10 @@ Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qu�
 - ✅ Configuración de PostgreSQL con pgvector
 - ✅ Modelos SQLModel (Medio, Noticia, Cluster, Sintesis)
 - ✅ ORM y relaciones (Relationship)
-- ✅ Verificación básica (`verify_setup.py`) — 4/4 checks OK
+- ✅ Verificación básica (`scripts/verify_setup.py`) — 4/4 checks OK
 - ✅ Tests (14/14 passing)
 
-**Entregables:** `src/config.py`, `database.py`, `models/`, `docker-compose.yml`, `verify_setup.py`, tests básicos.
+**Entregables:** `src/config.py`, `database.py`, `models/`, `docker-compose.yml`, `scripts/verify_setup.py`, tests básicos.
 
 Fixes de compatibilidad con SQLModel 0.0.39 y decisiones de diseño: ver `change_logs.md`.
 
@@ -29,11 +29,11 @@ Fixes de compatibilidad con SQLModel 0.0.39 y decisiones de diseño: ver `change
 - ✅ Limpieza de contenido, deduplicación por `guid`, filtro de notas "en vivo"
 - ✅ Scheduler embebido (15 min) + endpoint manual `POST /ingest`
 - ✅ Reintentos (`tenacity`) + alerta por mail (`smtplib`) ante fallo de medio
-- ✅ `seed_medios.py`
+- ✅ `scripts/seed_medios.py`
 - ✅ Tests (`test_ingestion.py` + `test_api.py`) — 24/24 pasando
-- ✅ Validado contra Postgres + pgvector real (ver `VALIDACION_FASE2.md`)
+- ✅ Validado contra Postgres + pgvector real (ver `specs/validacion_manual.md`)
 
-**Entregables:** `src/services/ingestion.py`, `POST /ingest`, scheduler automático, `seed_medios.py`.
+**Entregables:** `src/services/ingestion.py`, `POST /ingest`, scheduler automático, `scripts/seed_medios.py`.
 
 Todo el proceso de evaluación de medios (Infobae descartado, El Cronista confirmado, etc.), el diseño del manejo de errores, y el hallazgo de Clarín durante la validación: ver `change_logs.md`.
 
@@ -127,6 +127,32 @@ Alcance decidido tras calibración con el usuario: **VPS único con Docker Compo
 
 ---
 
-## Backlog post-1.0 (rama nueva, no bloquea Fase 5)
+## Backlog post-1.0 — priorizado
 
-**Segunda vía de ingesta: extracción de artículo por URL para Clarín y Perfil**, vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded`. Medido y viable — plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Diferido a propósito: se retoma recién con Fase 5 cerrada, el back-end integrado y probado, y una versión 1.0 estable etiquetada. No se toca la ingesta mientras compite por atención con cerrar la comunicación real con el back-end.
+Con Fase 5 cerrada, esta es la lista accionable de próximos pasos, priorizada. La fuente completa de límites conocidos del stack sigue siendo `tech_stack.md`, sección "Arquitectura y Escalabilidad — Puntos de quiebre a vigilar" (11 puntos, la mayoría ya ✅ resueltos); acá solo entra lo que queda abierto y es candidato real a trabajarse a continuación. Kubernetes, Redis, Prometheus/Grafana, rate limiting de la API y autenticación pública **no están en esta lista a propósito** — siguen diferidos sin fecha (ver "Diferido a propósito" en Fase 5, arriba) porque son problemas de tráfico público que el proyecto todavía no tiene, no de sumar medios.
+
+Regla que ordena toda la lista, la misma de siempre (`mission.md`): **medir antes de resolver**. Ningún punto de acá se ataca preventivamente — se retoma cuando el síntoma aparece con datos reales, no antes.
+
+### 1. Segunda vía de ingesta: extracción por URL (Clarín, Perfil) — el lever directo para sumar medios
+
+Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded` — hoy el motivo concreto por el que Clarín quedó afuera del roster. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
+
+**Precondición que sigue sin cumplirse**: se dijo "se retoma con el back-end integrado y probado" — y esa integración real (URL + secreto del webhook configurados, primera entrega punta a punta) todavía no pasó (ver la línea "Siguiente" al principio de este documento). No se empieza esta vía mientras compita por atención con cerrar esa comunicación.
+
+### 2. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
+
+`tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 6 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
+
+**No se implementa todavía.** Se vigila el tiempo de la corrida de agrupamiento (ya logueado) a medida que se sumen medios vía el punto 1, y se ataca cuando el número se acerque a los segundos que empiezan a competir con el ciclo de 15 minutos del scheduler — no antes.
+
+### 3. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
+
+`tech_stack.md`, punto 10. Un cluster cierra a las 12 h; una historia larga (la muerte de Jorge Messi cubrió varios días) produce publicaciones sucesivas que pueden solaparse. Con más medios hay más cobertura y más eventos largos, así que el riesgo crece con el volumen — pero la solución no es técnica (¿son hechos distintos de verdad, o el mismo hecho que el producto debería seguir mostrando junto?), es una conversación con el equipo de producto/back-end sobre qué comportamiento quieren. Revisar con síntesis reales a la vista antes de proponer un diseño.
+
+### 4. Rate limit de Gemini al sumar medios
+
+`tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y la capa gratuita de Gemini limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier pago.
+
+### 5. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
+
+Tres puntos de `tech_stack.md` (1, 4 y 6: engine de BD síncrono, scheduler embebido, modelo de embeddings en memoria por worker) comparten la misma condición: importan si el despliegue pasa de una réplica a varias, no por la cantidad de medios que se ingieran con la réplica única actual. Fase 5 fijó a propósito un solo proceso Uvicorn sin `--workers`; mientras eso no cambie, estos tres quedan correctamente diferidos.

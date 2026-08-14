@@ -19,7 +19,7 @@ Historial de decisiones tomadas por fase: qué se evaluó, qué se descartó y p
 Se descartaron: scraping de páginas completas, APIs de noticias comerciales (NewsAPI, GNews, Mediastack) y Google News RSS. Motivo principal: riesgo legal/ToS al extraer contenido completo de la página de un medio sin permiso explícito. Las APIs comerciales tampoco resuelven esto del todo: casi ninguna da texto completo (solo título/snippet) por acuerdos de licencia con los medios, así que igual habría que terminar visitando la página original. Se optó por **RSS directo de cada medio** (el modelo `Medio.feed_rss` ya lo asumía) — es el canal legalmente más seguro, porque el medio lo publica a propósito para sindicación de terceros.
 
 ### Medios elegidos — 6 activos (3 generales + 3 de espectáculos)
-Criterio de admisión: el feed debe traer el artículo completo vía el tag `content:encoded`. Sin cuerpo completo no hay enfoque editorial que comparar, que es todo el valor del producto. Seed en `seed_medios.py`:
+Criterio de admisión: el feed debe traer el artículo completo vía el tag `content:encoded`. Sin cuerpo completo no hay enfoque editorial que comparar, que es todo el valor del producto. Seed en `scripts/seed_medios.py`:
 
 **Generales:**
 - La Nación — `https://www.lanacion.com.ar/arc/outboundfeeds/rss/`
@@ -82,7 +82,7 @@ Sirve para (a) probar el pipeline a mano durante desarrollo sin esperar el próx
 - [ ] Qué hacer cuando un `guid` ya ingerido vuelve a aparecer con contenido distinto (liveblogs que se actualizan) — probablemente moot al haber quedado excluidas las notas "en vivo".
 
 ### Validación contra Postgres real
-Validado contra Postgres 16 + pgvector real vía `docker-compose.yml` (que estaba vacío/sin contenido real hasta esta validación — se creó desde cero). Ver `VALIDACION_FASE2.md` para el paso a paso completo y las queries de chequeo. Extensión `vector` y tablas se crean correctamente, `POST /ingest` corre de punta a punta contra los feeds reales.
+Validado contra Postgres 16 + pgvector real vía `docker-compose.yml` (que estaba vacío/sin contenido real hasta esta validación — se creó desde cero). Ver `specs/validacion_manual.md` para el paso a paso completo y las queries de chequeo. Extensión `vector` y tablas se crean correctamente, `POST /ingest` corre de punta a punta contra los feeds reales.
 
 **Hallazgo — Clarín dio 0 noticias.** El pipeline funcionó como está diseñado (descartó los items por no tener cuerpo completo), y a raíz de esto se agregó un contador `sin_contenido` a las stats de `ingerir_medio` — antes esos items se descartaban en silencio, sin ninguna señal — más un log de warning si el 100% de la ventana de un medio queda sin contenido en un ciclo.
 
@@ -1009,3 +1009,38 @@ El fix de `get_vectorizador` (COUNT en vez de traer filas) y los dos duplicados 
 ### Confirmado con una tercera corrida real: el patrón desaparece por completo
 
 Con el fix 6 aplicado, tercera corrida real (14,2 s — esta vez con poco material nuevo: 14 noticias vectorizadas, 1 cluster nuevo creado, 0 sintetizados, así que no es una comparación de carga pareja contra las dos anteriores). Lo que sí es comparable sin depender del volumen es el patrón puntual: **`SELECT ... FROM noticia WHERE noticia.id = :pk` pasó de 5.778 a 0.** Con un cluster nuevo de verdad creado en esta corrida (por la rama de código que antes disparaba el problema) y cero reloads, queda confirmado que el `flush()` en vez de `commit()` elimina el patrón entero, no solo lo atenúa.
+
+---
+
+## Reestructuración de raíz + auditoría de `requirements.txt`/`requirements-dev.txt`
+
+### Raíz del repo: scripts a `scripts/`, docs de Fase 1/2 retirados o movidos a `specs/`
+
+Pedido del usuario tras notar que la raíz competía con `specs/` como fuente de verdad. Verificado antes de tocar nada, no supuesto: el `README.md` decía "Estado: Fase 2 ✅ completa" (tres fases atrás de la realidad) y `QUICK_START.md`/`TESTING.md`/`PRUEBAS_RESUMEN.md` estaban explícitamente titulados "Fase 1" en su primera línea — referenciaban un endpoint `GET /test-db` que ya no existe (retirado en Fase 3) y un `unzip sin_ruido_fase1_complete.zip` que no refleja cómo se usa el repo hoy.
+
+- **Borrados** (nada los citaba como fuente de contenido, a diferencia de `VALIDACION_FASE2.md`): `check_rss.py` (su propio docstring decía "es descartable"), `QUICK_START.md`, `TESTING.md`, `PRUEBAS_RESUMEN.md`.
+- **`seed_medios.py` y `verify_setup.py` → `scripts/`**, con un shim de `sys.path` al principio de cada uno (`sys.path.insert(0, ...)`) para que sigan corriendo igual como `python scripts/archivo.py` desde la raíz — sin el shim, `from src...` fallaría porque al ejecutar un script directo Python solo agrega el directorio del script al `sys.path`, no el directorio de trabajo. Verificado corriendo los dos contra Postgres real después de moverlos, no solo por sintaxis.
+- **`VALIDACION_FASE2.md` → `specs/validacion_manual.md`**: a diferencia de los tres anteriores, `change_logs.md` (acá mismo, Fase 2) y `tests/test_api.py` lo citaban como referencia real para las queries de chequeo contra Postgres — se movió y renombró en vez de borrarse, con una nota aclarando que el listado de medios del ejemplo es de esa corrida puntual.
+- Todas las referencias cruzadas actualizadas (`README.md` y los `specs/*.md` que lo mencionaban).
+
+256/256 tests después del movimiento, sin nada roto.
+
+### `requirements.txt` / `requirements-dev.txt`: 4 dependencias sin uso, y una decisión sobre lint
+
+Auditoría por `grep` de imports reales contra cada paquete listado, no por inspección superficial.
+
+**Sacadas, sin uso en ningún lado y sin plan que las mencione:**
+- `fastembed` — el rol de generar embeddings ya lo cubre `sentence-transformers`.
+- `litellm` — Gemini se llama directo con `google-genai`, sin capa intermedia.
+- `rich` — no se usa ni para logging.
+- `newspaper4k` — quedó reservada junto con `trafilatura` desde Fase 2 "por si acaso", pero cuando la segunda vía de ingesta se evaluó de verdad (más arriba, "Segunda vía de ingesta: extracción por URL"), la comparación medida fue solo `trafilatura` contra el RSS actual. La decisión ya está tomada a favor de `trafilatura`; `newspaper4k` nunca compitió por nada.
+
+**Se quedan, aunque no aparecen en ningún `import` directo — son dependencias reales, no sobrantes:**
+- `psycopg[binary]` — el driver que SQLAlchemy resuelve desde el esquema `postgresql+psycopg://` de `DATABASE_URL`.
+- `python-dotenv` — confirmado con `pip show pydantic-settings`: es una dependencia declarada de `pydantic-settings`, que la usa para leer `.env`.
+
+**Lint: se suma `ruff` a CI, no `black`/`mypy` todavía.** Los tres estaban instalados en `requirements-dev.txt` sin ningún `pyproject.toml`/config ni paso de CI que los corriera — peso muerto real, no una elección deliberada. De los tres:
+- `ruff` tiene retorno claro y barato: además de estilo, detecta imports y variables sin usar, nombres no definidos. Sirvió de prueba: correrlo sobre el repo encontró 8 casos reales (`settings` sin usar en `ingestion.py` y `conftest.py`, `os` sin usar en `conftest.py`, `Medio` sin usar en `test_api.py`, `con_padres_completos` sin usar en `test_synthesis.py`, una variable local sin usar, y un f-string sin placeholders en `verify_setup.py`) — todos corregidos antes de sumar el gate. Configurado en `ruff.toml` con `select = ["F"]` (solo pyflakes) a propósito: nada de largo de línea ni estilo, que chocaría con el estilo ya establecido de comentarios largos en español. `alembic/versions/` queda excluido del lint — son migraciones autogeneradas que importan `sqlmodel`/`pgvector.sqlalchemy` por convención de la plantilla de Alembic aunque una migración puntual no los use; no es código de la app.
+- `black` (consistencia de formato) y `mypy` (chequeo de tipos) quedan afuera de `requirements-dev.txt` por ahora, no perdidos: `black` importa sobre todo cuando hay más de una persona tocando el código (evita diffs de formato en PRs), y con el proyecto siendo básicamente de un solo desarrollador ese valor es marginal hoy. `mypy` tiene valor real dado que el proyecto ya usa type hints en todos lados, pero SQLModel/SQLAlchemy son dinámicos por diseño (`Relationship`, columnas resueltas en runtime) y configurarlo bien para no ahogarse en falsos positivos es un costo de adopción real, no un `pip install` y listo. Mismo criterio que el resto del proyecto: no resolver un problema que todavía no pesa lo suficiente — se retoma cuando otro desarrollador o equipo toque el código y lo decida.
+
+256/256 tests, `ruff check .` limpio.

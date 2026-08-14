@@ -83,7 +83,9 @@ sin_ruido/
 │   ├── mission.md
 │   ├── roadmap.md
 │   ├── change_logs.md
-│   └── tech_stack.md           # Este archivo
+│   ├── tech_stack.md           # Este archivo
+│   ├── webhook_contract.md     # Contrato de entrega al back-end
+│   └── validacion_manual.md    # Guía de validación manual contra Postgres real
 │
 ├── .env.example                # Plantilla de configuración
 ├── .env                        # Credenciales (no commitear)
@@ -95,12 +97,10 @@ sin_ruido/
 ├── requirements-dev.txt        # + pytest, coverage, etc.
 ├── pytest.ini                  # Config de pytest
 │
-├── seed_medios.py              # Seed idempotente de la tabla Medio
-├── verify_setup.py             # Script de verificación rápida
-├── VALIDACION_FASE2.md         # Guía de validación contra Postgres real + queries de chequeo
-├── QUICK_START.md              # Cómo empezar en 10 segundos
-├── TESTING.md                  # Guía detallada de tests
-├── PRUEBAS_RESUMEN.md          # Resumen ejecutivo de pruebas
+├── scripts/
+│   ├── seed_medios.py          # Seed idempotente de la tabla Medio
+│   └── verify_setup.py         # Verificación rápida sin pytest
+│
 ├── CLAUDE.md                   # Índice corto — apunta a specs/
 └── README.md                   # Punta de entrada del repo
 ```
@@ -163,7 +163,7 @@ docker compose up -d
 alembic upgrade head
 
 # 5. Verificar setup
-python verify_setup.py
+python scripts/verify_setup.py
 
 # 6. Tests
 pytest
@@ -172,7 +172,7 @@ pytest
 uvicorn src.main:app --reload
 ```
 
-Guía completa y queries de verificación contra Postgres real: `VALIDACION_FASE2.md`.
+Guía completa y queries de verificación contra Postgres real: `specs/validacion_manual.md`.
 
 ### Producción (Fase 5: VPS único con Docker Compose)
 

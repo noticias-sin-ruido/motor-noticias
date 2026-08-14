@@ -24,6 +24,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Lint (ruff -- imports y variables sin usar, nombres no definidos)
+        run: ruff check .
+
       - name: Tests con cobertura (mínimo 80%, ver specs/mission.md)
         run: pytest --cov=src --cov-report=term-missing --cov-fail-under=80
 

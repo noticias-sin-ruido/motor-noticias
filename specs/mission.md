@@ -158,7 +158,7 @@ logger.error(f"Error al vectorizar: {e}")
 ## Checklist antes de empezar cualquier fase nueva
 
 - [ ] Leer `specs/roadmap.md` y `specs/change_logs.md` para el estado y las decisiones ya tomadas
-- [ ] Verificar que el entorno local está en orden (`python verify_setup.py`)
+- [ ] Verificar que el entorno local está en orden (`python scripts/verify_setup.py`)
 - [ ] Ejecutar tests existentes (`pytest`)
 - [ ] Crear branch de feature
 - [ ] Escribir tests para nuevas funcionalidades

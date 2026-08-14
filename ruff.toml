@@ -1,0 +1,12 @@
+# Config mínima: solo pyflakes (imports sin usar, variables sin usar, nombres
+# no definidos). Nada de estilo (largo de línea, comillas, etc.) -- ver
+# specs/change_logs.md para el porqué de no sumar black/mypy todavía.
+target-version = "py312"
+
+# Las migraciones autogeneradas importan `sqlmodel`/`pgvector.sqlalchemy` por
+# convención de la plantilla de Alembic aunque una migración puntual no los
+# use -- no es código de la app, no vale la pena lintearlo.
+extend-exclude = ["alembic/versions"]
+
+[lint]
+select = ["F"]

@@ -21,7 +21,7 @@ from src.services.synthesis import (
     RespuestaSintesis,
     SintesisBloqueada,
 )
-from src.services.topicos import Subtopico, Topico, con_padres_completos
+from src.services.topicos import Subtopico, Topico
 from tests.conftest import contar_queries
 
 
@@ -938,7 +938,7 @@ class TestManejoDeFallos:
         assert stats["fallidos"] == 0
 
     def test_un_cluster_que_falla_no_arrastra_a_los_demas(self, session: Session, medios):
-        primero = self._preparar(session, medios)
+        self._preparar(session, medios)
         segundo = crear_cluster(session)
         crear_noticia(session, medios[0], 10, segundo)
         crear_noticia(session, medios[1], 11, segundo)

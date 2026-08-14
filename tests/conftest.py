@@ -1,7 +1,6 @@
 """
 Configuración y fixtures compartidas para todos los tests.
 """
-import os
 from contextlib import contextmanager
 from typing import Generator
 
@@ -11,7 +10,6 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
-from src.config import settings
 from src.database import get_session
 from src.main import app
 from src.models import Medio, Noticia, Cluster, Sintesis  # noqa: F401

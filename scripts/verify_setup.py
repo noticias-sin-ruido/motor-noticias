@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Script de verificación del setup de Sin Ruido Fase 1.
-Valida que:
+Verificación rápida del setup, sin depender de pytest. Valida que:
   1. Todas las dependencias están instaladas
   2. Los modelos se pueden importar sin errores
   3. La conexión a la BD (en memoria) funciona
   4. La app FastAPI se puede instanciar
+
+Uso, desde la raíz del repo:
+    python scripts/verify_setup.py
 """
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def check_imports():
@@ -26,8 +31,8 @@ def check_imports():
         import sqlalchemy
         print(f"  ✓ sqlalchemy {sqlalchemy.__version__}")
 
-        from pgvector.sqlalchemy import Vector
-        print(f"  ✓ pgvector")
+        from pgvector.sqlalchemy import Vector  # noqa: F401 -- el import en sí es el chequeo
+        print("  ✓ pgvector")
 
         import uvicorn
         print(f"  ✓ uvicorn {uvicorn.__version__}")
@@ -160,7 +165,7 @@ def check_api():
 def main():
     """Ejecuta todas las verificaciones."""
     print("=" * 60)
-    print("🚀 VERIFICACIÓN DEL SETUP: Sin Ruido Fase 1")
+    print("🚀 VERIFICACIÓN DEL SETUP: Sin Ruido")
     print("=" * 60)
 
     checks = [

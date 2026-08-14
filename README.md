@@ -1,20 +1,19 @@
 # 🤫 Sin Ruido — Backend Engine
 
-Motor backend para ingesta, vectorización y síntesis neutra de noticias: agrega noticias de múltiples fuentes (RSS), las agrupa por similitud semántica, y genera una síntesis neutral comparando cómo cada medio enfoca el mismo hecho.
+Motor backend que agrega noticias de múltiples fuentes (RSS), agrupa por similitud semántica lo que cubre un mismo hecho, y genera una síntesis neutral con IA comparando cómo la contó cada medio — con tópicos, subtópicos y copy listo para redes sociales.
 
-**Estado:** Fase 2 (Ingesta de Noticias) ✅ completa. Ver [specs/roadmap.md](specs/roadmap.md) para el detalle de las 5 fases.
+**Estado:** Fase 5 completa — motor en versión beta. Detalle de las fases y próximos pasos en [specs/roadmap.md](specs/roadmap.md).
 
 ## 📖 Documentación
 
 | Archivo | Contenido |
 |---|---|
 | [specs/mission.md](specs/mission.md) | Rol, visión del proyecto, reglas de desarrollo |
-| [specs/roadmap.md](specs/roadmap.md) | Las 5 fases, estado y entregables |
+| [specs/roadmap.md](specs/roadmap.md) | Las 5 fases, estado y backlog priorizado |
 | [specs/change_logs.md](specs/change_logs.md) | Decisiones de diseño por fase (qué se evaluó, qué se descartó, por qué) |
 | [specs/tech_stack.md](specs/tech_stack.md) | Stack tecnológico, estructura del proyecto, puntos de quiebre de escalabilidad |
-| [QUICK_START.md](QUICK_START.md) | Cómo correr las pruebas de Fase 1 en minutos |
-| [VALIDACION_FASE2.md](VALIDACION_FASE2.md) | Guía de validación de la ingesta contra Postgres real + queries de chequeo |
-| [TESTING.md](TESTING.md) | Guía detallada de tests |
+| [specs/webhook_contract.md](specs/webhook_contract.md) | Contrato de entrega al back-end (payload, firma, reintentos) |
+| [specs/validacion_manual.md](specs/validacion_manual.md) | Guía de validación manual contra Postgres real + queries de chequeo |
 
 ## 🚀 Inicio rápido (entorno local)
 
@@ -30,11 +29,11 @@ docker compose up -d            # Postgres + pgvector
 copy .env.example .env          # completar credenciales si hace falta
 
 alembic upgrade head            # crea el esquema (obligatorio)
-python seed_medios.py
+python scripts/seed_medios.py
 uvicorn src.main:app --reload
 ```
 
-Guía completa, paso a paso, con queries de verificación: [VALIDACION_FASE2.md](VALIDACION_FASE2.md).
+Verificación rápida sin pytest: `python scripts/verify_setup.py`. Guía completa paso a paso, con queries de verificación: [specs/validacion_manual.md](specs/validacion_manual.md).
 
 ## 🧪 Tests
 

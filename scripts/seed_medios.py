@@ -11,10 +11,13 @@ Ademas de crear los medios que faltan, **actualiza la lista de feeds** de los
 que ya existen: es la unica forma de que un feed nuevo llegue a una base ya
 cargada. El resto de los campos no se pisa.
 
-Uso:
-    python seed_medios.py
+Uso, desde la raíz del repo:
+    python scripts/seed_medios.py
 """
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlmodel import Session, select
 

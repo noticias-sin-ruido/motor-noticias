@@ -8,6 +8,7 @@ pytest-asyncio>=0.21.0
 
 # Desarrollo y debugging
 ipython>=8.17.0
-black>=23.12.0
+
+# Lint en CI (solo pyflakes, ver ruff.toml). black/mypy quedan afuera hasta
+# que haga falta de verdad -- ver specs/change_logs.md.
 ruff>=0.1.8
-mypy>=1.7.0

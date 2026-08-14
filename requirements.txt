@@ -23,11 +23,11 @@ beautifulsoup4>=4.12.3
 httpx>=0.27.0
 tenacity>=8.2.3
 
-# Reservados para medios futuros que no traigan contenido completo en el RSS
-# (content:encoded) y requieran extraer el artículo directamente de su página.
-# Sin uso activo en la Fase 2 actual.
+# Reservada para la segunda vía de ingesta (medios sin content:encoded, ver
+# specs/roadmap.md, backlog priorizado punto 1): la comparación real ya se
+# hizo y trafilatura fue la elegida frente a newspaper4k — ver
+# specs/change_logs.md, "Segunda vía de ingesta".
 trafilatura>=2.0.0
-newspaper4k>=0.9.6
 
 # ==========================================
 # VECTORIZACIÓN, NLP & CLUSTERING
@@ -41,17 +41,14 @@ spacy>=3.8.0
 # scikit-learn se usa para el TF-IDF del preproceso (Fase 4).
 scikit-learn>=1.5.0
 numpy>=1.26.4
-fastembed>=0.2.0
 
 # ==========================================
 # INTELIGENCIA ARTIFICIAL & MODELOS DE LENGUAJE
 # ==========================================
 google-genai>=0.3.0
-litellm>=1.40.0
 
 # ==========================================
 # AUTOMATIZACIÓN & UTILIDADES
 # ==========================================
 apscheduler>=3.10.4
 python-dotenv>=1.0.1
-rich>=13.7.1

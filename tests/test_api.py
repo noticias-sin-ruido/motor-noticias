@@ -5,8 +5,6 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.models import Medio
-
 
 class TestRoot:
     """Pruebas del endpoint raíz."""
@@ -226,7 +224,7 @@ class TestSearchEndpoint:
 
     El servicio se mockea porque la búsqueda usa el operador `<=>` de pgvector,
     que no existe en SQLite (los tests corren en memoria). El KNN real se valida
-    contra Postgres — ver VALIDACION_FASE2.md.
+    contra Postgres — ver specs/validacion_manual.md.
     """
 
     def test_search_devuelve_resultados(self, client: TestClient):
