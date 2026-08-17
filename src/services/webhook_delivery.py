@@ -307,7 +307,16 @@ def sintesis_pendientes(session: Session, forzar: bool = False) -> List[Sintesis
     return list(
         session.exec(
             select(Sintesis)
-            .options(selectinload(Sintesis.publicacion_redes))
+            .options(
+                selectinload(Sintesis.publicacion_redes),
+                # `construir_payload` lee `.noticias` y `.cluster` de cada
+                # síntesis. Sin precargarlas acá, cada una dispara su propia
+                # consulta lazy dentro del loop de `entregar_pendientes` --
+                # medido en una corrida real con 192 pendientes: 192 + 210
+                # queries que una sola consulta bulk por relación evita.
+                selectinload(Sintesis.noticias),
+                selectinload(Sintesis.cluster),
+            )
             .where(*condiciones)
             .order_by(Sintesis.id)
         ).all()
@@ -351,62 +360,81 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
         s.id for s in pendientes if s.intentos_envio < settings.WEBHOOK_MAX_INTENTOS
     }
 
-    for sintesis in pendientes:
-        sintesis_id = sintesis.id
-        try:
-            entregar_sintesis(session, sintesis)
-        except EntregaRechazada as error:
-            stats["rechazadas"] += 1
-            logger.error(f"El back-end rechazó la síntesis {sintesis_id}: {error}")
-            enviar_alerta(
-                asunto="[Sin Ruido] El back-end está rechazando las síntesis",
-                cuerpo=(
-                    f"Síntesis {sintesis_id}: {error}\n\n"
-                    "Un 4xx es un problema de contrato (payload o firma), no una "
-                    "caída: no se reintenta hasta corregirlo."
-                ),
-                clave="webhook:rechazo",
-            )
-        except Exception as error:
-            stats["fallidas"] += 1
-            logger.warning(f"No se pudo entregar la síntesis {sintesis_id}: {error}")
-        else:
-            stats["entregadas"] += 1
+    # `entregar_sintesis` comitea por síntesis a propósito (ver su docstring:
+    # el intento tiene que quedar contado aunque el proceso se caiga a mitad
+    # del barrido). El problema es que `session.commit()` expira por defecto
+    # los atributos de TODOS los objetos que la sesión tiene cargados, no solo
+    # el que se acaba de commitear -- así que la síntesis 2 del loop, ya
+    # cargada arriba junto con sus relaciones, queda expirada por el commit de
+    # la síntesis 1, y leer o escribir cualquier atributo suyo (acá mismo, y
+    # también en `agotadas` más abajo) dispara su propia recarga -- fila
+    # completa más relaciones -- antes de poder usarla. Medido en una corrida
+    # real con 192 pendientes: ~780 recargas de esas, más de un tercio de
+    # todas las queries del barrido. Desactivar la expiración automática
+    # mantiene el commit por ítem (la durabilidad que se busca) sin pagar la
+    # recarga: los datos ya están en memoria desde el `selectinload` de
+    # `sintesis_pendientes`, y las mutaciones del loop (`enviado_backend`,
+    # `intentos_envio`) quedan visibles en los mismos objetos sin releer nada.
+    session.expire_on_commit = False
+    try:
+        for sintesis in pendientes:
+            sintesis_id = sintesis.id
+            try:
+                entregar_sintesis(session, sintesis)
+            except EntregaRechazada as error:
+                stats["rechazadas"] += 1
+                logger.error(f"El back-end rechazó la síntesis {sintesis_id}: {error}")
+                enviar_alerta(
+                    asunto="[Sin Ruido] El back-end está rechazando las síntesis",
+                    cuerpo=(
+                        f"Síntesis {sintesis_id}: {error}\n\n"
+                        "Un 4xx es un problema de contrato (payload o firma), no una "
+                        "caída: no se reintenta hasta corregirlo."
+                    ),
+                    clave="webhook:rechazo",
+                )
+            except Exception as error:
+                stats["fallidas"] += 1
+                logger.warning(f"No se pudo entregar la síntesis {sintesis_id}: {error}")
+            else:
+                stats["entregadas"] += 1
 
-    stats["agotadas_total"] = len(
-        session.exec(
-            select(Sintesis.id).where(
-                Sintesis.enviado_backend == False,  # noqa: E712
-                Sintesis.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS,
-            )
-        ).all()
-    )
-
-    # El aviso sale solo por las que agotaron los intentos EN ESTA CORRIDA.
-    # Antes se avisaba por todas las trabadas, así que una sola disparaba un
-    # mail por hora para siempre, sin novedad — y el aviso que hay que leer
-    # termina perdido entre los que no.
-    agotadas = [
-        s for s in pendientes
-        if s.id in con_margen
-        and not s.enviado_backend
-        and s.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS
-    ]
-
-    if agotadas:
-        stats["agotadas"] = len(agotadas)
-        enviar_alerta(
-            asunto=f"[Sin Ruido] {len(agotadas)} síntesis sin entregar al back-end",
-            cuerpo=(
-                f"Agotaron los {settings.WEBHOOK_MAX_INTENTOS} intentos y dejaron de "
-                f"reintentarse: {', '.join(str(s.id) for s in agotadas)}\n\n"
-                "Resuelto el problema, se reenvían con POST /deliver?forzar=true"
-            ),
-            clave="webhook:agotadas",
-            # Terminal: estas síntesis salen del barrido y no se vuelven a
-            # informar. Si el cooldown se traga el aviso, se pierde.
-            ignorar_cooldown=True,
+        stats["agotadas_total"] = len(
+            session.exec(
+                select(Sintesis.id).where(
+                    Sintesis.enviado_backend == False,  # noqa: E712
+                    Sintesis.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS,
+                )
+            ).all()
         )
+
+        # El aviso sale solo por las que agotaron los intentos EN ESTA CORRIDA.
+        # Antes se avisaba por todas las trabadas, así que una sola disparaba
+        # un mail por hora para siempre, sin novedad — y el aviso que hay que
+        # leer termina perdido entre los que no.
+        agotadas = [
+            s for s in pendientes
+            if s.id in con_margen
+            and not s.enviado_backend
+            and s.intentos_envio >= settings.WEBHOOK_MAX_INTENTOS
+        ]
+
+        if agotadas:
+            stats["agotadas"] = len(agotadas)
+            enviar_alerta(
+                asunto=f"[Sin Ruido] {len(agotadas)} síntesis sin entregar al back-end",
+                cuerpo=(
+                    f"Agotaron los {settings.WEBHOOK_MAX_INTENTOS} intentos y dejaron "
+                    f"de reintentarse: {', '.join(str(s.id) for s in agotadas)}\n\n"
+                    "Resuelto el problema, se reenvían con POST /deliver?forzar=true"
+                ),
+                clave="webhook:agotadas",
+                # Terminal: estas síntesis salen del barrido y no se vuelven a
+                # informar. Si el cooldown se traga el aviso, se pierde.
+                ignorar_cooldown=True,
+            )
+    finally:
+        session.expire_on_commit = True
 
     logger.info(f"Entrega al back-end completada: {stats}")
     return stats

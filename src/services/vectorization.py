@@ -7,6 +7,7 @@ import logging
 from typing import List, Optional
 
 from sentence_transformers import SentenceTransformer
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ..config import settings
@@ -78,19 +79,40 @@ def vectorizar_pendientes(session: Session, limite: Optional[int] = None) -> dic
     se puede correr las veces que haga falta. `limite` sirve para procesar un
     backlog grande de a tandas.
     """
-    consulta = select(Noticia).where(Noticia.embedding.is_(None))
+    total = session.exec(
+        select(func.count()).select_from(Noticia).where(Noticia.embedding.is_(None))
+    ).one()
     if limite is not None:
-        consulta = consulta.limit(limite)
+        total = min(total, limite)
 
-    pendientes = session.exec(consulta).all()
-    stats = {"pendientes": len(pendientes), "vectorizadas": 0}
+    stats = {"pendientes": total, "vectorizadas": 0}
 
-    if not pendientes:
+    if total == 0:
         logger.info("No hay noticias pendientes de vectorizar.")
         return stats
 
-    for inicio in range(0, len(pendientes), BATCH_SIZE):
-        lote = pendientes[inicio : inicio + BATCH_SIZE]
+    # Cada lote se consulta de nuevo ACÁ adentro, recién antes de usarlo -- no
+    # se carga todo el backlog en una lista al principio. `session.commit()`
+    # expira los atributos de TODOS los objetos cargados en la sesión, no
+    # solo los del lote recién commiteado: una noticia cargada en un lote
+    # anterior y tocada (leída O escrita) después de ese commit dispara su
+    # propia recarga fila por fila -- y afecta tanto a leer `titulo` en
+    # `construir_texto` como a la asignación `noticia.embedding = ...`, que
+    # también necesita el estado previo del objeto para el historial de
+    # cambios. Precomputar los textos antes del loop resuelve la lectura pero
+    # no la escritura; re-consultar cada lote resuelve las dos, porque cada
+    # noticia se toca una única vez, dentro de su propia iteración, antes de
+    # su propio commit. Medido en una corrida real: 184 queries de esas sobre
+    # 216 noticias pendientes. Mismo patrón que el fix de `commit()` a
+    # `flush()` en `agrupar_pendientes` -- ver specs/change_logs.md. No
+    # alcanza con `flush()` acá porque el commit por lote es a propósito
+    # (acota el tamaño de la transacción con un backlog grande).
+    restante = total
+    while restante > 0:
+        tam_lote = min(BATCH_SIZE, restante)
+        lote = session.exec(
+            select(Noticia).where(Noticia.embedding.is_(None)).limit(tam_lote)
+        ).all()
         embeddings = vectorizar_textos([construir_texto(n) for n in lote])
 
         for noticia, embedding in zip(lote, embeddings):
@@ -99,6 +121,7 @@ def vectorizar_pendientes(session: Session, limite: Optional[int] = None) -> dic
 
         session.commit()
         stats["vectorizadas"] += len(lote)
-        logger.info(f"Vectorizadas {stats['vectorizadas']}/{len(pendientes)} noticias.")
+        restante -= len(lote)
+        logger.info(f"Vectorizadas {stats['vectorizadas']}/{total} noticias.")
 
     return stats

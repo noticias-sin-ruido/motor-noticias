@@ -30,6 +30,7 @@ from src.services.webhook_delivery import (
     serializar,
     sintesis_pendientes,
 )
+from tests.conftest import contar_queries
 
 SECRETO = "secreto-de-prueba"
 URL = "https://backend.sinruido.test/webhooks/sintesis"
@@ -473,6 +474,80 @@ class TestBarrido:
         pendientes = sintesis_pendientes(session)
 
         assert [s.id for s in pendientes] == sorted(s.id for s in pendientes)
+
+
+class TestBarridoNoEscala:
+    def _crear_pendiente(self, session: Session, medios: list, etiqueta: str) -> Sintesis:
+        cluster = Cluster(titulo_evento=f"Hecho {etiqueta}", estado="abierto")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        noticias = []
+        for numero, medio in enumerate(medios, start=1):
+            noticia = Noticia(
+                medio_id=medio.id,
+                cluster_id=cluster.id,
+                titulo=f"Titular {etiqueta}-{numero}",
+                url=f"https://test.com/{etiqueta}-{numero}",
+                guid=f"guid-{etiqueta}-{numero}",
+                contenido_limpio="Cuerpo de la nota.",
+                fecha_publicacion=datetime(2026, 8, 9, 10, numero, 0),
+            )
+            session.add(noticia)
+            noticias.append(noticia)
+        session.commit()
+
+        item = Sintesis(
+            cluster_id=cluster.id,
+            titulo_angulo=f"Ángulo {etiqueta}",
+            resumen_neutro="Pasó algo.",
+            comparativa_enfoques={},
+            fecha_generacion=datetime(2026, 8, 9, 12, 0, 0),
+        )
+        item.noticias = noticias
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+
+        session.add(
+            PublicacionRedes(sintesis_id=item.id, resumen_redes="Copy de redes.", hashtags=["a"])
+        )
+        session.commit()
+        return item
+
+    def test_costo_por_sintesis_no_crece_con_el_backlog(self, session: Session, medios: list):
+        """
+        Regresión de un N+1 encontrado en una corrida real con 192 pendientes:
+        `entregar_sintesis` comitea por síntesis a propósito (el intento tiene
+        que quedar contado aunque el proceso se caiga a mitad del barrido),
+        pero ese `commit()` expiraba por defecto los atributos de TODOS los
+        objetos que la sesión tenía cargados, no solo el recién commiteado.
+        Cada síntesis siguiente del loop, al leer o escribir un atributo propio
+        (incluida `.publicacion_redes`, ya precargada con `selectinload`)
+        disparaba su propia recarga -- fila completa más relaciones. Medido:
+        ~780 queries de esas sobre 192 pendientes, más de un tercio del total.
+
+        Se entrega un backlog chico y uno grande por separado (en sesiones
+        del mismo test, backlogs disjuntos) y se compara el costo POR
+        síntesis: si el bug volviera, el backlog grande costaría más por
+        ítem que el chico en vez de mantenerse constante.
+        """
+        for i in range(2):
+            self._crear_pendiente(session, medios, f"pocas-{i}")
+        with patch("httpx.post", return_value=respuesta_mock(200)):
+            with contar_queries(session) as pocas:
+                entregar_pendientes(session)
+
+        for i in range(10):
+            self._crear_pendiente(session, medios, f"muchas-{i}")
+        with patch("httpx.post", return_value=respuesta_mock(200)):
+            with contar_queries(session) as muchas:
+                entregar_pendientes(session)
+
+        costo_por_sintesis_pocas = pocas["n"] / 2
+        costo_por_sintesis_muchas = muchas["n"] / 10
+        assert costo_por_sintesis_muchas <= costo_por_sintesis_pocas + 1
 
 
 class TestResincronizacion:

@@ -76,9 +76,16 @@ class Sintesis(SQLModel, table=True):
     # la da el `response_schema` del modelo, que sólo admite los de la lista.
     #
     # Vacíos (no nulos) en las síntesis generadas antes de este rediseño y en
-    # las anteriores al campo original.
-    topicos: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
-    subtopicos: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
+    # las anteriores al campo original. `nullable=False` explícito por eso
+    # mismo: la base ya lo exige desde la migración que los creó, pero el
+    # `Column()` sin declararlo dejaba el metadata diciendo lo contrario y
+    # `alembic check` proponía una migración para aflojar la restricción.
+    topicos: List[str] = Field(
+        default_factory=list, sa_column=Column(JSONVariant, nullable=False)
+    )
+    subtopicos: List[str] = Field(
+        default_factory=list, sa_column=Column(JSONVariant, nullable=False)
+    )
 
     fecha_generacion: datetime = Field(
         default_factory=ahora_utc, sa_column=Column(DateTime, nullable=False)

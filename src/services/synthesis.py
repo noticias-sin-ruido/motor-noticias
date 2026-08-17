@@ -17,7 +17,7 @@ import json
 import logging
 import unicodedata
 from datetime import timedelta
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy.orm import selectinload
@@ -52,6 +52,47 @@ logger = logging.getLogger(__name__)
 # vuelve a poner esos clusters en carrera. Con el conteo real, la recuperación
 # que recomienda la alerta no haría nada.
 MARCA_CADUCADO = -1
+
+# --- Presupuesto de un tweet ------------------------------------------------
+#
+# El copy de redes tiene que entrar en un posteo de X junto con los hashtags y
+# la URL al back-end. Tres reglas del conteo de X que definen los números:
+#
+#   - El límite es de 280 "weighted characters": los codepoints 0-4351 pesan 1
+#     (todo el español, tildes y ñ incluidas) y el resto pesa 2 (emoji).
+#   - **Cualquier URL cuenta 23 caracteres fijos**, sin importar su largo real,
+#     porque X la envuelve en t.co. La URL al back-end entra siempre por 23.
+#   - Los separadores del posteo (un salto doble antes de los hashtags y uno
+#     antes de la URL) pesan 3.
+#
+# Queda un presupuesto de 254 para repartir entre el texto y los hashtags.
+# Medido sobre las 91 publicaciones reales que había al decidir esto: los
+# resúmenes iban de 97 a 207 caracteres y el bloque de hashtags de 24 a 60, y
+# **una se pasaba por 1 carácter**. Entraba el 98% por cómo escribe el modelo,
+# no porque algo lo garantizara: el tope del schema (240) más 5 hashtags
+# largos da ~336, que se pasa por 56. Ver specs/change_logs.md.
+TWEET_LIMITE = 280
+TWEET_PESO_URL = 23
+TWEET_PESO_SEPARADORES = 3
+TWEET_PRESUPUESTO = TWEET_LIMITE - TWEET_PESO_URL - TWEET_PESO_SEPARADORES
+
+# Lo que se le pide al modelo. **No es un resumen recortado: es un gancho.**
+# Un posteo no compite con la nota, invita a abrirla -- el desarrollo está a
+# un click, en la URL que va en el mismo tweet. La referencia de largo es el
+# ejemplo con el que se calibró esto ("La inesperada falla eléctrica durante
+# el partido del equipo del Chiqui Tapia", 76 caracteres), así que 120 deja
+# aire sin habilitar volver al párrafo. Muy por debajo del presupuesto: el
+# recorte de `ajustar_a_tweet` pasa a ser una red que casi nunca se toca.
+TWEET_OBJETIVO_RESUMEN = 120
+
+# El contrato con el back-end promete entre 2 y 5 hashtags, así que el recorte
+# no baja de 2 mientras se pueda recortar el texto en su lugar.
+TWEET_MIN_HASHTAGS = 2
+
+# U+2026, no tres puntos sueltos: ocupa menos y es lo tipográficamente
+# correcto. Pesa 2 para X (cae fuera del rango 0-4351), y el recorte lo tiene
+# en cuenta.
+ELIPSIS = "…"
 
 
 class SintesisBloqueada(Exception):
@@ -110,6 +151,14 @@ class AnguloGenerado(BaseModel):
     # marcar `relevancia_social=false`. Ver specs/change_logs.md, "Copy para
     # redes sociales".
     relevancia_social: bool
+    # El 240 es una cota de tolerancia, NO el objetivo: al modelo se le piden
+    # menos de 120 en el prompt (`TWEET_OBJETIVO_RESUMEN`, un gancho y no un
+    # resumen) y `ajustar_a_tweet` recorta lo que se pase del tweet. A
+    # propósito no se baja este `max_length` al objetivo: es una validación de
+    # Pydantic, así que un gancho de 130 no se recortaría sino que tiraría
+    # `ValidationError` y voltearía la síntesis entera del cluster. El copy de
+    # redes es contenido descartable -- no puede ser el motivo por el que se
+    # pierde una publicación.
     resumen_redes: Optional[str] = PydanticField(default=None, max_length=240)
     hashtags: List[str] = PydanticField(default_factory=list, max_length=6)
 
@@ -119,6 +168,109 @@ class AnguloGenerado(BaseModel):
 
 class RespuestaSintesis(BaseModel):
     angulos: List[AnguloGenerado]
+
+
+# --- Ajuste del copy al tamaño de un tweet ----------------------------------
+
+
+def peso_x(texto: str) -> int:
+    """
+    Cuántos caracteres "pesa" el texto para X.
+
+    No es `len()`: X cuenta codepoints 0-4351 como 1 y el resto como 2. Para
+    el español la diferencia no aparece (las tildes y la ñ entran en el primer
+    rango, verificado sobre las 91 publicaciones reales: cero caracteres de
+    peso 2), pero un emoji en el copy sí contaría doble y la cuenta tiene que
+    reflejarlo.
+    """
+    return sum(1 if ord(caracter) <= 4351 else 2 for caracter in texto)
+
+
+def _bloque_hashtags(hashtags: Sequence[str]) -> str:
+    return " ".join(f"#{hashtag}" for hashtag in hashtags)
+
+
+def peso_tweet(resumen: str, hashtags: Sequence[str]) -> int:
+    """Peso del posteo completo: texto + hashtags + separadores + URL."""
+    bloque = _bloque_hashtags(hashtags)
+    separadores = (2 if bloque else 0) + 1
+    return peso_x(resumen) + peso_x(bloque) + separadores + TWEET_PESO_URL
+
+
+def _recortar(texto: str, tope: int) -> str:
+    """
+    Recorta a `tope` de peso cortando en un borde de palabra, con puntos
+    suspensivos. Cortar a mitad de palabra se ve como un error del producto.
+
+    Ojo con el peso de los puntos suspensivos: `…` es U+2026, que cae fuera
+    del rango 0-4351, así que **pesa 2 y no 1**. Reservar un solo carácter
+    dejaba el resultado un punto por encima del límite -- lo agarró
+    `TestAjusteATweet`, no fue una hipótesis.
+    """
+    if peso_x(texto) <= tope:
+        return texto
+
+    reserva = peso_x(ELIPSIS)
+    if tope <= reserva:
+        return ""
+
+    acumulado = 0
+    corte = 0
+    for posicion, caracter in enumerate(texto):
+        peso = 1 if ord(caracter) <= 4351 else 2
+        if acumulado + peso > tope - reserva:
+            break
+        acumulado += peso
+        corte = posicion + 1
+
+    recortado = texto[:corte]
+    # Si el corte cayó dentro de una palabra, retroceder hasta el espacio
+    # anterior en vez de dejarla partida.
+    if corte < len(texto) and not texto[corte].isspace() and " " in recortado:
+        recortado = recortado[: recortado.rfind(" ")]
+
+    return recortado.rstrip(" ,;:.") + ELIPSIS
+
+
+def ajustar_a_tweet(resumen: str, hashtags: Sequence[str]) -> Tuple[str, List[str]]:
+    """
+    Devuelve `(resumen, hashtags)` garantizando que el posteo entra en 280.
+
+    Es la red de seguridad en código de lo que el prompt pide: el
+    `response_schema` no puede expresar "la suma de estos dos campos más una
+    URL no pasa de 280", así que pedirlo en el texto del prompt no garantiza
+    nada. Mismo reparto que con `relevancia_social`: el prompt pide, el código
+    asegura.
+
+    El orden del recorte no es arbitrario. **Primero se sacan hashtags y
+    recién después se toca el texto**: el resumen es la información y los
+    hashtags son decoración, así que perder un hashtag cuesta menos que perder
+    media oración. No se baja de `TWEET_MIN_HASHTAGS` porque el contrato con
+    el back-end promete entre 2 y 5 (ver specs/webhook_contract.md, punto 9);
+    si con 2 todavía no entra, se recorta el texto. El caso patológico de dos
+    hashtags larguísimos que no dejan lugar ni al texto recortado se resuelve
+    dejándolos afuera: es preferible un posteo sin hashtags que uno cortado.
+
+    En la práctica casi nunca hace falta: con el objetivo de
+    `TWEET_OBJETIVO_RESUMEN` en el prompt, sobre los datos reales solo una de
+    91 publicaciones necesitaba ajuste, y por 1 carácter.
+    """
+    tags = [hashtag for hashtag in hashtags if hashtag]
+
+    while len(tags) > TWEET_MIN_HASHTAGS and peso_tweet(resumen, tags) > TWEET_LIMITE:
+        tags.pop()
+
+    if peso_tweet(resumen, tags) <= TWEET_LIMITE:
+        return resumen, tags
+
+    disponible = TWEET_PRESUPUESTO - peso_x(_bloque_hashtags(tags))
+    recortado = _recortar(resumen, disponible)
+    if recortado and peso_tweet(recortado, tags) <= TWEET_LIMITE:
+        return recortado, tags
+
+    # Hashtags desproporcionados: se van todos antes que devolver un texto
+    # mutilado para hacerles lugar.
+    return _recortar(resumen, TWEET_PRESUPUESTO), []
 
 
 _cliente = None
@@ -392,12 +544,25 @@ Para cada ángulo:
   la duda, `false` -- no es un tema más amplio, es un filtro más angosto.
 - `resumen_redes` y `hashtags`: completalos SOLO si `relevancia_social` es
   `true`. Si no, dejá `resumen_redes` en `null` y `hashtags` en una lista
-  vacía. `resumen_redes` es un párrafo corto (menos de 240 caracteres)
-  pensado para redes sociales: no repitas `resumen_neutro` palabra por
-  palabra, es una bajada distinta pero igual de neutra, sin adjetivos
-  valorativos. `hashtags` son entre 2 y 5, en minúscula y sin el símbolo `#`
-  (lo agrega quien publique), basados en los temas y actores del hecho -- no
-  asumas que están en tendencia hoy, esa decisión es de quien los publique.
+  vacía.
+  `resumen_redes` **no es un resumen: es un gancho corto para un posteo**,
+  de menos de 120 caracteres. No cuenta el hecho entero ni repite
+  `resumen_neutro` -- el posteo lleva el link a la nota completa, así que tu
+  trabajo es que den ganas de abrirla, no reemplazarla. Una sola idea, la más
+  distintiva del hecho.
+  El gancho se logra **nombrando lo concreto y reconocible** (la persona, el
+  club, el lugar, la cifra), NO con adjetivos que valoren ni con signos de
+  exclamación, misterio o clickbait: nada de "increíble", "escándalo",
+  "mirá lo que pasó" ni preguntas retóricas. Sigue siendo neutro; lo
+  atractivo tiene que salir del hecho, no del énfasis.
+  Ejemplo del tono buscado, para un apagón durante un partido de Barracas
+  Central: `La inesperada falla eléctrica durante el partido del equipo del
+  Chiqui Tapia`. Fijate que no adjetiva el hecho ni exagera, pero elige el
+  detalle que engancha y nombra a alguien reconocible.
+  `hashtags` son entre 2 y 5, en minúscula y sin el símbolo `#` (lo agrega
+  quien publique), basados en los temas y actores del hecho -- no asumas que
+  están en tendencia hoy, esa decisión es de quien los publique. Preferí
+  hashtags cortos: entre todos no deberían pasar de 60 caracteres.
 - `comparativa_enfoques`: **una entrada por cada medio que aportó notas a ese
   ángulo**, sin saltearte ninguno, con qué destacó, qué omitió y una `cita`
   textual del cuerpo que lo respalde. Omití las diferencias que no sean
@@ -616,13 +781,27 @@ def _persistir(
         # specs/webhook_contract.md, punto 9).
         resumen_redes = (angulo.resumen_redes or "").strip()
         if angulo.relevancia_social and resumen_redes:
+            # Se guarda ya ajustado a los 280 de un tweet, no crudo: si el
+            # recorte quedara del lado del back-end, ellos tendrían que cortar
+            # sin saber qué parte del texto es prescindible -- y cortarían a
+            # mitad de palabra. Acá sabemos que los hashtags son lo primero
+            # que sobra. Ver `ajustar_a_tweet`.
+            resumen_redes, hashtags_redes = ajustar_a_tweet(
+                resumen_redes, angulo.hashtags
+            )
+            if resumen_redes != angulo.resumen_redes.strip():
+                logger.info(
+                    f"Copy de redes recortado para entrar en un tweet: "
+                    f"{angulo.titulo_angulo}"
+                )
+
             if sintesis.publicacion_redes is None:
                 sintesis.publicacion_redes = PublicacionRedes(
-                    resumen_redes=resumen_redes, hashtags=list(angulo.hashtags)
+                    resumen_redes=resumen_redes, hashtags=hashtags_redes
                 )
             else:
                 sintesis.publicacion_redes.resumen_redes = resumen_redes
-                sintesis.publicacion_redes.hashtags = list(angulo.hashtags)
+                sintesis.publicacion_redes.hashtags = hashtags_redes
                 sintesis.publicacion_redes.fecha_generacion = ahora_utc()
         elif angulo.relevancia_social:
             logger.warning(

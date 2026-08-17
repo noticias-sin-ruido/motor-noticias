@@ -32,7 +32,14 @@ class PublicacionRedes(SQLModel, table=True):
     sintesis_id: int = Field(foreign_key="sintesis.id", unique=True, index=True)
 
     resumen_redes: str
-    hashtags: List[str] = Field(default_factory=list, sa_column=Column(JSONVariant))
+    # `nullable=False` explícito: la base ya lo tiene así desde la migración
+    # que creó la tabla, pero el `Column()` sin declararlo dejaba el metadata
+    # diciendo lo contrario y `alembic check` proponía una migración para
+    # aflojar la restricción. La lista siempre tiene valor (`default_factory`),
+    # así que lo correcto es que el modelo diga lo que la base ya exige.
+    hashtags: List[str] = Field(
+        default_factory=list, sa_column=Column(JSONVariant, nullable=False)
+    )
 
     fecha_generacion: datetime = Field(
         default_factory=ahora_utc, sa_column=Column(DateTime, nullable=False)

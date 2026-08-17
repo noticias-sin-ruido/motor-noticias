@@ -16,10 +16,15 @@ from src.config import settings
 from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
 from src.services import synthesis
 from src.services.synthesis import (
+    TWEET_LIMITE,
+    TWEET_MIN_HASHTAGS,
     AnguloGenerado,
     EnfoqueMedio,
     RespuestaSintesis,
     SintesisBloqueada,
+    ajustar_a_tweet,
+    peso_tweet,
+    peso_x,
 )
 from src.services.topicos import Subtopico, Topico
 from tests.conftest import contar_queries
@@ -667,6 +672,93 @@ class TestTopico:
         assert guardada.subtopicos == ["futbol"]
 
 
+class TestAjusteATweet:
+    """
+    El copy tiene que entrar en un posteo de X (280) junto con los hashtags y
+    la URL a la nota. El `response_schema` no puede expresar "la suma de estos
+    dos campos más una URL no pasa de 280", así que lo garantiza el código.
+    """
+
+    def test_las_tildes_y_la_enie_pesan_uno(self):
+        """Están en el rango 0-4351 de X. Si pesaran 2, el presupuesto real
+        sería mucho más chico de lo calculado."""
+        assert peso_x("señor") == 5
+        assert peso_x("La inesperada falla eléctrica") == 29
+
+    def test_un_emoji_pesa_dos(self):
+        assert peso_x("🔴") == 2
+
+    def test_la_url_entra_por_veintitres_sin_importar_su_largo(self):
+        """X envuelve toda URL en t.co. El peso del tweet no puede depender
+        del largo de la URL del back-end."""
+        corto = peso_tweet("Un gancho corto.", ["futbol"])
+        # La URL nunca aparece en los argumentos: siempre se cuenta como 23.
+        assert corto == peso_x("Un gancho corto.") + peso_x("#futbol") + 3 + 23
+
+    def test_un_gancho_normal_no_se_toca(self):
+        gancho = "La inesperada falla eléctrica durante el partido del equipo del Chiqui Tapia"
+        tags = ["barracascentral", "futbolargentino"]
+
+        resultado, hashtags = ajustar_a_tweet(gancho, tags)
+
+        assert resultado == gancho
+        assert hashtags == tags
+
+    def test_saca_hashtags_antes_de_tocar_el_texto(self):
+        """El texto es la información; los hashtags son decoración."""
+        gancho = "x" * 200
+        tags = ["unhashtagbastantelargo", "otrohashtaglargo", "terceronolargo", "cuarto"]
+
+        resultado, hashtags = ajustar_a_tweet(gancho, tags)
+
+        assert resultado == gancho, "no debería haber recortado el texto"
+        assert len(hashtags) < len(tags)
+        assert peso_tweet(resultado, hashtags) <= TWEET_LIMITE
+
+    def test_no_baja_del_minimo_de_hashtags_que_promete_el_contrato(self):
+        gancho = "y" * 240
+        tags = ["unhashtagbastantelargo", "otrohashtaglargo", "terceronolargo"]
+
+        resultado, hashtags = ajustar_a_tweet(gancho, tags)
+
+        assert len(hashtags) == TWEET_MIN_HASHTAGS
+        # Como no pudo seguir sacando hashtags, recortó el texto.
+        assert resultado != gancho
+        assert peso_tweet(resultado, hashtags) <= TWEET_LIMITE
+
+    def test_recorta_en_borde_de_palabra_y_no_a_mitad(self):
+        gancho = ("palabra " * 40).strip()
+
+        resultado, _ = ajustar_a_tweet(gancho, ["uno", "dos"])
+
+        assert resultado.endswith("…")
+        assert "palabr…" not in resultado, "cortó una palabra al medio"
+
+    def test_hashtags_desproporcionados_se_van_todos(self):
+        """Antes que devolver un texto mutilado para hacerles lugar."""
+        gancho = "Un gancho que vale más que los hashtags."
+        tags = ["h" * 130, "i" * 130]
+
+        resultado, hashtags = ajustar_a_tweet(gancho, tags)
+
+        assert hashtags == []
+        assert resultado == gancho
+        assert peso_tweet(resultado, hashtags) <= TWEET_LIMITE
+
+    def test_siempre_entra_en_el_limite(self):
+        """La garantía, sobre casos variados."""
+        casos = [
+            ("z" * 300, ["a", "b", "c", "d", "e"]),
+            ("z" * 254, []),
+            ("Corto.", []),
+            ("Corto.", ["x" * 200]),
+            ("ñ" * 250, ["ñ" * 30, "á" * 30]),
+        ]
+        for gancho, tags in casos:
+            resultado, hashtags = ajustar_a_tweet(gancho, tags)
+            assert peso_tweet(resultado, hashtags) <= TWEET_LIMITE, (gancho[:20], tags)
+
+
 class TestPublicacionRedes:
     """
     Copy para redes sociales: lo genera Gemini en la misma llamada que el
@@ -675,6 +767,29 @@ class TestPublicacionRedes:
     esa condición en el `response_schema` estructurado, así que `_persistir`
     la refuerza en código -- eso es lo que se prueba acá.
     """
+
+    def test_guarda_el_copy_ya_ajustado_al_tweet(self, session: Session, medios):
+        """
+        Se guarda listo para publicar, no crudo: si el recorte quedara del
+        lado del back-end, tendrían que cortar sin saber qué sobra.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        respuesta = RespuestaSintesis(angulos=[
+            angulo(
+                relevancia_social=True,
+                resumen_redes="w" * 235,
+                hashtags=["unhashtaglargo", "otrohashtaglargo", "tercerohashtag"],
+            )
+        ])
+
+        with patch.object(synthesis, "llamar_modelo", return_value=respuesta):
+            synthesis.sintetizar_cluster(session, cluster)
+
+        guardada = session.exec(select(Sintesis)).one()
+        redes = guardada.publicacion_redes
+        assert peso_tweet(redes.resumen_redes, redes.hashtags) <= TWEET_LIMITE
 
     def test_no_crea_fila_si_no_es_relevante(self, session: Session, medios):
         cluster = crear_cluster(session)

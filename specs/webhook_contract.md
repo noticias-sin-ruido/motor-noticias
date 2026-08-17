@@ -301,8 +301,30 @@ No toda síntesis está pensada para publicarse en redes (Twitter/Facebook). El 
 
 | Campo | Tipo | Notas |
 |---|---|---|
-| `publicacion_redes.resumen` | string | Menos de 240 caracteres. **No es el mismo texto que `sintesis.resumen`** — es una bajada distinta, pensada para acompañar un posteo, pero igual de neutra (sin adjetivos valorativos) |
-| `publicacion_redes.hashtags` | string[] | Entre 2 y 5, en minúscula y sin `#`. Basados en los temas y actores del hecho — **no asuman que están en tendencia hoy**, eso es una decisión de quien publique, no algo que el motor pueda saber |
+| `publicacion_redes.resumen` | string | **Un gancho corto, no un resumen**: apunta a menos de 120 caracteres. No es el mismo texto que `sintesis.resumen` ni una versión comprimida — el posteo invita a abrir la nota, no la reemplaza. Neutro igual: el gancho sale de nombrar lo concreto (la persona, el club, el lugar), no de adjetivos ni clickbait |
+| `publicacion_redes.hashtags` | string[] | Entre 2 y 5, en minúscula y sin `#`. Vienen **separados del resumen** a propósito, para que puedan intercalar lo suyo (la URL, por ejemplo) entre la bajada y los hashtags. Basados en los temas y actores del hecho — **no asuman que están en tendencia hoy**, eso es una decisión de quien publique, no algo que el motor pueda saber |
+
+### Ya viene listo para publicar en X
+
+**Garantizamos que `resumen` + `hashtags` + una URL entran en los 280 caracteres de un tweet.** No hace falta que lo recorten ustedes.
+
+La cuenta que hacemos, con las reglas de conteo de X:
+
+| Concepto | Peso |
+|---|---|
+| Límite de X | 280 |
+| − Una URL | −23 (**fijo**: X envuelve toda URL en `t.co`, sin importar su largo real) |
+| − Separadores (dos saltos de línea antes de los hashtags, uno antes de la URL) | −3 |
+| **Queda para `resumen` + `hashtags`** | **254** |
+
+Dos avisos:
+
+- **El presupuesto asume una sola URL y nada más.** Si le agregan un prefijo, una mención (`@sinruido`) o un emoji, eso sale de los 254. Ojo con los emoji: **pesan 2**, no 1. Las tildes y la ñ pesan 1.
+- Si el modelo se pasa, **el que recorta es el motor, no ustedes**: primero saca hashtags (nunca por debajo de 2), y solo si aún no entra recorta el texto en un borde de palabra terminándolo en `…`. En la práctica casi nunca pasa.
+
+> **Cambio sobre la versión anterior de este contrato**: antes decía «menos de 240 caracteres» y describía el campo como «una bajada distinta». Eran textos bastante más largos (mediana de 145 caracteres, máximo 207) y **no había ninguna garantía de que entraran en un tweet** — de hecho una de 91 se pasaba por 1 carácter. Si dimensionaron una UI o una cola de publicación con eso, ahora reciben textos notablemente más cortos.
+
+**Las publicaciones viejas conservan el texto largo.** `publicacion_redes` no se regenera sola: las que ya existían se actualizan recién cuando su hecho reciba cobertura nueva. Por un tiempo van a convivir ganchos cortos y bajadas largas — las dos formas siguen cumpliendo la garantía de los 280.
 
 **No está congelado como `titulo`/`topicos`.** Es contenido de marketing, no la identidad publicada del ángulo: una resíntesis lo puede reemplazar con contenido más actualizado sin que eso rompa nada de su lado.
 

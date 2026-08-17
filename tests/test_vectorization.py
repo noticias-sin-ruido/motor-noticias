@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from src.config import settings
 from src.models import Medio, Noticia
 from src.services import vectorization
+from tests.conftest import contar_queries
 
 DIMENSIONES = 384
 
@@ -130,3 +131,35 @@ class TestVectorizarPendientes:
 
         assert stats == {"pendientes": total, "vectorizadas": total}
         assert mock.call_count == 2  # un lote completo + el resto
+
+
+class TestVectorizarPendientesNoEscala:
+    def test_no_recarga_fila_por_fila_al_pasar_de_lote(self, session: Session, medio: Medio):
+        """
+        Regresión del mismo patrón que rompía `agrupar_pendientes` (ver
+        specs/change_logs.md): `session.commit()` dentro del loop de lotes
+        expira los atributos de TODAS las noticias cargadas en `pendientes`,
+        no solo las del lote recién commiteado. En el lote siguiente,
+        `construir_texto` leía `titulo`/`contenido_limpio` sobre esos objetos
+        expirados y disparaba un SELECT de recarga por cada noticia -- medido
+        en una corrida real, 184 sobre 216 pendientes.
+
+        Se fija la cantidad de LOTES (2) en los dos casos y se varía cuántas
+        noticias trae el segundo lote: si el bug volviera, "muchas" tendría
+        muchas más queries que "pocas" en vez de la misma cantidad.
+        """
+        total_chico = vectorization.BATCH_SIZE + 3
+        for i in range(total_chico):
+            crear_noticia(session, medio, i)
+        with patch.object(vectorization, "vectorizar_textos", side_effect=embeddings_falsos):
+            with contar_queries(session) as pocas:
+                vectorization.vectorizar_pendientes(session)
+
+        total_grande = vectorization.BATCH_SIZE * 2 - 2
+        for i in range(total_chico, total_chico + total_grande):
+            crear_noticia(session, medio, i)
+        with patch.object(vectorization, "vectorizar_textos", side_effect=embeddings_falsos):
+            with contar_queries(session) as muchas:
+                vectorization.vectorizar_pendientes(session)
+
+        assert muchas["n"] == pocas["n"]

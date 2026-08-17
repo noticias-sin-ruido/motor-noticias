@@ -2,8 +2,11 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Fase actual:** Fase 5 (Deployment y Escalabilidad) ✅ **completa** en su alcance mínimo — VPS único con Docker Compose, CI, las 3 consultas que no escalaban resueltas, pool de conexiones y healthcheck real. Con el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) y la auditoría de llamadas del pipeline (RSS/DB/Gemini, 6 fixes) que siguieron: 256/256 tests, 96% de cobertura.
-**Siguiente:** avisar al equipo de back-end de los cambios de forma en `webhook_contract.md` (`topico`/`topico_secundario` → `topicos`/`subtopicos`, y el campo nuevo `sintesis.publicacion_redes`) y operar el motor con el back-end real — es la precondición del punto 1 del backlog priorizado de abajo, que es el que de verdad mueve la aguja para sumar medios.
+**Estado: versión 1.0.** Las 5 fases completas y **la entrega al back-end probada punta a punta**: primera corrida real contra el receptor (192 publicaciones entregadas de una, y después el pipeline completo ingesta → entrega sin fallos). Sobre el cierre de Fase 5 se sumaron el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) ya ajustado a los 280 de un tweet, y tres auditorías de llamadas del pipeline (RSS/DB/Gemini) que dejaron 8 fixes de N+1. **268/268 tests, 96% de cobertura, `alembic check` limpio.**
+
+**Siguiente:** el punto 1 del backlog priorizado de abajo (segunda vía de ingesta), que es el que de verdad mueve la aguja para sumar medios. Su precondición —avisarle al equipo de back-end de los cambios de forma del contrato y operar contra el receptor real— ya está cumplida: `webhook_contract.md` está actualizado y la comunicación verificada.
+
+**Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `GEMINI_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
 ---
 

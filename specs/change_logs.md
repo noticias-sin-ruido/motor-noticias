@@ -1044,3 +1044,105 @@ Auditoría por `grep` de imports reales contra cada paquete listado, no por insp
 - `black` (consistencia de formato) y `mypy` (chequeo de tipos) quedan afuera de `requirements-dev.txt` por ahora, no perdidos: `black` importa sobre todo cuando hay más de una persona tocando el código (evita diffs de formato en PRs), y con el proyecto siendo básicamente de un solo desarrollador ese valor es marginal hoy. `mypy` tiene valor real dado que el proyecto ya usa type hints en todos lados, pero SQLModel/SQLAlchemy son dinámicos por diseño (`Relationship`, columnas resueltas en runtime) y configurarlo bien para no ahogarse en falsos positivos es un costo de adopción real, no un `pip install` y listo. Mismo criterio que el resto del proyecto: no resolver un problema que todavía no pesa lo suficiente — se retoma cuando otro desarrollador o equipo toque el código y lo decida.
 
 256/256 tests, `ruff check .` limpio.
+
+---
+
+## Séptimo hallazgo: el mismo patrón de `commit()` en `vectorizar_pendientes`
+
+Al validar el fix del sexto hallazgo con noticias nuevas del día (RSS reales, no un dataset congelado), apareció el mismo patrón en una función que la auditoría original no tocó: `vectorizar_pendientes` en `src/services/vectorization.py`.
+
+### El hallazgo
+
+Corrida real con `echo=True`: 216 noticias pendientes de vectorizar, y **184** ocurrencias de `SELECT ... FROM noticia WHERE noticia.id = :pk` — el mismo patrón de recarga fila por fila del sexto hallazgo, en otra función.
+
+**La causa es idéntica en estructura, distinta en disparador.** `vectorizar_pendientes` carga todo el backlog en una lista (`pendientes`) y lo procesa en lotes de `BATCH_SIZE=32`, con un `session.commit()` al final de cada lote — a propósito, para acotar el tamaño de la transacción con un backlog grande (ver el comentario original del archivo). Ese `commit()` expira los atributos de las 216 noticias cargadas, no solo las 32 del lote recién procesado. En el lote siguiente, `construir_texto(noticia)` lee `titulo`/`contenido_limpio` de objetos expirados y cada lectura dispara su propia recarga. Con lotes de 32 sobre 216 pendientes, eso son 216 − 32 = 184 recargas — coincide exacto con lo medido.
+
+**A diferencia del sexto hallazgo, acá no basta con precomputar antes del loop.** Un primer intento armó todos los textos (`construir_texto`) antes de cualquier commit, pensando que alcanzaba con resolver la lectura. No alcanzó: un test de no-escalamiento (dos lotes de tamaño fijo, variando solo cuántas noticias trae el segundo) siguió fallando, 33 queries contra 6 esperadas. La asignación misma, `noticia.embedding = embedding`, también dispara una recarga sobre un objeto expirado — SQLAlchemy necesita el estado previo del atributo para el historial de cambios, y eso alcanza para gatillar el `SELECT` aunque no se lea nada explícitamente. Expirado, un objeto recarga tanto al leerlo como al escribirlo.
+
+**El fix real: re-consultar cada lote, no cargar el backlog entero de una vez.** `vectorizar_pendientes` pasa a pedir un `COUNT(*)` inicial (para `stats["pendientes"]`) y, dentro del loop, un `SELECT ... WHERE embedding IS NULL LIMIT <tam_lote>` por iteración. Como cada lote ya vectorizado deja de cumplir el filtro `embedding IS NULL`, la siguiente consulta trae automáticamente el próximo lote sin pedir offsets ni IDs a mano. Cada noticia se toca una única vez, en su propia iteración, antes de su propio commit — nunca cruza el commit de otro lote. De paso, ya no hace falta tener todo el backlog en memoria a la vez, un beneficio adicional para un backlog grande que el diseño original no tenía.
+
+No se usó `flush()` en vez de `commit()` (la solución del sexto hallazgo) porque acá el commit periódico es intencional — limitar el tamaño de la transacción con un backlog grande es la razón de ser del loop por lotes, no un descuido.
+
+### El test
+
+`TestVectorizarPendientesNoEscala` en `tests/test_vectorization.py`, mismo criterio que `TestCrearClusterNuevoNoEscala`: se fija la cantidad de LOTES (2) en los dos casos y se varía cuántas noticias trae el segundo lote (3 vs 30). Con el bug, "muchas" tenía muchas más queries que "pocas" (33 vs 6); con el fix, la misma cantidad.
+
+### Validado con dos corridas reales
+
+Antes del fix: 184 recargas sobre 216 pendientes. Después del fix, misma corrida repetida contra Postgres real: **0** recargas de ese patrón durante la vectorización; el puñado residual que quedó (6, en toda la corrida) corresponde a otro código, en escala fija y no relacionada con el tamaño del backlog.
+
+257/257 tests (256 + `TestVectorizarPendientesNoEscala`).
+
+---
+
+## El copy de redes pasa de "resumen corto" a "gancho", y se garantiza que entra en un tweet
+
+### El disparador: ¿entra realmente en Twitter?
+
+Con el copy ya generándose bien, la pregunta siguiente era práctica: en un posteo de X entran 280 caracteres y ahí tiene que caber **el texto, los hashtags y la URL a la nota**. Medido sobre las 91 publicaciones con copy que había en la base:
+
+- **Entraban 90 de 91.** Mediana 210, mínimo 161.
+- La que no entraba se pasaba **por exactamente 1 carácter** (id 159, 281).
+
+Dos reglas del conteo de X que definen el presupuesto, y que no son obvias:
+
+- **Cualquier URL cuenta 23 caracteres fijos**, sin importar su largo real, porque X la envuelve en `t.co`. La URL al back-end entra siempre por 23, sea corta o larguísima.
+- El límite es de 280 *weighted characters*: los codepoints 0-4351 pesan 1 y el resto 2. **Las tildes y la ñ pesan 1** (verificado: en las 91 publicaciones no había un solo carácter de peso 2), así que para el español el conteo es 1:1.
+
+Presupuesto: `280 − 23 (URL) − 3 (separadores) = 254` para repartir entre texto y hashtags.
+
+### Que entrara el 98% era suerte, no diseño
+
+El tope del schema era 240 y los hashtags hasta 5. El peor caso *permitido* era `240 + 2 + ~70 + 1 + 23 ≈ 336`, que se pasa por 56. Entraba casi todo porque el modelo escribía más corto de lo que se le permitía — el mismo patrón que ya habíamos visto con `relevancia_social`: **el prompt pide, solo el código garantiza.**
+
+### La decisión: no es un resumen recortado, es un gancho
+
+La primera propuesta fue bajar el tope de 240 a 190 y listo. El usuario la corrigió, y el cambio es de fondo y no de número: **un posteo no compite con la nota, invita a abrirla.** El desarrollo está a un click, en la URL del mismo tweet, así que el copy tiene que ser corto y llamativo, no un resumen comprimido.
+
+El ejemplo con el que se calibró, para el apagón en el estadio de Barracas Central:
+
+> `La inesperada falla eléctrica durante el partido del equipo del Chiqui Tapia`
+
+76 caracteres, contra una mediana de 145 de lo que se venía generando.
+
+**Tensión con la neutralidad, y cómo se resolvió.** "Llamativo" empuja justo contra el núcleo del producto. La salida fue distinguir de dónde sale el gancho: **de nombrar lo concreto y reconocible** (la persona, el club, el lugar, la cifra) y **no de adjetivos que valoren ni de clickbait**. El propio ejemplo funciona así: no exagera el hecho, elige el detalle que engancha y nombra a alguien reconocible. El prompt lo pide explícitamente y prohíbe "increíble", "escándalo", "mirá lo que pasó" y las preguntas retóricas.
+
+Objetivo nuevo: **menos de 120 caracteres** (`TWEET_OBJETIVO_RESUMEN`), con aire sobre el ejemplo sin habilitar volver al párrafo.
+
+### `max_length` del schema se queda en 240 a propósito
+
+Podría parecer que hay que bajarlo al objetivo, pero no: `max_length` es una **validación** de Pydantic, así que un gancho de 130 no se recortaría — tiraría `ValidationError` y voltearía la síntesis entera del cluster. El copy de redes es contenido descartable y no puede ser el motivo por el que se pierde una publicación. Queda como cota de tolerancia; el objetivo vive en el prompt y la garantía en el código.
+
+### La garantía: `ajustar_a_tweet`, y por qué recorta en ese orden
+
+El `response_schema` no puede expresar "la suma de estos dos campos más una URL no pasa de 280". `ajustar_a_tweet` lo asegura después, y el orden del recorte no es arbitrario:
+
+1. **Primero se sacan hashtags**, no texto: el resumen es la información y los hashtags son decoración, así que perder un hashtag cuesta menos que perder media oración.
+2. **No se baja de 2 hashtags**, que es lo que el contrato le promete al back-end.
+3. Recién ahí se recorta el texto, **en borde de palabra** — cortar a mitad de palabra se lee como un error del producto.
+4. Caso patológico (dos hashtags larguísimos que no dejan lugar): se van todos. Es preferible un posteo sin hashtags que uno mutilado.
+
+**El recorte lo hace el motor y no el back-end.** Si quedara del otro lado tendrían que cortar sin saber qué parte del texto es prescindible, y cortarían a mitad de palabra; acá sabemos que los hashtags son lo primero que sobra.
+
+### Un bug que encontró el test, no el razonamiento
+
+La primera versión de `_recortar` reservaba 1 carácter para los puntos suspensivos. Pero `…` es U+2026, **fuera del rango 0-4351: pesa 2**. El resultado quedaba 1 punto por encima del límite en el caso justo. Lo agarró `TestAjusteATweet.test_no_baja_del_minimo_de_hashtags_que_promete_el_contrato` antes de que llegara a producción — y es la prueba de que el conteo ponderado importa aun en textos en español, porque el carácter problemático lo agregamos nosotros.
+
+### Validado contra Gemini real
+
+Se le pidió la síntesis de 4 clusters que ya tenían copy, con el prompt nuevo y sin persistir:
+
+| Cluster | Antes | Ahora | Tweet completo |
+|---|---|---|---|
+| Icardi / Vicuña | 139 | **76** | 130/280 |
+| Apagón en La Plata | 125 | **86** | 144/280 |
+| Muerte de Hayden Panettiere | 171 | **67** | 137/280 |
+| Apagón en Barracas Central | 134 | **97** | 172/280 |
+
+El último es el caso del ejemplo, y el modelo produjo *"La falla eléctrica que dejó a oscuras el estadio de Barracas Central en su inauguración de luces"* — mismo espíritu, y nombra al club en vez de al dirigente, que es más neutro.
+
+268/268 tests (261 + 7 de `TestAjusteATweet` y `test_guarda_el_copy_ya_ajustado_al_tweet`).
+
+### Lo que queda mezclado a propósito
+
+Las 91 publicaciones que ya tenían copy **conservan el texto largo**: `publicacion_redes` no se congela pero tampoco se regenera sola, así que solo se actualizan cuando su cluster vuelva a sintetizarse por cobertura nueva. Durante un tiempo van a convivir ganchos cortos y bajadas largas. No se hizo un backfill por el mismo criterio que con el límite conocido de `publicacion_redes` (más arriba): reprocesar todo el historial con Gemini cuesta y el contenido viejo ya está entregado.

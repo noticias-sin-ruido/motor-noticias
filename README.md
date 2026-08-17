@@ -2,7 +2,7 @@
 
 Motor backend que agrega noticias de múltiples fuentes (RSS), agrupa por similitud semántica lo que cubre un mismo hecho, y genera una síntesis neutral con IA comparando cómo la contó cada medio — con tópicos, subtópicos y copy listo para redes sociales.
 
-**Estado:** Fase 5 completa — motor en versión beta. Detalle de las fases y próximos pasos en [specs/roadmap.md](specs/roadmap.md).
+**Estado:** versión 1.0 — las 5 fases completas y la entrega al back-end probada punta a punta. Detalle y próximos pasos en [specs/roadmap.md](specs/roadmap.md).
 
 ## 📖 Documentación
 
