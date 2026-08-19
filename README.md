@@ -4,6 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
 **Lee las noticias de varios medios, detecta cuáles cubren el mismo hecho y escribe una síntesis neutral que compara cómo lo contó cada uno.**
 
@@ -337,3 +338,15 @@ El *por qué* de cada decisión está escrito, no solo el *qué*:
 **Versión 1.0.** Las 5 fases completas y la entrega al back-end verificada punta a punta contra un receptor real.
 
 En marcha: una segunda vía de ingesta que extrae el cuerpo desde la URL del artículo, para sumar los medios cuyo RSS no trae el texto completo. El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md).
+
+---
+
+## Licencia
+
+Copyright © 2026 Fernando Garcia.
+
+Distribuido bajo la **[GNU Affero General Public License v3.0](LICENSE)**. En términos prácticos: podés usarlo, estudiarlo, modificarlo y redistribuirlo libremente; si distribuís una versión modificada **o la ofrecés como servicio a través de una red**, tenés que publicar el código fuente de esa versión bajo la misma licencia.
+
+Se eligió AGPL y no una licencia permisiva justamente por lo segundo: este motor se explotaría como servicio, y la GPL común no alcanza ese caso —su obligación se dispara con la distribución de binarios, que en un SaaS nunca ocurre—. La sección 13 de la AGPL es la que cierra ese hueco.
+
+El contenido periodístico que el motor procesa **no** está cubierto por esta licencia: pertenece a cada medio. El motor cita con atribución y enlaza siempre a la nota original.
