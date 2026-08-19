@@ -130,7 +130,11 @@ app = FastAPI(
         "Software libre bajo AGPL-3.0. Código fuente: "
         "https://github.com/noticias-sin-ruido/motor-noticias"
     ),
-    version="0.1.0",
+    # La versión del producto, la misma del tag `v1.0.0` y del User-Agent de la
+    # ingesta. NO es `VERSION_PAYLOAD` de `webhook_delivery`: esa versiona el
+    # contrato con el back-end y se mueve sola, solo cuando cambia la forma del
+    # payload. Subir la app no la toca.
+    version="1.0.0",
     # La sección 13 de la AGPL pide que un programa accesible por red le ofrezca
     # a sus usuarios la forma de conseguir el código. Declararlo acá lo publica
     # en `/docs` y en el esquema OpenAPI, que es la interfaz que el servicio
