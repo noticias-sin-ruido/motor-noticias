@@ -3,6 +3,7 @@ Configuración y fixtures compartidas para todos los tests.
 """
 from contextlib import contextmanager
 from typing import Generator
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +14,38 @@ from sqlmodel.pool import StaticPool
 from src.database import get_session
 from src.main import app
 from src.models import Medio, Noticia, Cluster, Sintesis  # noqa: F401
+from src.services import preprocessing
+
+
+class _DocSinEntidades:
+    """Lo único que `construir_evidencia` le pide a un doc de spaCy."""
+
+    ents = ()
+
+
+@pytest.fixture(autouse=True)
+def spacy_mockeado():
+    """
+    Ningún test carga el modelo real de spaCy.
+
+    Es la decisión que ya tomó Fase 5 al armar el CI —el job de tests no
+    instala `es_core_news_md`, son cientos de MB y una descarga de red por
+    corrida— pero **27 tests de síntesis se le escapaban**: llegan a spaCy sin
+    quererlo, por la cadena `sintetizar_pendientes` -> `construir_evidencia`
+    -> `get_nlp`. Localmente pasaban porque el modelo está instalado en el
+    entorno; en CI reventaban con `OSError: [E050] Can't find model`. El CI
+    estuvo rojo por esto desde el 12/08/2026, incluida la corrida de la 1.0.
+
+    Es `autouse` y no una fixture que cada test pida a propósito: el que se
+    olvide de pedirla vuelve a romper el CI y no lo nota, que es exactamente
+    lo que ya pasó. Devuelve cero entidades porque estos tests mockean
+    `llamar_modelo` y solo usan la evidencia para armar el prompt, no para
+    asertar. Los que sí prueban NER de verdad (`test_preprocessing.py`)
+    parchean `get_nlp` con su propio mapa dentro del test, y ese parche gana
+    sobre este.
+    """
+    with patch.object(preprocessing, "get_nlp", return_value=lambda _: _DocSinEntidades()):
+        yield
 
 
 @pytest.fixture(name="session")

@@ -159,6 +159,7 @@ class TestPipelineProgramado:
         with parches[0], parches[1], parches[2], parches[3], parches[4], parches[5], \
              parches[6], \
              patch.object(main, "enviar_alerta") as alerta, \
+             patch.object(main, "get_engine"), \
              patch.object(main, "Session"):
             main._job_ingesta_programada()
 
@@ -182,6 +183,7 @@ class TestPipelineProgramado:
              patch.object(main, "sintetizar_pendientes") as sintesis, \
              patch.object(main, "entregar_pendientes") as entrega, \
              patch.object(main, "enviar_alerta"), \
+             patch.object(main, "get_engine"), \
              patch.object(main, "Session"):
             main._job_ingesta_programada()
 

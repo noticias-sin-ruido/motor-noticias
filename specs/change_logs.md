@@ -738,6 +738,8 @@ Sumar un servicio Postgres al job de tests no habría agregado cobertura real �
 - `tests`: `pytest --cov=src --cov-fail-under=80`, sin Postgres.
 - `migraciones`: un servicio `pgvector/pgvector:pg16` real, y el único paso es `alembic upgrade head`.
 
+> ⚠️ **Esta sección afirmaba que ningún test necesita spaCy ni `DATABASE_URL` "porque están mockeados". Era falso, y dejó el CI en rojo cuatro corridas seguidas.** Ver "El CI estaba rojo desde el 12/08", al final de este documento.
+
 Confirmado además que `alembic/env.py` importa solo `src.models` y `src.config` (no `src.services`), así que aplicar migraciones no dispara carga de spaCy/sentence-transformers/Gemini — el job de migraciones corre en segundos, no minutos. Y que `.dockerignore` no excluye `alembic/` ni `alembic.ini`, así que la imagen ya podía migrarse desde adentro sin tocarlo.
 
 Fuera de este workflow a propósito: build de la imagen Docker completa en CI. Sería la validación más fiel al Dockerfile real, pero agrega minutos de build (compilación de `numpy`/`scikit-learn`, descarga de `es_core_news_md`) sin que hubiera evidencia de que el Dockerfile se rompa. Se agrega si eso llega a pasar.
@@ -1149,9 +1151,9 @@ Las 91 publicaciones que ya tenían copy **conservan el texto largo**: `publicac
 
 ---
 
-# Post-1.0 — Backlog punto 1: segunda vía de ingesta por URL
+# Post-1.0
 
-## Etapa 0: la medición que levanta el candado (18/08/2026)
+## Backlog punto 1 — segunda vía de ingesta por URL: la medición que levanta el candado (18/08/2026)
 
 La sección "Segunda vía de ingesta: extracción por URL" (más arriba) dejó dos candados. El primero —*"se retoma con el back-end integrado y probado"*— quedó cumplido: la corrida del 18/08 entregó 15/15 síntesis al back-end, 221/221 acumulado, cero rechazos de firma. El segundo era explícito y es el que se ataca acá:
 
@@ -1216,3 +1218,40 @@ Para la etapa 2 esto deja una decisión pendiente: hoy el script **falla cerrado
 ### Conclusión
 
 **El candado queda levantado**: la vía suma 14 pares reales por día contra un piso de 3, con 0% de fallos de extracción sobre 120 artículos. Se avanza a la implementación.
+
+---
+
+## El CI estaba rojo desde el 12/08 — y no era la cobertura (19/08/2026)
+
+Se revisó el CI a raíz de una sospecha de que no se alcanzaba el 80% de cobertura. **La cobertura nunca fue el problema**: GitHub reportó **87,71%, por encima del gate**. Lo que fallaba eran **31 tests**, y venía fallando en las **cuatro corridas desde el 12/08 — incluida la de la 1.0**, sin que nadie lo mirara.
+
+### Las dos causas raíz
+
+| Falla | Tests | Por qué |
+|---|---:|---|
+| `OSError: [E050] Can't find model 'es_core_news_md'` | 27 | El job de tests no instala el modelo de spaCy |
+| `RuntimeError: DATABASE_URL no está configurada` | 2 | El job no define la variable, y en CI no hay `.env` (gitignoreado) |
+| Contadores de `TestManejoDeFallos` | 2 | Consecuencia de las anteriores, no un fallo propio |
+
+**Las dos son el mismo problema de fondo: los tests no eran herméticos, y el entorno local los tapaba.** En la máquina de desarrollo hay un `.env` con `DATABASE_URL` y el modelo de spaCy instalado en el venv, así que `pytest` pasaba en verde localmente mientras el CI —que no tiene ninguna de las dos cosas— fallaba. **Local no es evidencia de que el CI pase.**
+
+La afirmación de Fase 5 —*"ninguno de los 215 tests los necesita (mockeados)"*— era la premisa equivocada. 27 tests de síntesis llegan a spaCy **sin querer**, por la cadena `sintetizar_pendientes` → `construir_evidencia` → `get_nlp`; y `TestPipelineProgramado` parcheaba `main.Session` pero no `main.get_engine`, que igual se ejecuta dentro de `Session(get_engine())`.
+
+### Reproducir antes de arreglar
+
+Las dos condiciones del CI se reproducen localmente con variables de entorno, que en `pydantic-settings` ganan sobre el `.env` (y `get_engine` valida con `if not settings.DATABASE_URL`, así que un string vacío sirve igual que la ausencia):
+
+```bash
+DATABASE_URL= SPACY_MODEL=modelo_inexistente pytest
+```
+
+Dio **31 failed, 237 passed** — exactamente los números de GitHub. Sin esa reproducción el arreglo se habría verificado contra el entorno equivocado, que es justo el error que causó el problema.
+
+### El arreglo
+
+- **spaCy**: fixture `spacy_mockeado` en `tests/conftest.py`, **`autouse`**. Parchea `preprocessing.get_nlp` con un doc de cero entidades. Es `autouse` a propósito y no una fixture que cada test pida: el que se olvide de pedirla vuelve a romper el CI sin notarlo, que es exactamente lo que ya pasó. Los tests que sí prueban NER de verdad (`test_preprocessing.py`) parchean `get_nlp` con su propio mapa dentro del test, y ese parche gana sobre el global.
+- **`DATABASE_URL`**: `patch.object(main, "get_engine")` en los dos tests de `TestPipelineProgramado`, al lado del patch de `Session` que ya estaba.
+
+Se arregló **en los tests y no en el workflow**. Poner un `DATABASE_URL` de mentira o un `spacy download` en el YAML habría puesto el CI en verde igual, pero dejando los tests dependiendo de su entorno — y `es_core_news_md` son cientos de MB descargados en cada corrida, que es justo lo que Fase 5 quiso evitar.
+
+Verificado: **268/268 con las condiciones del CI simuladas**, cobertura 95,30%.
