@@ -343,7 +343,7 @@ En marcha: una segunda vía de ingesta que extrae el cuerpo desde la URL del art
 
 ## Licencia
 
-Copyright © 2026 Fernando Garcia.
+Copyright © 2026 Fernando José García.
 
 Distribuido bajo la **[GNU Affero General Public License v3.0](LICENSE)**. En términos prácticos: podés usarlo, estudiarlo, modificarlo y redistribuirlo libremente; si distribuís una versión modificada **o la ofrecés como servicio a través de una red**, tenés que publicar el código fuente de esa versión bajo la misma licencia.
 
