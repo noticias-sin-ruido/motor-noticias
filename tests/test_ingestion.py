@@ -605,6 +605,93 @@ class TestExtraccionPorUrl:
 
         assert "contenido completo" not in caplog.text
 
+    def test_no_escala_las_queries_con_los_items_del_feed(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        El guardia de N+1 de Fase 5 (`TestDeduplicacionNoEscala`) usa la fixture
+        `medio`, que no tiene la bandera: cubre solo la vía vieja. Este es su
+        equivalente para la vía con extracción.
+
+        Mismo aislamiento que aquel: se precargan las mismas notas que trae el
+        feed, así no hay inserts de por medio y la única diferencia entre
+        "pocos" y "muchos" es cuántos items hay que chequear.
+        """
+        for prefijo, cantidad in (("pocos", 3), ("muchos", 40)):
+            for i in range(cantidad):
+                session.add(Noticia(
+                    medio_id=medio_extractor.id,
+                    titulo=f"Noticia {prefijo}-{i}",
+                    url=f"https://test.com/{prefijo}-{i}",
+                    guid=f"guid-{prefijo}-{i}",
+                    contenido_limpio="Ya estaba en la base.",
+                    fecha_publicacion=datetime.utcnow(),
+                ))
+        session.commit()
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3, "pocos")
+        ), patch.object(ingestion, "extraer_varios") as extraer:
+            with contar_queries(session) as pocos:
+                ingestion.ingerir_medio(session, medio_extractor)
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(40, "muchos")
+        ):
+            with contar_queries(session) as muchos:
+                stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        assert stats["duplicadas"] == 40
+        assert muchos["n"] == pocos["n"]
+        # Nada que extraer: ya estaban todas. Es el mismo invariante que
+        # `test_solo_se_extraen_las_noticias_nuevas`, visto desde el costo.
+        extraer.assert_not_called()
+
+    def test_con_notas_nuevas_solo_crecen_los_inserts(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        El caso anterior **no alcanza**: con todo duplicado, `_procesar_items`
+        sale por el `return` temprano *antes* del commit intermedio, así que el
+        camino nuevo ni se ejercita y el guardia sería falso.
+
+        Acá las notas son todas nuevas, así que corren el commit intermedio y la
+        extracción. Las queries tienen que crecer **exactamente** lo que crecen
+        los inserts —uno por nota— y ni una más: cualquier exceso sería un
+        `SELECT` por artículo, que es el N+1 volviendo por la puerta del commit
+        que expira el `Medio`.
+        """
+        def extraidos(urls):
+            return {url: CUERPO_EXTRAIDO for url in urls}
+
+        # Las dos corridas tienen que arrancar del mismo estado. Sin esto, la
+        # primera encuentra el `Medio` recién cargado por la fixture y la
+        # segunda lo encuentra expirado por los commits de la primera, así que
+        # paga un SELECT de refresco que la primera no pagó -- una diferencia
+        # de costo fijo, O(1) por corrida, que nada tiene que ver con cuántos
+        # artículos trae el feed. Expirarlo en las dos deja a la vista solo lo
+        # que crece con los items, que es lo que este test mide.
+        session.expire(medio_extractor)
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3, "pocas")
+        ), patch.object(ingestion, "extraer_varios", side_effect=extraidos):
+            with contar_queries(session) as pocos:
+                stats_pocos = ingestion.ingerir_medio(session, medio_extractor)
+
+        session.expire(medio_extractor)
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(40, "muchas")
+        ), patch.object(ingestion, "extraer_varios", side_effect=extraidos):
+            with contar_queries(session) as muchos:
+                stats_muchos = ingestion.ingerir_medio(session, medio_extractor)
+
+        assert stats_pocos["nuevas"] == 3
+        assert stats_muchos["nuevas"] == 40
+
+        crecimiento_queries = muchos["n"] - pocos["n"]
+        crecimiento_notas = stats_muchos["nuevas"] - stats_pocos["nuevas"]
+        assert crecimiento_queries == crecimiento_notas
+
     def test_un_medio_sin_la_bandera_nunca_extrae(self, session: Session, medio: Medio):
         """
         Guarda de regresión: la vía nueva no puede filtrarse a los medios que no

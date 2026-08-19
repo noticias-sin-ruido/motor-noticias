@@ -1351,9 +1351,15 @@ Lo que la medición sí expuso es **dónde queda la extracción respecto de la t
 
 `sin_contenido` deja de contar los items sin cuerpo en los medios con extracción —ahí son candidatos, no descartes, y contarlos haría que el número sea siempre igual al tamaño del feed— y su señal pasa a `extraidas` y `extraccion_fallida`.
 
-### El test que se verificó por mutación
+### Dos tests que se verificaron por mutación
 
 El invariante de la transacción tiene un test que lo afirma directamente: el mock de `extraer_varios` registra `session.in_transaction()` al ser llamado. Como es **el test que justifica todo el rediseño**, se comprobó que puede fallar: quitando el `commit` intermedio, da `[True] == [False]`. Un test que no puede fallar no prueba nada.
+
+El otro cierra un hueco que apareció al auditar la etapa: **el guardia de N+1 de Fase 5 cubre solo la vía vieja**, porque `TestDeduplicacionNoEscala` usa la fixture `medio`, que no tiene la bandera. La propiedad se cumplía en la vía nueva —medido a mano— pero nada la protegía en CI.
+
+Al escribirlo apareció una trampa que vale la pena dejar anotada: **replicar el test existente no alcanza.** Aquel aísla precargando duplicados, y con todo duplicado `_procesar_items` sale por el `return` temprano **antes** del commit intermedio, así que el camino nuevo ni se ejercita. Hacen falta los dos casos, y se comprobó reintroduciendo el `_ya_esta` de antes de Fase 5 —un `SELECT` por artículo— en el loop de inserción: el test de notas nuevas lo detecta (74 contra 37 esperadas) y **el de duplicadas pasa igual**. Solo él habría sido un guardia falso.
+
+Un detalle de la medición: las dos corridas hay que arrancarlas del mismo estado (`session.expire`). Si no, la primera encuentra el `Medio` recién cargado y la segunda lo encuentra expirado por los commits de la primera, y la diferencia de un `SELECT` de refresco —costo fijo, O(1) por corrida— se lee como si fuera crecimiento por artículo.
 
 ### Verificado
 
