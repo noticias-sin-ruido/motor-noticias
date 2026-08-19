@@ -36,4 +36,22 @@ class Medio(SQLModel, table=True):
 
     activo: bool = Field(default=True)
 
+    # Si el cuerpo de la nota se extrae de la página del artículo en vez de
+    # leerlo del `content:encoded` del feed. Ver specs/change_logs.md,
+    # "Backlog punto 1: segunda vía de ingesta por URL".
+    #
+    # Es una bandera **por medio y no una configuración global** a propósito:
+    # los 6 medios del roster ya entregan el cuerpo completo por RSS, y
+    # activar la extracción para todos les mandaría un request de página por
+    # nota sin necesidad — carga gratis para ellos y latencia gratis para
+    # nosotros. Solo la necesitan Clarín y Perfil, cuyo feed trae `description`
+    # de ~200 caracteres y nada más (verificado el 18/08: 0 de 438 items de
+    # sus feeds traían `content:encoded`).
+    #
+    # Arranca en `False` para que un medio nuevo entre por la vía barata salvo
+    # que se diga lo contrario: la regla de Fase 2 —"el feed debe traer el
+    # artículo completo"— sigue siendo la predeterminada, y esto es la
+    # excepción declarada.
+    extraer_por_url: bool = Field(default=False)
+
     noticias: List["Noticia"] = Relationship(back_populates="medio")

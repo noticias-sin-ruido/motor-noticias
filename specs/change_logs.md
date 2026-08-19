@@ -1146,3 +1146,73 @@ El último es el caso del ejemplo, y el modelo produjo *"La falla eléctrica que
 ### Lo que queda mezclado a propósito
 
 Las 91 publicaciones que ya tenían copy **conservan el texto largo**: `publicacion_redes` no se congela pero tampoco se regenera sola, así que solo se actualizan cuando su cluster vuelva a sintetizarse por cobertura nueva. Durante un tiempo van a convivir ganchos cortos y bajadas largas. No se hizo un backfill por el mismo criterio que con el límite conocido de `publicacion_redes` (más arriba): reprocesar todo el historial con Gemini cuesta y el contenido viejo ya está entregado.
+
+---
+
+# Post-1.0 — Backlog punto 1: segunda vía de ingesta por URL
+
+## Etapa 0: la medición que levanta el candado (18/08/2026)
+
+La sección "Segunda vía de ingesta: extracción por URL" (más arriba) dejó dos candados. El primero —*"se retoma con el back-end integrado y probado"*— quedó cumplido: la corrida del 18/08 entregó 15/15 síntesis al back-end, 221/221 acumulado, cero rechazos de firma. El segundo era explícito y es el que se ataca acá:
+
+> **No entra en la app hasta validar que suma pares reales.** […] falta extraer un día completo de los dos, vectorizar contra el corpus real y contar pares por encima del umbral **antes de escribir una sola línea de producción**.
+
+Se hizo exactamente eso, con un script de medición fuera de `src/` (`scratchpad/validar_extraccion_url.py`): recolectar URLs de 8 feeds de sección de Clarín y 5 de Perfil, filtrarlas con los **mismos** filtros del pipeline real (ventana de `HORAS_CLUSTER_ABIERTO`, `es_en_vivo`, `categoria_no_evento`), extraer con `trafilatura`, vectorizar con `vectorizar_textos` y **replicar el loop de `agrupar_pendientes` en memoria** reusando `_mejor_match` y `_ClusterEnMemoria`, sin escribir en la base. Se corrió una simulación de control sin los medios nuevos para confirmar que el delta es atribuible a ellos.
+
+### Resultado
+
+| Métrica | Resultado |
+|---|---|
+| **A — clusters publicables nuevos** (decide) | **16**: 4 desbloqueados (tenían 1 solo medio) + 12 nacidos de una suelta + un artículo |
+| A — control sin Clarín/Perfil | **0 + 0** — el delta es atribuible a los medios nuevos |
+| **B — pareo con el corpus** (diagnóstico) | Clarín 18/60 (30%), Perfil 21/60 (35%) |
+| **C — salud de la extracción** | 120/120 extraídos, **0 fallos** |
+
+Salud en detalle, con *n*=60 por medio (la medición anterior era de 6 y el propio change_log la declaraba no concluyente):
+
+| Medio | mediana | p10 | mínimo | s/artículo |
+|---|---:|---:|---:|---:|
+| Clarín | 3.982 | 2.162 | 1.914 | 0,31 |
+| Perfil | 3.099 | 1.615 | **701** | 0,38 |
+
+Referencia con la que se leyó A: una corrida produce hoy ~15 síntesis, así que **≥3 clusters/día justifica el trabajo y <1 reproduce el caso Diario Crónica**. Dio 16. Y B confirma que la agenda se cruza de verdad: no es Crónica.
+
+**El mínimo de 701 caracteres es el dato que faltaba para la etapa 2**: un piso de ~500 atrapa menús y avisos de cookies sin tocar nunca un artículo legítimo.
+
+### La auditoría manual: 14 de 16, y por qué los 2 restantes no son culpa de esta vía
+
+Los pares se auditaron a mano, leyendo los cuerpos y no los títulos —la historia del proyecto dice que los números de clustering engañan cuando no se miran los casos—. **Los 12 nacidos dieron 12/12 correctos** (Albon–Williams 0,913; YPF 0,911; Simeone–Álvarez 0,910; Metalfor 0,895; la fábrica textil 0,803; Mathilde Favier 0,783). **De los 4 desbloqueados, 2 son falsos positivos**:
+
+| Cluster | Artículo entrante | Sim. |
+|---|---|---:|
+| 431 — ciberseguridad en pagos (Deloitte) + tres medios de pago (Payway) | El Gobierno flexibilizó los créditos en dólares | 0,8008 |
+| 439 — informe Idesa sobre el FGS + informe de Trabajo sobre paritarias | 254 mil niños en hogares con piso de tierra | 0,7975 |
+
+La primera lectura fue "Clarín y Perfil traen ruido". **Leídos los cuerpos, es al revés.** Los dos clusters ya están mal armados hoy: cada uno junta dos notas de El Cronista sobre hechos distintos, agrupadas porque la escritura económica de ese medio es semánticamente homogénea. Son el "blob de economía" documentado más arriba, en la Fase 3. Los medios nuevos **no crean el defecto: lo destapan**, dándole a un blob preexistente su segundo medio y volviéndolo publicable. Hoy esos clusters existen igual y lo único que los salva de publicarse es que les falta una voz. Es un punto propio del backlog, no un costo de esta vía.
+
+### Hallazgo lateral: el centroide de un blob atrae más que sus miembros
+
+Al medir la similitud del artículo entrante contra cada miembro por separado:
+
+| | vs. miembro A | vs. miembro B | vs. **centroide** |
+|---|---:|---:|---:|
+| Par 1 | 0,7118 | 0,7938 | **0,8008** |
+| Par 2 | 0,7798 | 0,7300 | **0,7975** |
+
+En los dos casos el centroide atrae más que cualquier miembro individual. Promediar dos notas poco relacionadas da un vector en el "medio genérico" del dominio, y ese punto está más cerca de cualquier nota económica que las notas específicas entre sí.
+
+Sugiere un guardarraíl —exigir que la entrante supere el umbral contra **todos** los miembros y no solo contra el centroide—, que con estos dos casos alcanzaría. **No se verificó contra los 14 pares buenos, así que no se sabe cuántos legítimos rompería: es una hipótesis para medir, no una recomendación.**
+
+### Un falso negativo propio, que vale la pena no repetir
+
+La primera corrida abortó con "20/20 rutas rechazadas" en **ambos** medios. Era mentira. `urllib.robotparser.RobotFileParser.read()` descarga el `robots.txt` con `urllib`, que manda `Python-urllib/3.x`, y Clarín y Perfil devuelven **403 a ese User-Agent incluso para el `robots.txt`**. Por spec un 403 sobre `robots.txt` significa "disallow all", así que el parser hizo lo correcto y rechazó todo — sin haber leído una sola regla.
+
+Lo delató que el resultado fuera demasiado redondo: un diario que bloquea todo tampoco sale en Google, y vive de eso.
+
+**La forma correcta es bajar el `robots.txt` con nuestro cliente y nuestro User-Agent y recién ahí parsear el texto** (`parser.parse(respuesta.text.splitlines())`, no `parser.read()`). Hecho así, los dos dan 200: Perfil es `Allow: /` a secas y Clarín solo bloquea `/api/`, `/_next/`, `/videos/*?`, `/cdn-cgi/` y similares — ninguna ruta de artículo, y ninguno declara `crawl-delay`. Se confirma lo que la medición original había registrado.
+
+Para la etapa 2 esto deja una decisión pendiente: hoy el script **falla cerrado** (si no puede leer `robots.txt`, no extrae), que es lo correcto para una medición, pero en producción significaría perder un medio en silencio.
+
+### Conclusión
+
+**El candado queda levantado**: la vía suma 14 pares reales por día contra un piso de 3, con 0% de fallos de extracción sobre 120 artículos. Se avanza a la implementación.

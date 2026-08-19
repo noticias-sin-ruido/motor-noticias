@@ -89,10 +89,25 @@ MEDIOS = [
     },
 ]
 
-# Clarin y Perfil quedan fuera: su RSS no trae content:encoded, solo una
-# description de ~200 caracteres. Cadena 3 tiene el tag pero con el copete
-# adentro, y ademas su feed esta congelado desde 2018. Diario Cronica trae el
-# tag vacio y su agenda es de Chubut, que casi no se cruza con la nacional.
+# Campos que este script mantiene sincronizados contra una base ya cargada:
+# los que declaran COMO se ingiere un medio. El resto se sigue respetando para
+# no pisar ajustes manuales, igual que antes.
+#
+# `activo` queda afuera a proposito: dar de baja un medio es una decision
+# operativa que se toma en la base, y volver a correr el seed no debe revivirlo.
+# `url_base` tambien: nunca se piso hasta ahora y no hay motivo para empezar.
+CAMPOS_SINCRONIZADOS = ["feeds_rss", "extraer_por_url"]
+
+# Clarin y Perfil siguen fuera del roster POR AHORA, pero ya no por falta de
+# evidencia: su RSS no trae content:encoded (verificado el 18/08, 0 de 438
+# items), y la segunda via de ingesta que los habilita esta a medio construir.
+# La medicion que levanto el candado dio 14 pares reales por dia y 0 fallos de
+# extraccion sobre 120 articulos -- entran cuando el extractor exista, con
+# `"extraer_por_url": True`. Ver specs/change_logs.md, "Backlog punto 1".
+#
+# Cadena 3 tiene el tag pero con el copete adentro, y ademas su feed esta
+# congelado desde 2018. Diario Cronica trae el tag vacio y su agenda es de
+# Chubut, que casi no se cruza con la nacional.
 # Ver specs/change_logs.md, Fase 2 y Fase 4.
 
 
@@ -111,16 +126,33 @@ def main() -> int:
             ).first()
 
             if ya_existe:
-                # La lista de feeds SI se actualiza. Es la unica forma de que
-                # agregar una seccion llegue a una base que ya esta cargada; el
-                # resto de los campos se respeta para no pisar ajustes manuales.
-                if ya_existe.feeds_rss != datos["feeds_rss"]:
-                    antes = len(ya_existe.feeds_rss)
-                    ya_existe.feeds_rss = datos["feeds_rss"]
+                # Los campos de CONFIGURACION si se actualizan. Es la unica
+                # forma de que un cambio declarado aca llegue a una base que ya
+                # esta cargada. `activo` y el resto no se tocan, para no pisar
+                # ajustes manuales.
+                #
+                # Se recorre la lista en vez de comparar solo `feeds_rss` como
+                # antes: cuando se agrego `extraer_por_url` quedo claro que un
+                # campo nuevo nunca habria llegado a los medios existentes.
+                #
+                # El estado deseado se lee de un `Medio` armado con los mismos
+                # datos y NO del dict: asi un campo que la entrada no declara
+                # toma el default del modelo en vez de quedar sin tocar. Sin
+                # eso la bandera solo se encenderia y nunca se apagaria, que es
+                # una sincronizacion a medias -- y es exactamente lo que hacia
+                # la primera version de este bloque.
+                declarado = Medio(**datos)
+                cambios = []
+                for campo in CAMPOS_SINCRONIZADOS:
+                    actual, deseado = getattr(ya_existe, campo), getattr(declarado, campo)
+                    if actual != deseado:
+                        setattr(ya_existe, campo, deseado)
+                        cambios.append(f"{campo}: {actual!r} -> {deseado!r}")
+
+                if cambios:
                     session.add(ya_existe)
                     session.commit()
-                    print(f"  ~ {datos['nombre']}: feeds {antes} -> "
-                          f"{len(datos['feeds_rss'])}.")
+                    print(f"  ~ {datos['nombre']}: " + "; ".join(cambios))
                     actualizados += 1
                 else:
                     print(f"  = {datos['nombre']} ya existe (id={ya_existe.id}), sin cambios.")

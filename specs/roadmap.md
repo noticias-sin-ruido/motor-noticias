@@ -140,7 +140,14 @@ Regla que ordena toda la lista, la misma de siempre (`mission.md`): **medir ante
 
 Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded` — hoy el motivo concreto por el que Clarín quedó afuera del roster. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
 
-**Precondición que sigue sin cumplirse**: se dijo "se retoma con el back-end integrado y probado" — y esa integración real (URL + secreto del webhook configurados, primera entrega punta a punta) todavía no pasó (ver la línea "Siguiente" al principio de este documento). No se empieza esta vía mientras compita por atención con cerrar esa comunicación.
+**🚧 EN CURSO** (arrancó el 18/08/2026, branch `mejoras-post-1.0`). Las dos precondiciones quedaron cumplidas:
+
+- *"Se retoma con el back-end integrado y probado"* — la corrida del 18/08 entregó 15/15 síntesis, 221/221 acumulado, cero rechazos.
+- *"No entra en la app hasta validar que suma pares reales"* — medido: **14 pares reales por día** (contra un piso de 3 para justificar el trabajo), 30-35% de sus artículos parean con nuestro corpus, y **0 fallos de extracción sobre 120 artículos**. Detalle completo, incluida la auditoría manual de los pares, en `change_logs.md`, "Etapa 0: la medición que levanta el candado".
+
+Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migración `b4f1a9d27c30`) · **2 ⬜** `services/extraccion.py` con piso de caracteres y política de reintentos propia · **3 ⬜** la costura en `_procesar_items`, invirtiendo el orden de filtrado · **4 ⬜** márgenes del scheduler · **5 ⬜** alta de Clarín y Perfil.
+
+**Hallazgo que abre un ítem nuevo**: la medición destapó dos clusters mal armados de El Cronista ("el blob de economía" de Fase 3) que hoy no se publican solo porque les falta un segundo medio. No los causa esta vía, pero esta vía los volvería publicables. Ver el hallazgo del centroide en `change_logs.md`.
 
 ### 2. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
 
