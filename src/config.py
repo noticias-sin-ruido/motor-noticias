@@ -229,6 +229,45 @@ class Settings(BaseSettings):
     # pool por réplica, subir `max_connections`, o sumar un pooler (PgBouncer)
     # -- ninguna de las tres hace falta con una sola réplica.
 
+    # --- Extracción por URL (backlog post-1.0, punto 1) ---
+    # Segunda vía de ingesta para los medios cuyo RSS no trae `content:encoded`
+    # (Clarín y Perfil: 0 de 438 items, verificado el 18/08/2026). Los valores
+    # salen de la medición sobre 120 artículos reales -- ver specs/change_logs.md,
+    # "Backlog punto 1". Es una política de red DISTINTA a la de los feeds a
+    # propósito: un feed por medio y por ciclo tolera esperas que un artículo,
+    # multiplicado por decenas, no.
+
+    # Segundos que se espera la página de un artículo. Más corto que los 15 de
+    # los feeds (`ingestion.REQUEST_TIMEOUT_SECONDS`) porque acá el costo se
+    # multiplica: un ciclo baja 1 feed por medio pero puede pedir decenas de
+    # artículos. Medido: 0,31 s promedio en Clarín y 0,38 s en Perfil, así que
+    # 10 s ya es dos órdenes de magnitud de margen sobre el caso normal.
+    EXTRACCION_TIMEOUT: float = 10.0
+
+    # Reintentos por artículo, sin backoff exponencial. Los feeds usan 3
+    # intentos con espera creciente hasta ~20 s; reusar eso por artículo
+    # empujaría la ingesta contra el ciclo de 15 minutos del scheduler. Con 1
+    # se absorbe el error de red puntual y se abandona rápido: una nota que no
+    # se pudo bajar se pierde sola, y el feed la vuelve a ofrecer en el ciclo
+    # siguiente mientras siga en su ventana.
+    EXTRACCION_REINTENTOS: int = 1
+
+    # Piso de caracteres por debajo del cual lo extraído NO se considera un
+    # artículo. Es la defensa contra el modo de falla propio de esta vía: si un
+    # medio rediseña su maquetado, `trafilatura` no falla -- devuelve un menú o
+    # un aviso de cookies que *parece* contenido y contamina embeddings y
+    # prompts en silencio. Medido sobre 120 artículos: el más corto tuvo 701
+    # caracteres y el percentil 10 quedó en 1.615, así que 500 deja margen
+    # amplio sobre el artículo legítimo más flaco y sigue muy por encima de
+    # cualquier menú.
+    EXTRACCION_MIN_CARACTERES: int = 500
+
+    # Pausa entre requests de artículo al mismo medio. Ni Clarín ni Perfil
+    # declaran `crawl-delay` en su robots.txt, así que esto es cortesía y no
+    # obligación: son medios que no nos conocen y pedirles decenas de páginas
+    # seguidas sin respirar no es forma de presentarse.
+    EXTRACCION_PAUSA_SEGUNDOS: float = 1.0
+
 
 # Instancia única de configuración, importada en el resto de la aplicación.
 settings = Settings()

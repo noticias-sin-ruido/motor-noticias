@@ -1255,3 +1255,62 @@ Dio **31 failed, 237 passed** — exactamente los números de GitHub. Sin esa re
 Se arregló **en los tests y no en el workflow**. Poner un `DATABASE_URL` de mentira o un `spacy download` en el YAML habría puesto el CI en verde igual, pero dejando los tests dependiendo de su entorno — y `es_core_news_md` son cientos de MB descargados en cada corrida, que es justo lo que Fase 5 quiso evitar.
 
 Verificado: **268/268 con las condiciones del CI simuladas**, cobertura 95,30%.
+
+---
+
+## Backlog punto 1, etapa 2 — el extractor: `services/extraccion.py` (19/08/2026)
+
+Se construye **solo el módulo**, sin llamadores. Es deliberado: concentra todas las decisiones de red y de formato, se testea aislado, y deja la costura en `_procesar_items` —el cambio riesgoso— para un diff propio y revisable. `Medio.extraer_por_url` sigue sin leerse en ningún lado de `src/`.
+
+Antes de escribir una línea se mapeó el radio de impacto de la vía completa, porque **el contrato de salida del extractor es lo que determina si las etapas siguientes son seguras**. De ese mapa salieron las decisiones de abajo.
+
+### La decisión que ordena todo: normalizar en el origen
+
+El extractor devuelve el texto **colapsando todo espacio en blanco a un solo espacio**, con exactamente el mismo formato que produce `ingestion.limpiar_html`. No es cosmético: apaga cuatro riesgos de una sola vez y evita tocar tres módulos.
+
+El hallazgo que lo motivó no estaba en el diseño original. `synthesis.py` arma el prompt con bloques `--- NOTA n | medio` unidos por saltos de línea. **Ese delimitador es inequívoco hoy solo porque ningún cuerpo contiene `\n`** — y eso no es una decisión explícita de nadie, es una consecuencia de que `limpiar_html` use `separator=" ", strip=True`. `trafilatura.extract()` devuelve el artículo en párrafos separados por saltos. Metido tal cual, el delimitador deja de ser único y un cuerpo que traiga una línea `--- NOTA` **inyecta estructura en el prompt**.
+
+Se evaluó arreglarlo en `synthesis.py` (delimitador más robusto, o escapado al armar el bloque) y se descartó: el problema no es del prompt, es de que dos vías de ingesta produzcan formatos distintos. Normalizando en el origen las dos quedan **indistinguibles río abajo** y no se toca `synthesis.py`, `vectorization.py` ni `preprocessing.py`.
+
+Queda cubierto por `test_coincide_con_limpiar_html`, que compara las dos vías sobre la misma entrada.
+
+### Fallar cerrado y ruidoso ante un `robots.txt` ilegible
+
+La etapa 0 había dejado esto como decisión pendiente: el script de medición fallaba cerrado en silencio, correcto para medir y malo para producción.
+
+Se resuelve **cerrado y ruidoso**. Cerrado porque no sabemos qué permite el medio y suponer que permite todo no es nuestra decisión. Ruidoso —`alerts.enviar_alerta`— porque el silencio acá significa **perder la cobertura de un medio entero sin que nadie se entere hasta mirar los números**, que es el patrón que el proyecto ya corrigió dos veces. La clave de alerta es por dominio (`robots:{base}`) para que el cooldown agrupe y un medio caído no inunde el mail.
+
+El `robots.txt` se baja con `httpx` y nuestro User-Agent y recién después se parsea con `parser.parse(...)` — **nunca `parser.read()`**, por el falso negativo documentado más arriba. Se cachea por dominio: sin eso se pediría una vez por artículo, que con el feed de Clarín son 10 requests extra por ciclo para releer siempre lo mismo.
+
+### Las otras dos reglas del contrato
+
+- **Nunca propaga excepciones.** Es requisito, no comodidad. Quien va a llamarlo es `_procesar_items`, que corre dentro del `try` de `ingerir_feed`: una excepción que se escape dispara `session.rollback()` —perdiendo el feed entero—, un mail de alerta y un `feeds_fallados += 1`. **Un artículo caído se contabilizaría y se alertaría como un feed entero caído.**
+- **No devuelve la URL final tras los redirects.** Extraer implica seguirlos, pero la que se persiste tiene que seguir siendo la del feed: de ella dependen la deduplicación con su índice único sobre `Noticia.url`, `categoria_no_evento`, `topico_declarado` y el payload al back-end. Guardar la final duplicaría el artículo o reventaría contra el índice y tiraría la ingesta del medio.
+
+### Verificación contra artículos reales, y un riesgo que se midió en vez de suponerse
+
+Además de la suite (que no sale a la red), se corrió el extractor contra artículos reales:
+
+| | Clarín | Perfil |
+|---|---:|---:|
+| Extraídos | 5/5 | 5/5 |
+| Con saltos de línea | 0 | 0 |
+| Por debajo del piso de 500 | 0 | 0 |
+| `robots.txt` pedido | 1 vez | 1 vez |
+
+La prueba que importaba era otra: **el mismo artículo por las dos vías**. La Nación es el único medio donde se puede hacer, porque trae `content:encoded` (vía vieja) y su página es extraíble (vía nueva). Sobre 12 artículos, la similitud textual entre ambas dio 77-95%, y `trafilatura` resultó anteponer **título y bajada** al cuerpo.
+
+Eso toca directamente el riesgo del embedding, que se calcula sobre los primeros `EMBEDDING_CHARS_CUERPO` (500) caracteres. Se midió el efecto real vectorizando las dos versiones de cada artículo con `construir_texto`:
+
+- **El lead real nunca quedó fuera de la ventana**: 12 de 12, con offsets entre 185 y 427 sobre 500. La formulación fuerte del riesgo no se materializó.
+- Similitud coseno entre las dos versiones: **mediana 0,9019**, máximo 0,9262, **mínimo 0,7426**. Un caso quedó por debajo de `UMBRAL_SIMILITUD=0,75`.
+
+Del peor caso salió una hipótesis —que el título se duplica, porque `construir_texto` ya hace `f"{titulo}. {cuerpo}"`— que **al verificarla resultó ser un artefacto de La Nación y no de la vía**: el cuerpo arranca con el título en 0 de 6 artículos de Clarín y 1 de 6 de Perfil. Y La Nación no va a usar esta vía. Generalizar desde el medio-proxy habría metido en el extractor una heurística de recorte que ninguno de los dos medios reales necesita.
+
+**No se corrige nada, entonces.** Lo que queda por delante del lead en Clarín y Perfil es la bajada, que no es basura: es un resumen escrito por el propio medio, señal legítima para agrupar. La respuesta empírica ya la había dado la etapa 0, que midió **14 pares reales por día con exactamente este texto**.
+
+Queda registrado como **riesgo residual medido, no como defecto**: la bajada consume entre el 37% y el 85% de la ventana del embedding. Si alguna vez el clustering de estos medios rinde por debajo de lo medido, el primer lugar donde mirar es acá.
+
+### Verificado
+
+**295 tests en verde** (268 + 27 nuevos) con las condiciones del CI simuladas, cobertura **95,37%**, `ruff` limpio. Las 3 líneas sin cubrir de `extraccion.py` son `_descargar_pagina`, la frontera con la red, mockeada en toda la suite a propósito.
