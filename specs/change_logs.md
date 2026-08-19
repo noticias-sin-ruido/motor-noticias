@@ -1381,3 +1381,64 @@ La segunda corrida es la que importa: confirma contra un feed real que la dedupl
 Correr el **pipeline completo** con noticias extraídas —vectorización, agrupamiento y síntesis— se difiere a la etapa 5, cuando los medios estén dados de alta de verdad. Hacerlo ahora exigiría o bien agrupar noticias temporales contra los clusters reales (mutando estado compartido que después hay que deshacer), o bien gastar presupuesto de Gemini en una síntesis de prueba. La promesa de que río abajo nada distingue las dos vías ya está respaldada por la etapa 0 (14 pares reales por día con este mismo texto) y por `test_coincide_con_limpiar_html`.
 
 **Concurrencia entre medios**: la pausa de 1 s se aplica hoy entre *todos* los artículos, aunque sean de dominios distintos — pero la cortesía se le debe a un medio, no al proceso. Paralelizando entre medios el costo deja de ser la suma y pasa a ser el máximo por medio (~40 s), sea N=2 o N=40. **Disparador: pasar los ~10 medios**, donde la primera corrida ya llega al 44% del ciclo. No hace falta para dos.
+
+---
+
+## Backlog punto 1, etapa 4 — los márgenes del scheduler, y volver audibles sus fallos (19/08/2026)
+
+`add_job` nunca declaró `max_instances`, `coalesce` ni `misfire_grace_time`, así que corría con los defaults de APScheduler 3.11.3 — verificados leyendo `BaseScheduler._configure`, no supuestos: `max_instances=1`, `coalesce=True`, `misfire_grace_time=` **1 segundo**.
+
+Pero el problema de fondo no eran los tres parámetros, que son cinco líneas. **Era que todas las formas en que el scheduler puede perder una corrida son silenciosas**: terminan en un `WARNING` de la librería sobre un stdout que además no se persiste (no hay `basicConfig` ni handler de archivo en todo `src/`).
+
+### Las tres formas de perder una corrida son distintas
+
+Vale precisarlo porque es fácil mezclarlas —y se mezclaron al discutir la etapa—:
+
+| Evento | Cuándo | Lo gobierna |
+|---|---|---|
+| `EVENT_JOB_MAX_INSTANCES` | Una corrida se pasa del intervalo y la siguiente la encuentra viva | `max_instances` |
+| `EVENT_JOB_MISSED` | El scheduler llega tarde a **lanzar** la corrida | `misfire_grace_time` |
+| `EVENT_JOB_ERROR` | El job levanta una excepción antes de que `_correr_paso` pueda atraparla | — |
+
+La tercera no estaba en el diagnóstico original y es igual de real: `_correr_paso` protege cada paso del pipeline, pero **no la apertura de la sesión que los envuelve**. Con la base caída, `Session(get_engine())` falla y el error se escapa por ahí.
+
+Dato que acota el alcance: el scheduler usa `MemoryJobStore` y el job se re-agrega en cada `lifespan`, así que **no hay recuperación de corridas perdidas tras una caída**. Los misfires solo pueden venir de demoras dentro del proceso.
+
+### El detalle que ordenó el diseño del listener
+
+`AsyncIOScheduler.wakeup` está decorado con `@run_in_event_loop`, y `BaseScheduler._dispatch_event` invoca los listeners **sincrónicamente**. O sea que el listener corre **dentro del event loop** — y `enviar_alerta` abre una conexión `smtplib.SMTP` bloqueante, sin timeout explícito. Llamarla derecho congelaría la API entera mientras dure el intercambio, y un servidor SMTP colgado la dejaría sin responder.
+
+Por eso el aviso se delega a un hilo daemon. **No** se usa el executor del loop: es el mismo que corre el pipeline, así que con una corrida larga en curso el aviso de que la corrida es larga quedaría encolado detrás de ella.
+
+Hay una asimetría que conviene tener presente porque es contraintuitiva: la **misma** `enviar_alerta` se llama directo y sin problema desde `_correr_paso` y desde el canario de duración, porque el job corre en el threadpool (`AsyncIOExecutor` manda las funciones sync a `run_in_executor`), no en el loop. Lo que cambia no es la función sino desde qué hilo se la llama.
+
+### El canario, y por qué es una fracción
+
+Cada corrida loguea ahora su **utilización** (`duración / intervalo`), y si pasa el **50% del intervalo** avisa. El umbral es una fracción y no un número de segundos a propósito: si el intervalo cambia —y es justo lo próximo a calibrar— el canario lo sigue solo en vez de quedar desincronizado en silencio.
+
+Es además el instrumento que cierra la conversación de escalabilidad: la concurrencia entre medios se difirió hasta pasar los ~10, y esto avisa cuando llegamos en vez de depender de que alguien se acuerde de mirar.
+
+### `INGEST_INTERVAL_MINUTES` pasa a `config.py`
+
+Era una constante de módulo. Se mueve porque **es el parámetro que hay que calibrar con datos**, y que calibrarlo exija editar código y redeployar convierte una prueba de una tarde en un cambio de versión. Es la excepción deliberada a los otros tres, que quedan como constantes en `main.py` por estructurales.
+
+### El baseline, que era la incógnita
+
+No había logs persistidos, así que no se sabía cuánto tarda una corrida. Medido contra la base real, salteando solo la síntesis (el único paso que gasta en Gemini):
+
+| Corrida | Duración | Utilización del ciclo |
+|---|---:|---:|
+| Con material nuevo | 17,82 s | **2,0%** |
+| Sin material nuevo | 4,16 s | **0,5%** |
+
+Desglose de la corrida sin material: ingesta 3,52 s (6 feeds, todo deduplicado), agrupamiento 0,61 s, fusión 0,02 s, y vectorización, cierre y entrega en 0,00.
+
+**El umbral de 450 s queda entre 25 y 100 veces por encima de una corrida normal**, que es lo que había que confirmar. Falta el número de la síntesis para tener el total.
+
+Esto además adelanta la respuesta a la pregunta del intervalo: al 2% de utilización hay margen enorme, y si la síntesis no cambia el orden de magnitud, **la conclusión va a ser que se puede acortar para tener noticias más frescas, no alargar**.
+
+### Verificado
+
+**314 tests en verde** (306 + 8 nuevos) con condiciones de CI simuladas, cobertura **95,69%**, `ruff` limpio.
+
+Las cinco piezas se verificaron por mutación, que a esta altura es la costumbre de la casa: sacar el `add_listener`, sacar `misfire_grace_time`, subir `max_instances` a 2, mandar el mail en el hilo del listener y sacar el canario. **Las cinco las detectan los tests.**

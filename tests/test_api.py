@@ -1,9 +1,14 @@
 """
 Pruebas de los endpoints de la API FastAPI.
 """
+import asyncio
+from contextlib import ExitStack
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+
+from src.config import settings
 
 
 class TestRoot:
@@ -304,3 +309,188 @@ class TestAPIHealth:
         response = client.get("/")
 
         assert response.headers["content-type"] == "application/json"
+
+
+PASOS_DEL_PIPELINE = [
+    "ingerir_todos_los_medios",
+    "vectorizar_pendientes",
+    "cerrar_clusters_vencidos",
+    "agrupar_pendientes",
+    "fusionar_clusters_duplicados",
+    "sintetizar_pendientes",
+    "entregar_pendientes",
+]
+
+
+class TestAvisoDeCorridaPerdida:
+    """
+    Las tres formas de perder una corrida terminaban en un WARNING de APScheduler
+    sobre un stdout que no se persiste. El listener las vuelve audibles.
+    """
+
+    def _evento_de_ejecucion(self, code, exception=None):
+        from apscheduler.events import JobExecutionEvent
+
+        return JobExecutionEvent(
+            code, "ingesta_rss", "default", datetime(2026, 8, 19, 10, 0, 0),
+            exception=exception,
+        )
+
+    def _disparar(self, evento):
+        """
+        Devuelve el mock de `threading.Thread` y el de `enviar_alerta`.
+
+        Se parchea el hilo en vez de dejarlo correr: el test no depende de
+        sincronización real, y de paso deja a la vista que el aviso **no** se
+        manda en el hilo del listener.
+        """
+        from src import main
+
+        with patch.object(main, "enviar_alerta") as alerta, \
+             patch.object(main.threading, "Thread") as hilo:
+            main._avisar_corrida_perdida(evento)
+        return hilo, alerta
+
+    def test_avisa_cuando_la_corrida_se_solapa(self):
+        from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobSubmissionEvent
+        from src import main
+
+        # `EVENT_JOB_MAX_INSTANCES` llega con otra forma: `scheduled_run_times`
+        # en plural y sin `exception`. Si el listener asumiera una sola forma,
+        # este es el caso que reventaría — y es justo el del overrun.
+        evento = JobSubmissionEvent(
+            EVENT_JOB_MAX_INSTANCES, "ingesta_rss", "default",
+            [datetime(2026, 8, 19, 10, 0, 0)],
+        )
+        hilo, _ = self._disparar(evento)
+
+        assert hilo.call_args.kwargs["kwargs"]["clave"] == "scheduler:solapada"
+        assert "anterior" in hilo.call_args.kwargs["kwargs"]["cuerpo"]
+        assert main.SCHEDULER_MAX_INSTANCES == 1
+
+    def test_avisa_cuando_la_corrida_llega_tarde(self):
+        from apscheduler.events import EVENT_JOB_MISSED
+
+        hilo, _ = self._disparar(self._evento_de_ejecucion(EVENT_JOB_MISSED))
+
+        assert hilo.call_args.kwargs["kwargs"]["clave"] == "scheduler:atrasada"
+
+    def test_avisa_cuando_el_job_levanta_excepcion(self):
+        """
+        `_correr_paso` protege cada paso, pero no la apertura de la sesión que
+        los envuelve: con la base caída el fallo se escapa por acá.
+        """
+        from apscheduler.events import EVENT_JOB_ERROR
+
+        evento = self._evento_de_ejecucion(
+            EVENT_JOB_ERROR, exception=RuntimeError("la base no responde")
+        )
+        hilo, _ = self._disparar(evento)
+
+        cuerpo = hilo.call_args.kwargs["kwargs"]["cuerpo"]
+        assert hilo.call_args.kwargs["kwargs"]["clave"] == "scheduler:error"
+        assert "RuntimeError" in cuerpo
+        assert "la base no responde" in cuerpo
+
+    def test_no_manda_el_mail_en_el_hilo_del_listener(self):
+        """
+        **El invariante que protege el event loop.**
+
+        Este listener corre dentro del loop —`AsyncIOScheduler.wakeup` está
+        decorado con `@run_in_event_loop` y `_dispatch_event` invoca los
+        listeners sincrónicamente— y `enviar_alerta` abre una conexión SMTP
+        bloqueante. Mandarla acá congelaría la API entera mientras dure el
+        intercambio, y un servidor SMTP colgado la dejaría sin responder.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED
+
+        hilo, alerta = self._disparar(self._evento_de_ejecucion(EVENT_JOB_MISSED))
+
+        alerta.assert_not_called()
+        assert hilo.call_args.kwargs["target"] is alerta
+        assert hilo.call_args.kwargs["daemon"] is True
+        hilo.return_value.start.assert_called_once()
+
+
+class TestMargenesDelScheduler:
+    def test_el_job_se_registra_con_los_tres_margenes(self):
+        """
+        Guarda contra que alguien los saque sin querer: los tres corren con
+        defaults de la librería si no se declaran, y el de `misfire_grace_time`
+        es **1 segundo**, que descarta la corrida ante cualquier demora mínima.
+        """
+        from src import main
+
+        async def arrancar():
+            async with main.lifespan(None):
+                pass
+
+        with patch.object(main, "init_db"), patch.object(main, "scheduler") as sched:
+            asyncio.run(arrancar())
+
+        kwargs = sched.add_job.call_args.kwargs
+        assert kwargs["max_instances"] == main.SCHEDULER_MAX_INSTANCES == 1
+        assert kwargs["coalesce"] == main.SCHEDULER_COALESCE is True
+        assert kwargs["misfire_grace_time"] == main.SCHEDULER_MARGEN_ATRASO_SEGUNDOS
+        assert kwargs["misfire_grace_time"] > 1
+
+        # Y que el listener quedó enganchado: sin él los tres eventos son mudos.
+        sched.add_listener.assert_called_once()
+        assert sched.add_listener.call_args.args[0] is main._avisar_corrida_perdida
+
+
+class TestCanarioDeDuracion:
+    """
+    Una corrida que se pasa del intervalo hace que la siguiente se saltee. El
+    canario avisa bastante antes de llegar ahí.
+    """
+
+    def _correr_con_duracion(self, segundos: float):
+        from src import main
+
+        arranque = datetime(2026, 8, 19, 10, 0, 0)
+        with ExitStack() as pila:
+            for nombre in PASOS_DEL_PIPELINE:
+                pila.enter_context(patch.object(main, nombre, return_value={}))
+            pila.enter_context(patch.object(main, "get_engine"))
+            pila.enter_context(patch.object(main, "Session"))
+            pila.enter_context(patch.object(
+                main, "ahora_local",
+                side_effect=[arranque, arranque + timedelta(seconds=segundos)],
+            ))
+            alerta = pila.enter_context(patch.object(main, "enviar_alerta"))
+            main._job_ingesta_programada()
+        return alerta
+
+    def _umbral_en_segundos(self) -> float:
+        from src import main
+        from src.config import settings
+
+        return settings.INGEST_INTERVAL_MINUTES * 60 * main.SCHEDULER_UMBRAL_CORRIDA_LARGA
+
+    def test_avisa_cuando_la_corrida_pasa_el_umbral(self):
+        alerta = self._correr_con_duracion(self._umbral_en_segundos() + 10)
+
+        assert alerta.call_count == 1
+        assert alerta.call_args.kwargs["clave"] == "scheduler:corrida-larga"
+
+    def test_una_corrida_normal_no_avisa(self):
+        alerta = self._correr_con_duracion(self._umbral_en_segundos() - 10)
+
+        alerta.assert_not_called()
+
+    def test_el_umbral_sigue_al_intervalo(self):
+        """
+        El umbral es una fracción y no un número de segundos a propósito: si el
+        intervalo cambia —y es justo lo que hay que calibrar— el canario se
+        ajusta solo en vez de quedar desincronizado en silencio.
+        """
+        from src import main
+
+        with patch.object(settings, "INGEST_INTERVAL_MINUTES", 30):
+            # 500 s pasaría el umbral de un ciclo de 15 min (450 s), pero no el
+            # de uno de 30 (900 s).
+            alerta = self._correr_con_duracion(500)
+
+        assert main.SCHEDULER_UMBRAL_CORRIDA_LARGA == 0.5
+        alerta.assert_not_called()

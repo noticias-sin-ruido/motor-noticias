@@ -16,6 +16,23 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     ENVIRONMENT: str = "development"
 
+    # Cada cuánto corre el pipeline completo (ver specs/change_logs.md, Fase 2 --
+    # "Scheduler", para el razonamiento del intervalo uniforme).
+    #
+    # Es configurable a propósito, a diferencia de los otros parámetros del
+    # scheduler —que viven como constantes en `main.py` porque son
+    # estructurales—: este es el que hay que **calibrar con datos**, y que
+    # hacerlo exija editar código y redeployar convertiría una prueba de una
+    # tarde en un cambio de versión. El canario de duración loguea la
+    # utilización de cada corrida justamente para poder decidirlo.
+    #
+    # La decisión puede ir para cualquier lado: si una corrida normal usa una
+    # fracción chica del ciclo, lo sensato es acortarlo para tener noticias más
+    # frescas; si se acerca al techo, alargarlo. Subirlo da margen contra el
+    # solapamiento de corridas, pero NO contra los atrasos en lanzarlas, que no
+    # dependen de cuánto dure el pipeline.
+    INGEST_INTERVAL_MINUTES: int = 15
+
     # Alertas de fallo de ingesta (ver specs/change_logs.md, Fase 2 --
     # "Manejo de errores por medio").
     SMTP_HOST: Optional[str] = None

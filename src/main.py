@@ -1,7 +1,13 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -24,11 +30,102 @@ from .tiempo import ahora_local
 
 logger = logging.getLogger(__name__)
 
-# Frecuencia del polling de RSS. Ver specs/change_logs.md, Fase 2 -- "Scheduler"
-# para el razonamiento detrás del intervalo uniforme de 15 minutos.
-INGEST_INTERVAL_MINUTES = 15
+# --- Márgenes del scheduler (backlog post-1.0, etapa 4) ---
+# A diferencia del intervalo (`settings.INGEST_INTERVAL_MINUTES`, que se calibra
+# con datos), estos tres son estructurales: no se tocan por entorno.
+
+# Corridas simultáneas del pipeline. **Uno, y no es negociable.** Es el default
+# de APScheduler, pero se declara porque el valor correcto no es obvio y la
+# tentación de subirlo "para que se ponga al día" es real: dos pipelines
+# concurrentes se pisarían en la asignación de clusters y podrían sintetizar dos
+# veces el mismo hecho -- que cuesta plata en Gemini y que, una vez entregado al
+# back-end, no se retracta.
+SCHEDULER_MAX_INSTANCES = 1
+
+# Si se acumularon varias corridas pendientes, se ejecuta una sola. También es
+# el default, y también se declara: lo contrario sería encadenar corridas
+# seguidas después de una demora, justo cuando el sistema viene atrasado.
+SCHEDULER_COALESCE = True
+
+# Segundos de atraso tolerados entre el momento en que la corrida estaba
+# programada y el momento en que se la lanza. El default de APScheduler es **1
+# segundo**, que descarta la corrida ante cualquier demora mínima.
+#
+# 300 s = 5 minutos: una corrida que arranca hasta 5 minutos tarde sigue
+# haciendo trabajo útil con 10 de margen antes de la siguiente. Más allá de eso
+# la próxima está más cerca que lo que vale la atrasada, y como el pipeline es
+# idempotente saltearla no pierde nada. `None` (gracia infinita) sería peor:
+# dejaría entrar una corrida absurdamente tarde justo antes de la siguiente.
+SCHEDULER_MARGEN_ATRASO_SEGUNDOS = 300
+
+# Fracción del intervalo a partir de la cual una corrida se considera larga y se
+# avisa. Es una FRACCIÓN y no un número de segundos a propósito: si el intervalo
+# cambia, el umbral lo sigue solo. Al 50% todavía queda margen para reaccionar
+# antes de que las corridas empiecen a solaparse.
+SCHEDULER_UMBRAL_CORRIDA_LARGA = 0.5
 
 scheduler = AsyncIOScheduler()
+
+
+def _avisar_corrida_perdida(evento) -> None:
+    """
+    Avisa cuando el scheduler pierde una corrida. Las tres formas son silenciosas.
+
+    - `EVENT_JOB_MAX_INSTANCES`: la corrida anterior seguía viva. Es el síntoma
+      de que el pipeline se pasó del intervalo.
+    - `EVENT_JOB_MISSED`: el scheduler llegó tarde a lanzarla, más de
+      `SCHEDULER_MARGEN_ATRASO_SEGUNDOS`.
+    - `EVENT_JOB_ERROR`: el job levantó una excepción. `_correr_paso` protege
+      cada paso, pero no la apertura de la sesión que los envuelve: con la base
+      caída, el fallo se escapa por acá.
+
+    **El aviso se manda en un hilo aparte, y eso no es opcional.** Este listener
+    corre DENTRO del event loop -- `AsyncIOScheduler.wakeup` está decorado con
+    `@run_in_event_loop` y `BaseScheduler._dispatch_event` invoca los listeners
+    sincrónicamente-- y `enviar_alerta` abre una conexión SMTP bloqueante.
+    Llamarla derecho congelaría la API entera mientras dure el intercambio, y un
+    servidor SMTP colgado la dejaría sin responder.
+
+    No se usa el executor del loop porque es el mismo que corre el pipeline: con
+    una corrida larga en curso, el aviso de que la corrida es larga quedaría
+    encolado detrás de ella.
+    """
+    if evento.code == EVENT_JOB_MAX_INSTANCES:
+        motivo = "se salteó porque la anterior todavía estaba corriendo"
+        clave = "scheduler:solapada"
+    elif evento.code == EVENT_JOB_MISSED:
+        motivo = (
+            f"se descartó por llegar más de {SCHEDULER_MARGEN_ATRASO_SEGUNDOS} s tarde"
+        )
+        clave = "scheduler:atrasada"
+    else:
+        error = getattr(evento, "exception", None)
+        motivo = f"terminó con una excepción: {type(error).__name__}: {error}"
+        clave = "scheduler:error"
+
+    # `JobSubmissionEvent` trae `scheduled_run_times` (plural) y
+    # `JobExecutionEvent` trae `scheduled_run_time`. Se contemplan las dos.
+    programada = getattr(evento, "scheduled_run_time", None) or getattr(
+        evento, "scheduled_run_times", None
+    )
+
+    logger.error(f"Corrida perdida del job '{evento.job_id}': {motivo}")
+    hilo = threading.Thread(
+        target=enviar_alerta,
+        kwargs={
+            "asunto": f"[Sin Ruido] Corrida perdida del pipeline ({evento.job_id})",
+            "cuerpo": (
+                f"Una corrida del pipeline {motivo}.\n\n"
+                f"Programada para: {programada}\n\n"
+                "El pipeline es idempotente, así que la corrida siguiente retoma "
+                "sola. Si esto se repite, el diagnóstico está en cuánto tarda "
+                "cada corrida: buscar 'utilización' en los logs."
+            ),
+            "clave": clave,
+        },
+        daemon=True,
+    )
+    hilo.start()
 
 
 def _correr_paso(session: Session, nombre: str, funcion: Callable) -> Optional[dict]:
@@ -100,10 +197,40 @@ def _job_ingesta_programada() -> None:
         _correr_paso(session, "entrega al backend", entregar_pendientes)
 
     fin = ahora_local()
+    duracion = (fin - arranque).total_seconds()
+    intervalo = settings.INGEST_INTERVAL_MINUTES * 60
+    utilizacion = duracion / intervalo
+
+    # La utilización se loguea en cada corrida, no solo cuando molesta: es el
+    # dato con el que se calibra el intervalo, y para eso hacen falta las
+    # corridas normales tanto como las lentas.
     logger.info(
         f"=== Pipeline termina {fin:%d/%m %H:%M:%S} (UTC-3) — "
-        f"{(fin - arranque).total_seconds():.1f} s ==="
+        f"{duracion:.1f} s — utilización {utilizacion:.1%} del ciclo ==="
     )
+
+    # El canario del techo. Una corrida que se pasa del intervalo hace que la
+    # siguiente se saltee (`max_instances=1`), así que conviene enterarse bien
+    # antes de llegar ahí y no cuando ya se están perdiendo ciclos.
+    if utilizacion >= SCHEDULER_UMBRAL_CORRIDA_LARGA:
+        logger.warning(
+            f"La corrida usó el {utilizacion:.1%} del ciclo de "
+            f"{settings.INGEST_INTERVAL_MINUTES} min ({duracion:.1f} s)"
+        )
+        # Acá sí se llama directo, a diferencia del listener: el job corre en el
+        # threadpool del executor, no en el event loop, así que bloquear en SMTP
+        # no congela la API.
+        enviar_alerta(
+            asunto="[Sin Ruido] El pipeline se está acercando al techo del ciclo",
+            cuerpo=(
+                f"La última corrida tardó {duracion:.1f} s, el {utilizacion:.1%} del "
+                f"ciclo de {settings.INGEST_INTERVAL_MINUTES} minutos.\n\n"
+                "Si llega al 100% la corrida siguiente se saltea. Opciones: subir "
+                "INGEST_INTERVAL_MINUTES, o paralelizar la extracción entre medios "
+                "(ver specs/change_logs.md, etapa 3 del backlog punto 1)."
+            ),
+            clave="scheduler:corrida-larga",
+        )
 
 
 @asynccontextmanager
@@ -114,8 +241,17 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _job_ingesta_programada,
         "interval",
-        minutes=INGEST_INTERVAL_MINUTES,
+        minutes=settings.INGEST_INTERVAL_MINUTES,
         id="ingesta_rss",
+        max_instances=SCHEDULER_MAX_INSTANCES,
+        coalesce=SCHEDULER_COALESCE,
+        misfire_grace_time=SCHEDULER_MARGEN_ATRASO_SEGUNDOS,
+    )
+    # Sin esto, las tres formas de perder una corrida terminan en un WARNING de
+    # la librería sobre un stdout que no se persiste. Ver `_avisar_corrida_perdida`.
+    scheduler.add_listener(
+        _avisar_corrida_perdida,
+        EVENT_JOB_MAX_INSTANCES | EVENT_JOB_MISSED | EVENT_JOB_ERROR,
     )
     scheduler.start()
     yield
