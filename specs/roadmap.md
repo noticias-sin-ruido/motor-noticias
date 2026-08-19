@@ -147,7 +147,7 @@ Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los m
 
 Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migración `b4f1a9d27c30`) · **2 ✅** `services/extraccion.py` con piso de caracteres y política de reintentos propia · **3 ✅** la costura, con la extracción **fuera de la transacción** · **4 ✅** márgenes del scheduler y alerta ante corridas perdidas · **5 ⬜** alta de Clarín y Perfil.
 
-- *Medido en la etapa 4*: una corrida del pipeline usa el **0,5% del ciclo** sin material nuevo y el **2,0%** con material (sin contar la síntesis, que falta medir). El margen es enorme, así que **calibrar `INGEST_INTERVAL_MINUTES` probablemente signifique acortarlo** para tener noticias más frescas, no alargarlo. Ahora es una variable de entorno y cada corrida loguea su utilización, así que la decisión se toma con unas horas de logs.
+- *Medido en la etapa 4*: una corrida usa el **1,2% del ciclo** sin síntesis pendiente y el **23%** con un backlog de 24 ángulos. **La síntesis es el 91% del costo**; el resto del pipeline es plano en ~10 s. Como el trabajo de síntesis por día lo fija la cantidad de noticias y no el intervalo, **`INGEST_INTERVAL_MINUTES` hay que decidirlo por frescura, no por capacidad**: ya es variable de entorno y cada corrida loguea su utilización.
 
 - *Medido al planificar la etapa 3*: `trafilatura` es el **1,3%** del costo por artículo (16,9 ms) — no es el punto de inflexión al sumar medios. El 75,7% es la pausa de cortesía propia, y ahí está el techo: **~20 medios** con el diseño secuencial de hoy. Paralelizar entre medios (serie dentro de cada uno) lo vuelve independiente de N; disparador para hacerlo: **pasar los ~10 medios**. Detalle en `change_logs.md`.
 

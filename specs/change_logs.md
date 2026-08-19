@@ -1424,18 +1424,26 @@ Era una constante de módulo. Se mueve porque **es el parámetro que hay que cal
 
 ### El baseline, que era la incógnita
 
-No había logs persistidos, así que no se sabía cuánto tarda una corrida. Medido contra la base real, salteando solo la síntesis (el único paso que gasta en Gemini):
+No había logs persistidos, así que no se sabía cuánto tarda una corrida. Medido contra la base real, con el pipeline completo:
 
-| Corrida | Duración | Utilización del ciclo |
-|---|---:|---:|
-| Con material nuevo | 17,82 s | **2,0%** |
-| Sin material nuevo | 4,16 s | **0,5%** |
+| Corrida | Total | Síntesis | Utilización del ciclo |
+|---|---:|---:|---:|
+| Con backlog (24 ángulos) | 206,58 s | 188,38 s | **23,0%** |
+| Sin síntesis pendiente | 10,55 s | 0,03 s | **1,2%** |
 
-Desglose de la corrida sin material: ingesta 3,52 s (6 feeds, todo deduplicado), agrupamiento 0,61 s, fusión 0,02 s, y vectorización, cierre y entrega en 0,00.
+**La síntesis es el 91% del costo cuando hay material**, y prácticamente cero cuando no. Todo lo demás es plano: ingesta ~4-7 s (6 feeds), vectorización ~6 s, agrupamiento ~0,6 s, fusión y entrega por debajo de 0,1 s. Los 24 ángulos —20 nuevos y 4 actualizados— salieron a ~8 s cada uno.
 
-**El umbral de 450 s queda entre 25 y 100 veces por encima de una corrida normal**, que es lo que había que confirmar. Falta el número de la síntesis para tener el total.
+Vale anotar por qué la entrega reportó 24 y solo se crearon 20: `sintetizar_pendientes` **reentrega** una síntesis existente cuando su cluster recibió material nuevo, poniendo `enviado_backend = False` porque el payload cambió. No es un doble envío del mismo contenido.
 
-Esto además adelanta la respuesta a la pregunta del intervalo: al 2% de utilización hay margen enorme, y si la síntesis no cambia el orden de magnitud, **la conclusión va a ser que se puede acortar para tener noticias más frescas, no alargar**.
+**El umbral de 450 s queda 43 veces por encima de una corrida normal y 2 veces por encima de una con backlog de 24 ángulos.** Dispara alrededor de los **55 ángulos en una sola corrida**, que es el tamaño de backlog que deja una caída de varias horas — exactamente el evento del que uno quiere enterarse. Calibrado.
+
+### Sobre el intervalo, con los números a la vista
+
+La predicción que se había hecho antes de medir la síntesis —"si no cambia el orden de magnitud, la conclusión será acortar el intervalo"— **era incorrecta en su premisa**: la síntesis sí cambia el orden de magnitud, del 1,2% al 23%.
+
+Pero la conclusión sobrevive, por un motivo distinto: **el trabajo de síntesis por día lo fija la cantidad de noticias, no el intervalo.** Acortar el ciclo no genera más ángulos, los reparte en más corridas; alargarlo los concentra en menos. Con ~100 ángulos diarios la utilización queda cerca del 2% en cualquiera de los tres escenarios (10, 15 o 20 minutos), así que **el intervalo hay que decidirlo por frescura y no por capacidad**.
+
+Y alargarlo tampoco ayuda contra el caso que sí aprieta —el backlog tras una caída—, porque el backlog tiene el mismo tamaño en cualquier intervalo.
 
 ### Verificado
 
