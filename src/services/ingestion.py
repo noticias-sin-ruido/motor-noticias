@@ -17,6 +17,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from ..tiempo import ahora_utc
 from ..models import Medio, Noticia
 from . import alerts
+from .extraccion import extraer_varios
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +69,34 @@ def _descargar_feed(feed_url: str) -> str:
     return response.text
 
 
-def _parsear_entry(entry: feedparser.FeedParserDict) -> Optional[dict]:
-    """Extrae los campos necesarios de un item de feedparser. None si falta algo esencial."""
+def _parsear_entry(
+    entry: feedparser.FeedParserDict, permitir_sin_cuerpo: bool = False
+) -> Optional[dict]:
+    """
+    Extrae los campos necesarios de un item de feedparser. None si falta algo esencial.
+
+    Con `permitir_sin_cuerpo` —los medios con `extraer_por_url`— un item sin
+    `content:encoded` ya no se descarta acá: vuelve con `contenido_limpio`
+    vacío para que `_completar_cuerpos` lo busque en la página del artículo.
+
+    Ese vacío es un **sentinela de vida corta**: se llena o se descarta antes de
+    llegar al modelo, donde `contenido_limpio` es `NOT NULL`.
+    """
     titulo = entry.get("title")
     link = entry.get("link")
     guid = entry.get("id") or link
     content_list = entry.get("content")
 
-    if not (titulo and link and guid and content_list):
+    # Sin título, link o guid no hay nada que hacer ni siquiera con extracción
+    # de por medio: son los que permiten deduplicar y saber adónde ir a buscar.
+    if not (titulo and link and guid):
         return None
 
-    contenido_limpio = limpiar_html(content_list[0].get("value", ""))
-    if not contenido_limpio:
+    contenido_limpio = ""
+    if content_list:
+        contenido_limpio = limpiar_html(content_list[0].get("value", ""))
+
+    if not contenido_limpio and not permitir_sin_cuerpo:
         return None
 
     fecha_publicacion = ahora_utc()
@@ -176,10 +193,22 @@ def ingerir_feed(session: Session, medio: Medio, feed_url: str, stats: dict) -> 
         _registrar_fallo(stats, feed_url, error)
 
 
-def _procesar_items(
-    session: Session, medio: Medio, feed_url: str, feed_xml: str, stats: dict
-) -> None:
-    """Parsea el XML y agrega a la sesión las noticias nuevas. No commitea."""
+def _seleccionar_nuevas(
+    session: Session,
+    medio_nombre: str,
+    usa_extraccion: bool,
+    feed_url: str,
+    feed_xml: str,
+    stats: dict,
+) -> list:
+    """
+    Items del feed que todavía no están en la base, filtrados y deduplicados.
+
+    Corre **antes** de cualquier extracción, y eso no es un detalle de orden:
+    extraer antes de deduplicar significaría bajar las decenas de artículos del
+    feed entero cada 15 minutos para siempre, en vez de los pocos realmente
+    nuevos de cada ciclo.
+    """
     feed = feedparser.parse(feed_xml)
     if feed.bozo:
         logger.warning(f"Aviso al parsear {feed_url}: {feed.bozo_exception}")
@@ -187,7 +216,7 @@ def _procesar_items(
     candidatos = []
     sin_contenido_aca = 0
     for entry in feed.entries:
-        datos = _parsear_entry(entry)
+        datos = _parsear_entry(entry, permitir_sin_cuerpo=usa_extraccion)
         if datos is None:
             # Item sin content:encoded (u otro campo esencial) -- se descarta.
             # Puede pasar con contenido no periodístico servido en el mismo feed
@@ -202,14 +231,19 @@ def _procesar_items(
 
         candidatos.append(datos)
 
-    if feed.entries and sin_contenido_aca == len(feed.entries):
+    # Solo tiene sentido avisar para un medio que declara traer el artículo en
+    # el feed. Para uno con `extraer_por_url` este es el estado normal y
+    # permanente —Clarín y Perfil no traen `content:encoded` en ningún item— y
+    # el aviso sería ruido cada 15 minutos, para siempre. Su equivalente allá
+    # es que fallen todas las extracciones, y lo cubre `_completar_cuerpos`.
+    if not usa_extraccion and feed.entries and sin_contenido_aca == len(feed.entries):
         logger.warning(
-            f"{medio.nombre}: ningún item de {feed_url} tenía contenido completo "
+            f"{medio_nombre}: ningún item de {feed_url} tenía contenido completo "
             f"({len(feed.entries)} items en la ventana del feed)."
         )
 
     if not candidatos:
-        return
+        return []
 
     guids_existentes, urls_existentes = _existentes(
         session,
@@ -223,6 +257,7 @@ def _procesar_items(
     # mismo loop.
     vistos_guid: Set[str] = set()
     vistos_url: Set[str] = set()
+    nuevas = []
 
     for datos in candidatos:
         ya_existia = (
@@ -235,9 +270,111 @@ def _procesar_items(
             stats["duplicadas"] += 1
             continue
 
-        session.add(Noticia(medio_id=medio.id, **datos))
+        nuevas.append(datos)
         vistos_guid.add(datos["guid"])
         vistos_url.add(datos["url"])
+
+    return nuevas
+
+
+def _completar_cuerpos(nuevas: list, medio_nombre: str, stats: dict) -> list:
+    """
+    Busca en la página del artículo el cuerpo de las notas que el feed no trajo.
+
+    Se llama **fuera de la transacción** y solo con notas que ya se sabe que son
+    nuevas. Una nota que no se pueda extraer **se descarta**: `contenido_limpio`
+    es `NOT NULL` y no hay nada que persistir. El feed la vuelve a ofrecer en el
+    ciclo siguiente mientras siga en su ventana, así que se reintenta sola.
+    """
+    faltantes = [d["url"] for d in nuevas if not d["contenido_limpio"]]
+    if not faltantes:
+        return nuevas
+
+    cuerpos = extraer_varios(faltantes)
+
+    completas = []
+    extraidas_aca = 0
+    fallidas_aca = 0
+    for datos in nuevas:
+        if datos["contenido_limpio"]:
+            # El feed ya lo traía: `extraer_por_url` es "si falta, buscalo en la
+            # URL", no "buscalo siempre". Ahorra un request y una pausa.
+            completas.append(datos)
+            continue
+
+        cuerpo = cuerpos.get(datos["url"])
+        if not cuerpo:
+            stats["extraccion_fallida"] += 1
+            fallidas_aca += 1
+            continue
+
+        datos["contenido_limpio"] = cuerpo
+        stats["extraidas"] += 1
+        extraidas_aca += 1
+        completas.append(datos)
+
+    # Que falle una nota suelta es normal —un timeout, un artículo que se cayó—.
+    # Que fallen TODAS es la firma de un rediseño del maquetado del medio, y sin
+    # aviso eso es perder la cobertura de un medio entero en silencio hasta que
+    # alguien mire los números. Mismo criterio que el `robots.txt` ilegible.
+    if fallidas_aca and not extraidas_aca:
+        logger.error(
+            f"{medio_nombre}: fallaron las {fallidas_aca} extracciones del feed"
+        )
+        alerts.enviar_alerta(
+            asunto=f"[Sin Ruido] No se extrajo ningún artículo de {medio_nombre}",
+            cuerpo=(
+                f"Fallaron las {fallidas_aca} extracciones de {medio_nombre} en "
+                "este feed. Si se repite, lo más probable es que el medio haya "
+                "rediseñado su maquetado y `trafilatura` ya no encuentre el "
+                "artículo.\n\nMientras tanto sus noticias no entran al pipeline."
+            ),
+            # Por medio: sus feeds fallan juntos y el problema es uno solo.
+            clave=f"extraccion:{medio_nombre}",
+        )
+
+    return completas
+
+
+def _procesar_items(
+    session: Session, medio: Medio, feed_url: str, feed_xml: str, stats: dict
+) -> None:
+    """
+    Resuelve qué es nuevo, completa los cuerpos que falten y agrega a la sesión.
+
+    No commitea el resultado —eso es de `ingerir_feed`— pero para los medios con
+    extracción **sí cierra la transacción de lectura en el medio**, a propósito.
+    """
+    # Se leen los atributos del medio ANTES del commit intermedio: después
+    # quedan expirados y cada acceso dispararía un SELECT de refresco.
+    medio_id, medio_nombre = medio.id, medio.nombre
+    usa_extraccion = medio.extraer_por_url
+
+    a_insertar = _seleccionar_nuevas(
+        session, medio_nombre, usa_extraccion, feed_url, feed_xml, stats
+    )
+    if not a_insertar:
+        return
+
+    if usa_extraccion:
+        # El SELECT de `_existentes` abrió una transacción. Extraer con ella
+        # abierta la dejaría viva durante toda la descarga de los artículos
+        # —~40 s en la primera corrida de un medio—, reteniendo una conexión
+        # del pool y frenando el vacuum de Postgres sobre ese snapshot. El
+        # commit acá es de solo lectura: no hay nada que perder si algo falla
+        # después.
+        session.commit()
+        a_insertar = _completar_cuerpos(a_insertar, medio_nombre, stats)
+
+    for datos in a_insertar:
+        # Guarda del invariante, no decoración: `contenido_limpio` es NOT NULL,
+        # y un vacío que se escape hasta acá revienta en el INSERT -- y con él,
+        # por el rollback de `ingerir_feed`, todo lo que el feed ya había traído.
+        if not datos["contenido_limpio"]:
+            logger.error(f"Se descarta {datos['url']}: quedó sin cuerpo")
+            continue
+
+        session.add(Noticia(medio_id=medio_id, **datos))
         stats["nuevas"] += 1
 
 
@@ -256,6 +393,11 @@ def ingerir_medio(session: Session, medio: Medio) -> dict:
         "duplicadas": 0,
         "en_vivo": 0,
         "sin_contenido": 0,
+        # Solo se mueven en los medios con `extraer_por_url`. Ahí `sin_contenido`
+        # deja de contar los items sin `content:encoded` —son candidatos, no
+        # descartes— y su señal pasa a vivir en estas dos.
+        "extraidas": 0,
+        "extraccion_fallida": 0,
         # Lista y no un solo string: con varios feeds, guardar únicamente el
         # último error hacía que la caída de uno se leyera igual que la del
         # medio entero en la respuesta de `/ingest`.

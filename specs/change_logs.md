@@ -1314,3 +1314,64 @@ Queda registrado como **riesgo residual medido, no como defecto**: la bajada con
 ### Verificado
 
 **295 tests en verde** (268 + 27 nuevos) con las condiciones del CI simuladas, cobertura **95,37%**, `ruff` limpio. Las 3 líneas sin cubrir de `extraccion.py` son `_descargar_pagina`, la frontera con la red, mockeada en toda la suite a propósito.
+
+---
+
+## Backlog punto 1, etapa 3 — la costura, y por qué la extracción va fuera de la transacción (19/08/2026)
+
+El extractor ya existía pero **no tenía llamadores**: `Medio.extraer_por_url` no se leía en ningún lado de `src/`. Esta etapa lo conecta a la ingesta.
+
+El plan original decía "invertir el orden de filtrado dentro de `_procesar_items`". **Se cambió**, y el motivo fue una pregunta de escalabilidad que llevó a medir en vez de suponer.
+
+### La medición que cambió el diseño
+
+La pregunta era si `trafilatura` sería el punto de inflexión al sumar medios — porque los dos que entran ahora son Clarín y Perfil, pero hay varios más sin `content:encoded` que podrían seguirlos.
+
+Se midió el reparto del costo por artículo, bajando el HTML una sola vez y cronometrando la librería sobre HTML ya en RAM (si no, se estaría midiendo la conexión a Clarín y llamándola "costo de trafilatura"):
+
+| Componente | Tiempo | Share |
+|---|---:|---:|
+| `trafilatura` (CPU) | 16,9 ms mediana (máx. 67 ms) | **1,3%** |
+| Red | 304 ms mediana | 23,0% |
+| **Pausa de cortesía propia** | 1000 ms fijos | **75,7%** |
+
+**`trafilatura` no es el cuello de botella a ninguna escala realista**: 1200 artículos son ~20 s de CPU contra un ciclo de 15 minutos, y el pico de memoria de una extracción es 5,4 MB. El 98,7% del costo es esperar.
+
+Lo que la medición sí expuso es **dónde queda la extracción respecto de la transacción**. El `SELECT` de `_existentes` abre una transacción y `ingerir_feed` recién commitea al final. Meter la extracción en el medio —que es lo que decía el plan viejo— la dejaría abierta durante toda la descarga de los artículos: ~40 s en la primera corrida de un medio, reteniendo una conexión del pool de 5 y frenando el vacuum de Postgres sobre ese snapshot. A 2 medios se tolera; a 15 es un problema real.
+
+**De ahí la forma final: decidir qué es nuevo (transacción corta) → extraer (sin transacción) → persistir (transacción corta).** `_procesar_items` se partió en `_seleccionar_nuevas` y `_completar_cuerpos`, con un `commit` de solo lectura en el medio.
+
+### Las decisiones de la costura
+
+- **`extraer_por_url` significa "si el feed no trae cuerpo, buscalo en la URL"**, no "extraé siempre". Un item con `content:encoded` usa ese: es gratis y no sale a la red. Importa para el feed de respaldo de Clarín, que sí lo trae.
+- **La extracción va después de deduplicar, nunca antes.** Extraer antes significaría bajar las decenas de artículos del feed entero cada 15 minutos para siempre, en vez de los pocos realmente nuevos. Tiene test propio.
+- **Los medios sin la bandera no cambian en nada.** El `commit` intermedio y la extracción están detrás de `if usa_extraccion`: mismo camino, mismas queries, mismas transacciones que antes. Es lo que acota el riesgo del diff.
+- **Una nota que no se pudo extraer se descarta**, porque `contenido_limpio` es `NOT NULL`. El feed la vuelve a ofrecer el ciclo siguiente mientras siga en su ventana, así que se reintenta sola. Para un artículo permanentemente inextraíble eso es un request cada 15 minutos mientras dure la ventana: acotado y chico, y no justifica una tabla de lápidas.
+- **El warning de "ningún item tenía contenido completo" se condiciona a `not usa_extraccion`**: para Clarín y Perfil ese es el estado normal y permanente, y dejarlo sería ruido cada 15 minutos para siempre — el patrón que el proyecto ya corrigió dos veces. Su equivalente allá es que **fallen todas** las extracciones de un feed, que ahora avisa por mail: es la firma de un rediseño del maquetado, y sin aviso es perder un medio entero en silencio.
+
+`sin_contenido` deja de contar los items sin cuerpo en los medios con extracción —ahí son candidatos, no descartes, y contarlos haría que el número sea siempre igual al tamaño del feed— y su señal pasa a `extraidas` y `extraccion_fallida`.
+
+### El test que se verificó por mutación
+
+El invariante de la transacción tiene un test que lo afirma directamente: el mock de `extraer_varios` registra `session.in_transaction()` al ser llamado. Como es **el test que justifica todo el rediseño**, se comprobó que puede fallar: quitando el `commit` intermedio, da `[True] == [False]`. Un test que no puede fallar no prueba nada.
+
+### Verificado
+
+**304 tests en verde** (295 + 9 nuevos) con condiciones de CI simuladas, cobertura **95,23%**, `ruff` limpio, `alembic check` sin drift.
+
+Y punta a punta contra **Clarín real y Postgres real**, con un medio temporal `activo=False` que se borra al terminar:
+
+| | Resultado |
+|---|---|
+| Artículos extraídos y persistidos | **10/10**, entre 2.745 y 7.432 caracteres |
+| Con saltos de línea o bajo el piso | **0** |
+| Segunda corrida | **0 extracciones**, 10 duplicadas |
+| `in_transaction()` al extraer | **False** |
+
+La segunda corrida es la que importa: confirma contra un feed real que la deduplicación corre antes que la extracción, que es lo que evita bajar el feed entero cada ciclo.
+
+### Lo que queda pendiente a propósito
+
+Correr el **pipeline completo** con noticias extraídas —vectorización, agrupamiento y síntesis— se difiere a la etapa 5, cuando los medios estén dados de alta de verdad. Hacerlo ahora exigiría o bien agrupar noticias temporales contra los clusters reales (mutando estado compartido que después hay que deshacer), o bien gastar presupuesto de Gemini en una síntesis de prueba. La promesa de que río abajo nada distingue las dos vías ya está respaldada por la etapa 0 (14 pares reales por día con este mismo texto) y por `test_coincide_con_limpiar_html`.
+
+**Concurrencia entre medios**: la pausa de 1 s se aplica hoy entre *todos* los artículos, aunque sean de dominios distintos — pero la cortesía se le debe a un medio, no al proceso. Paralelizando entre medios el costo deja de ser la suma y pasa a ser el máximo por medio (~40 s), sea N=2 o N=40. **Disparador: pasar los ~10 medios**, donde la primera corrida ya llega al 44% del ciclo. No hace falta para dos.

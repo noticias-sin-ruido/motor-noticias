@@ -2,6 +2,7 @@
 Tests del servicio de ingesta: parseo de feed, limpieza de HTML, filtro de
 notas en vivo, deduplicación por guid y manejo de fallos de red.
 """
+import logging
 from datetime import datetime
 from unittest.mock import patch
 
@@ -210,13 +211,22 @@ class TestIngerirMedio:
         assert noticias[0].contenido_limpio == "Cuerpo completo de la noticia."
 
     def test_descarta_items_sin_content_encoded(self, session: Session, medio: Medio):
-        """Items sin content:encoded (ej. horóscopos) se cuentan y descartan, no rompen la corrida."""
-        with patch.object(ingestion, "_descargar_feed", return_value=FEED_XML_SIN_CONTENIDO):
+        """
+        Sin `content:encoded` **y sin `extraer_por_url`**, el item se cuenta y se
+        descarta sin romper la corrida (ej. horóscopos).
+
+        La regla de Fase 2 —"el feed debe traer el artículo completo"— sigue
+        siendo la predeterminada; la extracción por URL es la excepción que hay
+        que declarar medio por medio, y este test es el que la mantiene honesta.
+        """
+        with patch.object(ingestion, "_descargar_feed", return_value=FEED_XML_SIN_CONTENIDO), \
+             patch.object(ingestion, "extraer_varios") as extraer:
             stats = ingestion.ingerir_medio(session, medio)
 
         assert stats["sin_contenido"] == 1
         assert stats["nuevas"] == 0
         assert stats["errores"] == []
+        extraer.assert_not_called()
 
     def test_no_duplica_noticias_ya_ingeridas(self, session: Session, medio: Medio):
         with patch.object(ingestion, "_descargar_feed", return_value=FEED_XML):
@@ -314,7 +324,8 @@ class TestDeduplicacionNoEscala:
                 stats_pocos = ingestion.ingerir_medio(session, medio)
         assert stats_pocos == {"medio": medio.nombre, "feeds": 1, "feeds_fallados": 0,
                                 "nuevas": 0, "duplicadas": 3, "en_vivo": 0,
-                                "sin_contenido": 0, "errores": []}
+                                "sin_contenido": 0, "extraidas": 0,
+                                "extraccion_fallida": 0, "errores": []}
 
         self._precargar(session, medio, 40, "muchos")
         with patch.object(
@@ -352,3 +363,259 @@ class TestDeduplicacionNoEscala:
 
         assert stats["nuevas"] == 1
         assert stats["duplicadas"] == 1
+
+
+# Largo cómodo, del orden de un artículo real (el más corto de la medición tuvo
+# 701 caracteres). Lo que importa acá no es el piso —eso lo valida el extractor,
+# y en estos tests está mockeado— sino que el cuerpo llegue entero a la base.
+CUERPO_EXTRAIDO = "Cuerpo que vino de la página del artículo y no del feed. " * 12
+
+
+def _feed_sin_cuerpo(cantidad: int, prefijo: str = "url") -> str:
+    """Feed al estilo Clarín/Perfil: items completos pero sin `content:encoded`."""
+    items = "".join(
+        f"""<item>
+  <title>Noticia {prefijo}-{i}</title>
+  <link>https://test.com/{prefijo}-{i}</link>
+  <guid>guid-{prefijo}-{i}</guid>
+  <pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>
+  <description>Solo el copete de unos 200 caracteres.</description>
+</item>"""
+        for i in range(cantidad)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n'
+        f"<channel><title>Medio</title>{items}</channel>\n</rss>"
+    )
+
+
+@pytest.fixture
+def medio_extractor(session: Session) -> Medio:
+    """Un medio cuyo RSS no trae el artículo, como Clarín y Perfil."""
+    m = Medio(
+        nombre="Medio Sin Cuerpo",
+        url_base="https://test.com",
+        feeds_rss=["https://test.com/rss"],
+        extraer_por_url=True,
+    )
+    session.add(m)
+    session.commit()
+    session.refresh(m)
+    return m
+
+
+class TestExtraccionPorUrl:
+    """
+    La costura entre la ingesta y `services/extraccion.py`.
+
+    El extractor está mockeado en todos: su comportamiento propio ya lo cubre
+    `test_extraccion.py`, y lo que se prueba acá es **cuándo** se lo llama, con
+    qué, y qué se hace con lo que devuelve.
+    """
+
+    def test_extrae_y_persiste_lo_que_el_feed_no_trajo(
+        self, session: Session, medio_extractor: Medio
+    ):
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(2)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={
+                "https://test.com/url-0": CUERPO_EXTRAIDO,
+                "https://test.com/url-1": CUERPO_EXTRAIDO,
+            },
+        ):
+            stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        assert stats["nuevas"] == 2
+        assert stats["extraidas"] == 2
+        assert stats["extraccion_fallida"] == 0
+        # Los items ya no se cuentan como descartes: son candidatos.
+        assert stats["sin_contenido"] == 0
+
+        noticias = session.exec(
+            select(Noticia).where(Noticia.medio_id == medio_extractor.id)
+        ).all()
+        assert len(noticias) == 2
+        assert all(n.contenido_limpio == CUERPO_EXTRAIDO for n in noticias)
+
+    def test_si_el_feed_trae_el_cuerpo_no_se_extrae(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        `extraer_por_url` es "si falta, buscalo en la URL", no "buscalo
+        siempre". Importa para el feed de respaldo de Clarín, que sí trae
+        `content:encoded`: ahorra un request y una pausa por artículo.
+        """
+        with patch.object(ingestion, "_descargar_feed", return_value=FEED_XML), \
+             patch.object(ingestion, "extraer_varios") as extraer:
+            stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        extraer.assert_not_called()
+        assert stats["nuevas"] == 1
+        assert stats["extraidas"] == 0
+
+        noticia = session.exec(
+            select(Noticia).where(Noticia.medio_id == medio_extractor.id)
+        ).one()
+        assert noticia.contenido_limpio == "Cuerpo completo de la noticia."
+
+    def test_una_extraccion_fallida_no_arrastra_a_las_demas(
+        self, session: Session, medio_extractor: Medio
+    ):
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={
+                "https://test.com/url-0": CUERPO_EXTRAIDO,
+                "https://test.com/url-1": None,
+                "https://test.com/url-2": CUERPO_EXTRAIDO,
+            },
+        ):
+            stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        assert stats["nuevas"] == 2
+        assert stats["extraidas"] == 2
+        assert stats["extraccion_fallida"] == 1
+        assert stats["errores"] == []
+
+        urls = {
+            n.url
+            for n in session.exec(
+                select(Noticia).where(Noticia.medio_id == medio_extractor.id)
+            ).all()
+        }
+        assert urls == {"https://test.com/url-0", "https://test.com/url-2"}
+
+    def test_solo_se_extraen_las_noticias_nuevas(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        El test del riesgo que hace viable toda la vía: la extracción va
+        **después** de deduplicar. Si fuera antes, cada ciclo bajaría el feed
+        entero —decenas de artículos, cada 15 minutos, para siempre— en vez de
+        los pocos realmente nuevos.
+        """
+        for i in (0, 1):
+            session.add(Noticia(
+                medio_id=medio_extractor.id,
+                titulo=f"Noticia url-{i}",
+                url=f"https://test.com/url-{i}",
+                guid=f"guid-url-{i}",
+                contenido_limpio="Ya estaba en la base.",
+                fecha_publicacion=datetime.utcnow(),
+            ))
+        session.commit()
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={"https://test.com/url-2": CUERPO_EXTRAIDO},
+        ) as extraer:
+            stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        extraer.assert_called_once_with(["https://test.com/url-2"])
+        assert stats["duplicadas"] == 2
+        assert stats["nuevas"] == 1
+
+    def test_no_hay_transaccion_abierta_durante_la_extraccion(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        El invariante que motivó partir `_procesar_items` en tres fases.
+
+        El `SELECT` de deduplicación abre una transacción. Extraer con ella
+        abierta la dejaría viva durante toda la descarga de los artículos
+        —decenas de segundos en la primera corrida de un medio—, reteniendo una
+        conexión del pool y frenando el vacuum de Postgres sobre ese snapshot.
+        """
+        transaccion_abierta = []
+
+        def espiar(urls):
+            transaccion_abierta.append(session.in_transaction())
+            return {url: CUERPO_EXTRAIDO for url in urls}
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(2)
+        ), patch.object(ingestion, "extraer_varios", side_effect=espiar):
+            ingestion.ingerir_medio(session, medio_extractor)
+
+        assert transaccion_abierta == [False]
+
+    def test_si_fallan_todas_las_extracciones_avisa(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        Que fallen todas es la firma de un rediseño del maquetado del medio. Sin
+        aviso, eso es perder un medio entero en silencio.
+        """
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={f"https://test.com/url-{i}": None for i in range(3)},
+        ), patch.object(ingestion.alerts, "enviar_alerta") as alerta:
+            stats = ingestion.ingerir_medio(session, medio_extractor)
+
+        assert stats["nuevas"] == 0
+        assert stats["extraccion_fallida"] == 3
+        assert alerta.call_count == 1
+        assert alerta.call_args.kwargs["clave"] == "extraccion:Medio Sin Cuerpo"
+
+    def test_una_sola_fallida_no_avisa(self, session: Session, medio_extractor: Medio):
+        """Un artículo que se cayó es normal; no es motivo de mail."""
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(2)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={
+                "https://test.com/url-0": CUERPO_EXTRAIDO,
+                "https://test.com/url-1": None,
+            },
+        ), patch.object(ingestion.alerts, "enviar_alerta") as alerta:
+            ingestion.ingerir_medio(session, medio_extractor)
+
+        alerta.assert_not_called()
+
+    def test_no_avisa_que_el_feed_no_trae_contenido(
+        self, session: Session, medio_extractor: Medio, caplog
+    ):
+        """
+        El warning de "ningún item tenía contenido completo" es correcto para un
+        medio que declara traer el artículo en el feed. Para uno con extracción
+        es el estado normal y permanente: dejarlo sería ruido cada 15 minutos,
+        para siempre — el patrón que el proyecto ya corrigió dos veces.
+        """
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(2)
+        ), patch.object(
+            ingestion,
+            "extraer_varios",
+            return_value={f"https://test.com/url-{i}": CUERPO_EXTRAIDO for i in range(2)},
+        ), caplog.at_level(logging.WARNING, logger="src.services.ingestion"):
+            ingestion.ingerir_medio(session, medio_extractor)
+
+        assert "contenido completo" not in caplog.text
+
+    def test_un_medio_sin_la_bandera_nunca_extrae(self, session: Session, medio: Medio):
+        """
+        Guarda de regresión: la vía nueva no puede filtrarse a los medios que no
+        la declararon. Para ellos el camino tiene que ser exactamente el de
+        antes.
+        """
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(3)
+        ), patch.object(ingestion, "extraer_varios") as extraer:
+            stats = ingestion.ingerir_medio(session, medio)
+
+        extraer.assert_not_called()
+        assert stats["sin_contenido"] == 3
+        assert stats["nuevas"] == 0
