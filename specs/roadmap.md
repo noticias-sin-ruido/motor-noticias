@@ -4,7 +4,7 @@ Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qu�
 
 **Estado: versión 1.0.** Las 5 fases completas y **la entrega al back-end probada punta a punta**: primera corrida real contra el receptor (192 publicaciones entregadas de una, y después el pipeline completo ingesta → entrega sin fallos). Sobre el cierre de Fase 5 se sumaron el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) ya ajustado a los 280 de un tweet, y tres auditorías de llamadas del pipeline (RSS/DB/Gemini) que dejaron 8 fixes de N+1. **268/268 tests, 96% de cobertura, `alembic check` limpio.**
 
-**Siguiente:** el punto 1 del backlog priorizado de abajo (segunda vía de ingesta), que es el que de verdad mueve la aguja para sumar medios. Su precondición —avisarle al equipo de back-end de los cambios de forma del contrato y operar contra el receptor real— ya está cumplida: `webhook_contract.md` está actualizado y la comunicación verificada.
+**Siguiente:** el punto 2 del backlog priorizado de abajo (desacoplar el motor de IA). El punto 1 (segunda vía de ingesta) ya cerró: Perfil está de alta y en producción.
 
 **Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `GEMINI_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
@@ -136,16 +136,18 @@ Con Fase 5 cerrada, esta es la lista accionable de próximos pasos, priorizada. 
 
 Regla que ordena toda la lista, la misma de siempre (`mission.md`): **medir antes de resolver**. Ningún punto de acá se ataca preventivamente — se retoma cuando el síntoma aparece con datos reales, no antes.
 
-### 1. Segunda vía de ingesta: extracción por URL (Clarín, Perfil) — el lever directo para sumar medios
+### 1. Segunda vía de ingesta: extracción por URL (Perfil) — el lever directo para sumar medios
 
-Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded` — hoy el motivo concreto por el que Clarín quedó afuera del roster. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
+Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded`. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
 
-**🚧 EN CURSO** (arrancó el 18/08/2026, branch `mejoras-post-1.0`). Las dos precondiciones quedaron cumplidas:
+**✅ COMPLETO** (18-20/08/2026, branch `mejoras-post-1.0`). Las dos precondiciones quedaron cumplidas:
 
 - *"Se retoma con el back-end integrado y probado"* — la corrida del 18/08 entregó 15/15 síntesis, 221/221 acumulado, cero rechazos.
 - *"No entra en la app hasta validar que suma pares reales"* — medido: **14 pares reales por día** (contra un piso de 3 para justificar el trabajo), 30-35% de sus artículos parean con nuestro corpus, y **0 fallos de extracción sobre 120 artículos**. Detalle completo, incluida la auditoría manual de los pares, en `change_logs.md`, "Etapa 0: la medición que levanta el candado".
 
-Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migración `b4f1a9d27c30`) · **2 ✅** `services/extraccion.py` con piso de caracteres y política de reintentos propia · **3 ✅** la costura, con la extracción **fuera de la transacción** · **4 ✅** márgenes del scheduler y alerta ante corridas perdidas · **5 ⬜** alta de Clarín y Perfil.
+Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migración `b4f1a9d27c30`) · **2 ✅** `services/extraccion.py` con piso de caracteres y política de reintentos propia · **3 ✅** la costura, con la extracción **fuera de la transacción** · **4 ✅** márgenes del scheduler y alerta ante corridas perdidas · **5 ✅** alta de Perfil.
+
+**Clarín quedó afuera, no solo pospuesto.** La revisión de términos de uso del 19-20/08 (ver punto 3 y `change_logs.md`) mostró que retiene el cuerpo del feed a propósito —su licencia cubre solo "títulos y/o links"—, así que extraerlo por URL cruzaría una línea que el medio trazó. Perfil sí licencia "el contenido" y entró: seed con un feed general y `extraer_por_url=True`, verificado en producción (47 nuevas, 0 fallos de extracción, `robots.txt` pedido una vez).
 
 - *Medido en la etapa 4*: una corrida usa el **1,2% del ciclo** sin síntesis pendiente y el **23%** con un backlog de 24 ángulos. **La síntesis es el 91% del costo**; el resto del pipeline es plano en ~10 s. Como el trabajo de síntesis por día lo fija la cantidad de noticias y no el intervalo, **`INGEST_INTERVAL_MINUTES` hay que decidirlo por frescura, no por capacidad**: ya es variable de entorno y cada corrida loguea su utilización.
 
@@ -153,20 +155,79 @@ Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migr
 
 **Hallazgo que abre un ítem nuevo**: la medición destapó dos clusters mal armados de El Cronista ("el blob de economía" de Fase 3) que hoy no se publican solo porque les falta un segundo medio. No los causa esta vía, pero esta vía los volvería publicables. Ver el hallazgo del centroide en `change_logs.md`.
 
-### 2. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
+### 2. Desacoplar el motor de IA — que cada operador elija su modelo
+
+Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el motor elija su proveedor **conociendo sus pros y contras**, incluido correr un modelo local — con lo que los cuerpos de los artículos no salen de la máquina.
+
+**El acoplamiento es chico y está medido**: de las 884 líneas de `synthesis.py`, lo específico de Gemini son `get_cliente()` y `llamar_modelo()`, unas 50 líneas. El contrato ya es prácticamente una interfaz de proveedor: `(prompt: str) -> RespuestaSintesis`. Todo lo demás —prompt, esquema, validaciones anti-alucinación, lógica de clusters— es agnóstico.
+
+Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
+
+### 3. El alta de medios la hace el operador, no el repo
+
+Hoy `scripts/seed_medios.py` trae seis medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos seis en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.
+
+La revisión de términos del 19-20/08 lo dejó a la vista: varían muchísimo entre medios —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario bloquea crawlers de IA— y cuál es aceptable depende del uso que le dé cada operador. Ver `change_logs.md`.
+
+**Qué se construye**: endpoints de alta, baja y listado de medios con su lógica de persistencia. El roster deja de venir en el repo.
+
+**La decisión de diseño que importa**: el endpoint **no puede ser un CRUD que registra lo que le mandan**. Todo lo aprendido en la etapa 5 dice que tiene que sondear e informar antes de aceptar:
+
+- ¿El feed responde? (`/feed/internacionales` de Perfil da 404, y está publicado en su propia página de RSS)
+- ¿Trae `content:encoded`? Determina si hace falta `extraer_por_url` — la bandera que marca los medios donde vamos a buscar el cuerpo que ellos eligieron no publicar
+- ¿Qué dice su `robots.txt`? `crawl-delay`, bloqueos de crawlers de IA, reservas de TDM
+- ¿Cuántos ítems trae y qué ventana temporal cubren? Distingue una ventana móvil de un archivo
+
+Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí vos"*, que es la delegación informada. Un CRUD pelado dejaría dar de alta un medio con extracción sin que el operador se entere de que ese medio licencia solo títulos y links.
+
+**Tres cuidados:**
+
+1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
+2. **Migración**: la instancia que corre hoy tiene seis medios cargados. Sacar el seed no puede dejarla vacía.
+3. **Seguridad**: sería el primer endpoint que hace que el motor **busque una URL arbitraria a pedido de quien llame**, y hoy la API no tiene autenticación en ninguno de sus 8 endpoints. Un alta abierta es un vector de SSRF y de uso del motor como proxy hacia terceros. Necesita autenticación y validación del destino desde el diseño, no después.
+
+**Va después del punto 2**, por decisión del usuario.
+
+### 4. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
 
 `tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 6 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
 
 **No se implementa todavía.** Se vigila el tiempo de la corrida de agrupamiento (ya logueado) a medida que se sumen medios vía el punto 1, y se ataca cuando el número se acerque a los segundos que empiezan a competir con el ciclo de 15 minutos del scheduler — no antes.
 
-### 3. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
+### 5. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
 
 `tech_stack.md`, punto 10. Un cluster cierra a las 12 h; una historia larga (la muerte de Jorge Messi cubrió varios días) produce publicaciones sucesivas que pueden solaparse. Con más medios hay más cobertura y más eventos largos, así que el riesgo crece con el volumen — pero la solución no es técnica (¿son hechos distintos de verdad, o el mismo hecho que el producto debería seguir mostrando junto?), es una conversación con el equipo de producto/back-end sobre qué comportamiento quieren. Revisar con síntesis reales a la vista antes de proponer un diseño.
 
-### 4. Rate limit de Gemini al sumar medios
+### 6. Rate limit de Gemini al sumar medios
 
-`tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y la capa gratuita de Gemini limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier pago.
+`tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y el proveedor limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier con más cupo.
 
-### 5. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
+### 7. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
 
 Tres puntos de `tech_stack.md` (1, 4 y 6: engine de BD síncrono, scheduler embebido, modelo de embeddings en memoria por worker) comparten la misma condición: importan si el despliegue pasa de una réplica a varias, no por la cantidad de medios que se ingieran con la réplica única actual. Fase 5 fijó a propósito un solo proceso Uvicorn sin `--workers`; mientras eso no cambie, estos tres quedan correctamente diferidos.
+
+### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función
+
+**Último en la lista a propósito: hoy no genera inconvenientes.** No son tantas noticias y el espacio que ocupan tampoco aprieta. Se hace cuando alguna de las dos cosas cambie.
+
+Borrar **solo `contenido_limpio`** —no la noticia— cuando su cluster ya cerró, se sintetizó y se entregó, más un margen. Medido al 20/08/2026: **17,5 MB de texto ajeno**, del cual el **71% (3.186 de 4.485) es de artículos que nunca formaron cluster y ya no pueden formarlo**, porque quedaron fuera de la ventana.
+
+Sobrevive todo lo demás —título, URL, fecha, categoría y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
+
+**Rompe un solo consumidor**: el corpus de TF-IDF ajusta sobre `select(Noticia)` sin filtro ([preprocessing.py:105](src/services/preprocessing.py#L105)). Hay que decidir entre incluir las purgadas solo con título o excluirlas con una ventana móvil.
+
+**El costo real de purgar** no es perder el texto para el producto —ya cumplió— sino **no poder revectorizar si algún día se cambia `EMBEDDING_MODEL`**: habría que re-ingerir, y lo que salió de la ventana del feed no vuelve.
+
+Vale anotar el otro motivo por el que existe este punto, que no es técnico: reduce cuánto texto de terceros conservamos y por cuánto tiempo. Ver la revisión de términos de uso en `change_logs.md`.
+
+### 9. El mail de alertas lo elige el operador, no el `.env` del repo
+
+Hoy `ALERT_EMAIL_TO` es una variable de entorno única: quien despliegue el motor recibe las alertas en la casilla que quedó configurada al armar el contenedor, y cambiarla exige tocar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2 y 3 —cada operador con su modelo y con su roster de medios— no, porque **las alertas son suyas: hablan de sus medios, sus feeds y sus corridas**.
+
+**Qué se construye**: que la casilla de destino se pueda leer y cambiar en caliente, sin redeploy.
+
+**Los cuidados, que acá pesan más que en otros puntos**:
+
+- **La API no tiene autenticación en ninguno de sus endpoints.** Un endpoint que cambie el destino de las alertas deja que cualquiera **desvíe los avisos** —y quien los desvía, los apaga— o **los apunte a un tercero**, convirtiendo al motor en un emisor de mails no solicitados con nuestras credenciales SMTP. Es el mismo problema de fondo que el SSRF del punto 3 y probablemente se resuelvan juntos.
+- **Verificar la dirección antes de usarla**, o un typo silencia las alertas sin que nadie se entere hasta que algo se rompa y no llegue el aviso.
+- Conviene decidir a la vez si el destino es **uno o varios**, y si `SMTP_*` sigue siendo del repo o también pasa al operador: hoy las credenciales de envío y la casilla de destino están en el mismo lugar, y esto las separa.

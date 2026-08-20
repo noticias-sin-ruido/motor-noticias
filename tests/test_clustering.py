@@ -132,6 +132,68 @@ class TestCategoriaNoEvento:
     def test_las_noticias_comunes_no_llevan_categoria(self, url):
         assert categoria_no_evento(url) is None
 
+
+class TestGeneroDeOpinion:
+    """
+    Una columna no reporta un hecho, así que no hay enfoques que comparar: es
+    **género y no tema**, igual que un horóscopo. Si entra al agrupamiento, la
+    síntesis termina comparando una opinión contra crónicas del mismo tema.
+
+    Cada rama del patrón está medida contra las 4.532 noticias reales de la
+    base; los números viven en el comentario de `CATEGORIAS_NO_EVENTO`.
+    """
+
+    @pytest.mark.parametrize(
+        "url, rama",
+        [
+            ("https://www.perfil.com/noticias/opinion/las-dos-caras-del-aislamiento.phtml",
+             "/opinion/ — 29 notas"),
+            ("https://www.cronista.com/columnistas/el-equilibrio-fiscal/",
+             "/columnistas/ — 56 notas, El Cronista"),
+            ("https://www.lanacion.com.ar/editoriales/la-hipocresia-de-putin-nid12082026/",
+             "/editoriales/ — 4 notas, La Nación"),
+            ("https://www.lanacion.com.ar/editorial/una-nota-suelta/",
+             "/editorial/ en singular, por si un medio lo usa así"),
+            ("https://www.perfil.com/noticias/modo-fontevecchia/dia-981-el-dilema.phtml",
+             "/modo-fontevecchia/ — la sección de opinión de Perfil"),
+        ],
+    )
+    def test_las_columnas_se_clasifican_como_opinion(self, url, rama):
+        assert categoria_no_evento(url) == "opinion", rama
+
+    def test_la_rama_del_guion_caza_la_columna_de_la_nacion(self):
+        """
+        La Nación publica columnas dentro de la sección temática, con el
+        género en el slug: `/economia/opinion-...`, título "Opinión. Los
+        municipios socios...". Es la única nota que aporta la rama `-`.
+        """
+        url = "https://www.lanacion.com.ar/economia/opinion-los-municipios-socios-nid09082026/"
+        assert categoria_no_evento(url) == "opinion"
+
+    def test_no_caza_opinion_como_palabra_suelta(self):
+        """
+        **El caso que justifica el anclaje**, y el único que lo protege: sin el
+        `/` delante, este patrón se puede desanclar a `opinion|columnistas` y
+        toda la suite pasa igual. Es una nota de espectáculos, no una columna.
+        """
+        url = ("https://www.paparazzi.com.ar/teve/"
+               "la-letal-opinion-de-yanina-latorre-de-la-china-suarez/")
+        assert categoria_no_evento(url) is None
+
+    def test_editorial_como_casa_editora_no_es_opinion(self):
+        """
+        El anclaje a segmento también cubre el otro sentido de la palabra: una
+        nota sobre una editorial de libros no es un editorial del diario.
+        """
+        url = "https://www.lanacion.com.ar/cultura/editorial-planeta-lanza-su-catalogo/"
+        assert categoria_no_evento(url) is None
+
+    def test_una_noticia_comun_de_esas_secciones_no_se_confunde(self):
+        """La sección sola no alcanza: lo que marca el género es el segmento."""
+        assert categoria_no_evento(
+            "https://www.perfil.com/noticias/economia/el-dolar-cerro-en-alza.phtml"
+        ) is None
+
     def test_no_entran_al_agrupamiento(self, session: Session, medios):
         cluster_previo = len(session.exec(select(Cluster)).all())
         for indice, (medio, url) in enumerate(

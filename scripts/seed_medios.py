@@ -87,6 +87,21 @@ MEDIOS = [
         "url_base": "https://www.ciudad.com.ar",
         "feeds_rss": ["https://www.ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml"],
     },
+    {
+        "nombre": "Perfil",
+        # Su RSS no trae content:encoded (0/438 medido el 18/08): la licencia de
+        # sus terminos cubre "el contenido" y no lo retiene por descuido, asi
+        # que entra por la segunda via -- extraer_por_url va en True.
+        #
+        # Un solo feed, el general, y por el mismo motivo medido para los
+        # demas: es una ventana movil de 7,1 h que cubre el 94% de lo fresco,
+        # las 4 secciones probadas aportan apenas 2 items que el general no
+        # tenga. `/feed/internacionales` da 404 pese a que Perfil lo publica
+        # en su propia pagina de RSS -- no se siembra.
+        "url_base": "https://www.perfil.com",
+        "feeds_rss": ["https://www.perfil.com/feed"],
+        "extraer_por_url": True,
+    },
 ]
 
 # Campos que este script mantiene sincronizados contra una base ya cargada:
@@ -98,12 +113,17 @@ MEDIOS = [
 # `url_base` tambien: nunca se piso hasta ahora y no hay motivo para empezar.
 CAMPOS_SINCRONIZADOS = ["feeds_rss", "extraer_por_url"]
 
-# Clarin y Perfil siguen fuera del roster POR AHORA, pero ya no por falta de
-# evidencia: su RSS no trae content:encoded (verificado el 18/08, 0 de 438
-# items), y la segunda via de ingesta que los habilita esta a medio construir.
-# La medicion que levanto el candado dio 14 pares reales por dia y 0 fallos de
-# extraccion sobre 120 articulos -- entran cuando el extractor exista, con
-# `"extraer_por_url": True`. Ver specs/change_logs.md, "Backlog punto 1".
+# Clarin queda FUERA del roster, y no por falta de herramienta: su RSS no trae
+# content:encoded (verificado el 18/08, 0 de 438 items) y sus terminos de uso
+# licencian explicitamente "titulos y/o links", nada mas -- retienen el cuerpo
+# a proposito. La segunda via de ingesta (extraer_por_url) existe desde la
+# etapa 2 y podria traerlo igual, pero seria cruzar una linea que el medio
+# trazo. Ver specs/change_logs.md, "Backlog punto 1".
+#
+# Ambito y La Izquierda Diario quedan postergados por el mismo tipo de
+# revision: Ambito no tiene contrato de reuso pero tampoco se evaluo a fondo
+# todavia; La Izquierda Diario bloquea crawlers de IA y reserva TDM en su
+# robots.txt (Directiva UE 2019/790 art. 4) pese a no tener terminos propios.
 #
 # Cadena 3 tiene el tag pero con el copete adentro, y ademas su feed esta
 # congelado desde 2018. Diario Cronica trae el tag vacio y su agenda es de

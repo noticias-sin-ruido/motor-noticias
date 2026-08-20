@@ -1450,3 +1450,316 @@ Y alargarlo tampoco ayuda contra el caso que sí aprieta —el backlog tras una 
 **314 tests en verde** (306 + 8 nuevos) con condiciones de CI simuladas, cobertura **95,69%**, `ruff` limpio.
 
 Las cinco piezas se verificaron por mutación, que a esta altura es la costumbre de la casa: sacar el `add_listener`, sacar `misfire_grace_time`, subir `max_instances` a 2, mandar el mail en el hilo del listener y sacar el canario. **Las cinco las detectan los tests.**
+
+---
+
+## Backlog punto 1, etapa 5 — el alta de Perfil, y por qué Clarín queda afuera (20/08/2026)
+
+El plan original era dar de alta Clarín y Perfil juntos. Antes de tocar código se hizo algo que nunca se había hecho ni para ellos ni para los seis medios que ya corrían: **leer los términos de uso del RSS**.
+
+### La revisión
+
+| Medio | Cuerpo en el feed | Términos | Veredicto |
+|---|---|---|---|
+| Clarín | 0/438 | Licencia limitada a "títulos y/o links"; prohíbe usar el Servicio de otro modo | ❌ Descartado |
+| Perfil | 0/438 | Licencia sobre "el contenido"; pide links de vuelta (los damos) | ✅ Elegido |
+| Ámbito | 0/137 | Sin contrato de reuso; su aviso legal solo cubre datos personales (Ley 25.326) | Alternativa viable, postergada |
+| La Izquierda Diario | 48/48 | Sin términos propios, pero `robots.txt` bloquea crawlers de IA y reserva TDM (Directiva UE 2019/790 art. 4) | Postergado |
+
+Lo que decidió lo de Clarín no es que falte la herramienta —la etapa 2 construyó justo el extractor que iría a buscar lo que el feed no trae—, es que **retienen el cuerpo a propósito**: 0 de 438 ítems es coherente con una licencia que cubre solo títulos y links. Ir a buscarlo por URL igual sería cruzar una línea que el medio trazó, no una carencia técnica que resolver.
+
+**Replanteo que salió de ahí:** `extraer_por_url` no es una bandera técnica, es la marca de los medios donde el motor cruza esa línea. Los que traen `content:encoded` publicaron el cuerpo; los que no, lo retuvieron.
+
+### La medición de Perfil
+
+48 artículos extraídos de 4 secciones, contra el corpus real dentro de la ventana de 12 h: política 5/12, economía 5/12, sociedad 3/12, policía 2/12. 14 pareos colapsaron en 12 hechos distintos (1,2 notas por hecho) — con ~116 artículos únicos/día, proyecta ~25 hechos/día contra un piso de 3. Perfil pasa con holgura.
+
+**Un solo feed, no cuatro** — igual que el resto del roster, y por el mismo motivo, ahora comprobado también para Perfil: el general es una ventana móvil de 7,1 h que cubre el 94% de lo fresco; las 4 secciones juntas aportan solo 2 ítems que el general no traiga. `/feed/internacionales` da 404 pese a estar publicado en la propia página de RSS de Perfil — no se siembra.
+
+### El filtro de opinión (`CATEGORIAS_NO_EVENTO["opinion"]`)
+
+El feed general trae columnas junto con las noticias. Una columna no reporta un hecho —es género, no tema—, así que entra al mismo mecanismo que ya filtraba horóscopos y recetas (`services/categorias.py`).
+
+Patrón: `/opinion[/-]|/columnistas/|/modo-fontevecchia/`. El anclaje a segmento de URL se verificó contra la base real antes de aplicarlo: `opinion` suelto capturaba 30 URLs, de las cuales una es un falso positivo genuino (`paparazzi.com.ar/.../la-letal-opinion-de-yanina-latorre-...`, no es una columna) y el resto son columnas reales, incluyendo el caso donde el ancla sí tiene que dejar pasar `/economia/opinion-...` de La Nación. `/opinion[/-]` anclado captura las 29 legítimas y excluye la única falsa.
+
+El patrón completo (opinion + columnistas + fontevecchia) alcanza 85 notas sobre las 4.485 de la base, de las cuales **7 ya estaban en un cluster** —todas columnas de El Cronista bajo `/columnistas/`—, así que no hay daño retroactivo nuevo que reparar.
+
+Verificado en producción tras la ingesta real de Perfil: el patrón capturó exactamente 2 de las 47 notas nuevas (`/noticias/opinion/...` y `/noticias/modo-fontevecchia/...`), ambas columnas reales, cero falsos positivos.
+
+### Verificado
+
+- 314 tests en verde, `ruff` limpio, `alembic check` sin operaciones pendientes.
+- Seed real: Perfil alta (id=11), un feed, `extraer_por_url=True`.
+- Ingesta real: 47 nuevas, 0 duplicadas, 3 en vivo filtradas, **0 fallos de extracción sobre 47**, `robots.txt` pedido una sola vez, 64,2 s (≈ lo proyectado para el pico de la primera corrida).
+- Vectorización + agrupamiento reales: Perfil formó 2 clusters propios en esta corrida puntual (no cruzó con otro medio en esta ventana particular); la tasa de pareo contra el corpus ya estaba medida aparte.
+
+### Cabos sueltos que quedaron reformulados
+
+`synthesis.py`, `roadmap.md` y `tech_stack.md` nombraban la "capa gratuita" de Gemini al hablar del rate limit. Se reformuló como "el proveedor limita por minuto" — la afirmación de rate limit sigue siendo cierta para cualquier proveedor y deja de exponer que la instancia corre sobre un tier gratuito. `README.md` se deja igual a propósito: bajarle la barrera a quien evalúa el repo pesa más ahí que en código de producción.
+
+### Decisiones que quedaron abiertas, sin resolver en esta etapa
+
+- **`bloomberg` en el feed de Perfil** (5 de 50 ≈ 10%): contenido sindicado, no es la voz editorial de Perfil que la comparativa quiere medir, y agrega derechos de un tercero. Sin filtrar todavía.
+- **Los seis medios ya activos nunca se revisaron por términos de uso.** La Nación y TN son los que más volumen aportan; quedan pendientes de la misma revisión que sí se les hizo a Clarín, Perfil, Ámbito y La Izquierda Diario.
+
+---
+
+## La vida útil de un permiso leído — el `robots.txt` deja de durar semanas (20/08/2026)
+
+Sale de la revisión con subagente del punto 1 completo, que encontró que la caché de `robots.txt` no expiraba nunca. Es el hallazgo B1 de esa revisión.
+
+### El bug, que era peor de lo reportado
+
+`_robots` es un diccionario de módulo y `_parser_robots` abre con `if base in _robots: return _robots[base]`. Ante cualquier fallo se guarda `None` y **ese `None` decide para siempre**: el `except` que loguea y manda el mail queda del otro lado del cortocircuito, así que **no se vuelve a ejecutar nunca**.
+
+De ahí dos cosas que no se habían visto:
+
+1. **El cooldown de 60 minutos de la alerta era código muerto.** `clave=f"robots:{base}"` se diseñó para no inundar la casilla ante fallos repetidos, pero la caché hacía imposible que el fallo se repitiera. Salía un mail, uno solo, para siempre.
+2. **El docstring afirmaba algo que el código no hacía.** Decía "ya consultados *en esta corrida*", que es la semántica correcta; pero `limpiar_cache_robots()` solo se llamaba desde `tests/test_extraccion.py`. En producción la caché vivía lo que viviera el proceso — con el scheduler embebido, semanas.
+
+El costo real: un blip de red de un segundo dejaba a Perfil sin extraer hasta el próximo reinicio, en silencio. Y del lado del permiso, si el medio agregaba un `Disallow` no nos enterábamos nunca — seguíamos extrayendo con una autorización leída semanas atrás. Para una vía que existe justamente para ir a buscar lo que el medio no publicó en su feed, eso no es aceptable.
+
+### Los tres caminos que se evaluaron
+
+| | Cómo | Por qué no / por qué sí |
+|---|---|---|
+| **A. TTL por reloj** | Dos settings nuevos: 24 h de éxito (RFC 9309 dice que un crawler *SHOULD NOT* cachear más que eso) y ~300 s de fallo | ❌ El TTL de fallo tiene que quedar **por debajo de `INGEST_INTERVAL_MINUTES`** para garantizar el reintento. Eso pone una trampa silenciosa justo en la perilla que el roadmap dice que hay que calibrar con datos. Además depende del reloj de pared, que ya nos dio un problema (ver M5 de la misma revisión) |
+| **B. Caché por corrida** ✅ | `ingerir_todos_los_medios` llama `limpiar_cache_robots()` al arrancar | Elegido |
+| **C. Persistir el `robots.txt` con `fetched_at`** | Tabla propia | Tiene un valor que los otros no: **deja rastro auditable** de qué permiso leímos y cuándo. Pero es esquema + migración para lo que B resuelve en una línea. Queda anotado para el punto 3 del backlog (alta de medios por el operador), donde encaja natural |
+
+**Por qué B.** No inventa configuración, no depende del reloj, no introduce ningún acoplamiento —la vida de la caché *es* la corrida, cambie el intervalo lo que cambie— y **hace verdadero el docstring en vez de reescribirlo**. Además convierte en código de producción una función pública que hasta ahora solo usaban los tests, que era el olor de fondo. Efecto lateral: como el `except` se vuelve a entrar cada ciclo, el cooldown de 60 minutos pasa a estar vivo y a hacer lo que se diseñó que hiciera.
+
+`ingerir_todos_los_medios` es el punto de inserción correcto porque es el **único** punto de entrada en producción: lo llaman el scheduler y `POST /ingest`.
+
+### El costo, medido y asentado
+
+Releer el `robots.txt` una vez por medio y por ciclo cuesta **~0,3 s y ~1 KB** (medido: Perfil 0,326 s · La Nación 0,291 s · TN 0,652 s · El Cronista 0,293 s). Con 20 medios son 6 s por ciclo, el **0,67%** — **no mueve el techo de ~20 medios**, que lo fija la pausa de cortesía de 1 s por artículo.
+
+Quedó documentado en `tech_stack.md` como **punto de quiebre 12**, que además llenó un hueco: el costo de ingesta por medio no estaba en la lista de puntos de quiebre, que es donde un operador lo buscaría antes de dar de alta un medio. Ahí está la distinción que importa y que ya se prestó a confusión una vez: en **régimen** 20 medios usan ~9% del ciclo, pero **dar de alta** 20 medios de una vez son ~1.370 s contra un ciclo de 900 y se pasa. El límite aprieta en el momento del alta, no en la operación normal.
+
+### Verificado
+
+Dos tests nuevos en `TestVidaUtilDelRobotsTxt`, **de comportamiento y no de `assert mock.called`**: envenenan la caché como lo haría una corrida anterior y verifican el resultado observable.
+
+- `test_una_corrida_no_hereda_el_robots_cacheado_por_la_anterior` — cachea `None` y verifica que el artículo se extrae igual (el lado de la cobertura).
+- `test_un_disallow_nuevo_se_respeta_en_la_corrida_siguiente` — cachea un parser permisivo, sirve un `Disallow: /` nuevo y verifica que **no** se extrae (el lado del permiso).
+
+Verificados por mutación: sacando la llamada a `limpiar_cache_robots()`, **fallan los dos**.
+
+---
+
+## URLs malformadas — validar en el borde en vez de defender cada consumidor (20/08/2026)
+
+Hallazgo B2 de la revisión con subagente. Arrancó como "`urlparse` está fuera del `try` en `extraccion.permitido`" y terminó siendo una decisión sobre **dónde se valida un dato que entra**.
+
+### El problema tenía tres capas, no una
+
+1. **La reportada**: `permitido` llamaba `urlparse(url)` sin protección. `urlparse("http://[::1/nota")` levanta `ValueError`. Como `permitido` corre dentro del `try` de `ingerir_feed`, esa excepción costaba **rollback del feed entero, mail de alerta y un `feeds_fallados`**: un artículo con la URL rota se contabilizaba y se alertaba como el medio entero caído.
+
+2. **La que no se había visto**: `can_fetch` hace `urlparse(unquote(url))` puertas adentro. Una URL percent-encoded **sobrevive al primer parseo y revienta en el segundo** — verificado: `https://x.com%5B/nota` pasa `urlparse` con `netloc='x.com%5B'` y hace levantar a `can_fetch` cuando el `%5B` vuelve a ser `[`. Un arreglo que solo envolviera `urlparse` dejaba abierta la vía **más probable** de las dos, porque el percent-encoding en una URL de feed es corriente.
+
+3. **La que estaba fuera del alcance del ticket**: `topicos._primeros_segmentos` también hace `urlparse(url)` sin `try`, y lo llama `synthesis` al armar el prompt. Ese camino **no pasa por la extracción**: una URL malformada de un medio *sin* `extraer_por_url` entra a la base igual, porque el cuerpo viene del `content:encoded` y nadie valida el link. O sea que **la exposición es anterior a toda la segunda vía**; no la introdujo este trabajo. Ahí el radio está contenido por el `except` por cluster de `sintetizar_pendientes`, pero el cluster falla su síntesis **cada ciclo hasta cerrarse**: una píldora envenenada.
+
+### La decisión: una validación en el borde, no tres parches
+
+Defender consumidor por consumidor es **exactamente la vigilancia que produjo B2**: `extraer_articulo` promete no propagar excepciones y esa promesa se sostenía con un `try` por operación riesgosa, hasta que a una se le pasó.
+
+Dato que ordenó la elección: **`Noticia(...)` se instancia en un solo punto de todo `src/`** (`ingestion.py`). Hay un único borde por donde una URL entra al motor. Validar ahí cubre de una a `extraccion.permitido`, `topicos.topico_declarado`, `categorias.categoria_no_evento` **y el payload que va al back-end** — porque una URL rota es salida rota se extraiga o no.
+
+Se implementaron las tres, en profundidad y no como alternativas:
+
+| | Qué hace |
+|---|---|
+| `ingestion.url_utilizable` | Valida en el borde, con contador propio en `stats` |
+| `extraccion.permitido` | Envuelto entero: es una guarda, y una guarda que no puede responder tiene que decir que no |
+| `extraccion.extraer_varios` | `try` por artículo: uno podrido no se lleva el lote, con el mismo criterio con que `ingerir_feed` aísla los feeds |
+
+**El criterio de validación es el mínimo** para que la URL sirva de algo: que `urlparse` no reviente, que sobreviva a `unquote`, y que haya esquema y dominio. Medido contra las **4.532 URLs reales de la base: cero rechazos**, así que no descarta nada de lo que hoy funciona.
+
+### Decisiones menores que importan
+
+- **Contador propio (`url_invalida`) y no `sin_contenido`.** Son descartes por motivos distintos, y mezclarlos además falsearía el aviso de "ningún item traía contenido", que compara ese contador contra el total de items del feed.
+- **El log de `permitido` no afirma la causa.** Dice "no se pudo evaluar el permiso" con el tipo de excepción, y no "URL malformada", aunque sea la causa conocida: si mañana un refactor mete un `TypeError` ahí, un log que declare la causa equivocada manda a quien depure por el camino de al lado.
+- **La red del batch usa `logger.exception`.** El riesgo de una red así es tapar un bug propio; el traceback completo es lo que evita que sea silenciosa. El test lo verifica explícitamente.
+- **Las URLs relativas se descartan** (`/nota/123`, que emiten algunos feeds descuidados). Es lo correcto —no se pueden pedir ni entregar— pero es un cambio de comportamiento consciente. Resolverlas contra `Medio.url_base` sería una funcionalidad aparte, no un arreglo.
+
+### Por qué ahora, si nunca pasó
+
+**0 de 4.532.** El bug es enteramente latente: ningún CMS real nos mandó nunca una URL así. La justificación no es la evidencia presente sino el **punto 3 del backlog**, que abre la puerta a feeds arbitrarios cargados por cada operador. Sin ese plan, esto sería sobreingeniería y con arreglar `permitido` alcanzaba.
+
+### Verificado
+
+**330 tests** (+14), `ruff` limpio, `alembic check` sin pendientes. Mutación **independiente por cambio**: cada guarda falla solo la suya, ninguna se cubre por accidente con otra. La de `permitido` falla en **las dos** parametrizaciones, o sea que cubre tanto el `urlparse` directo como la vía de `can_fetch` al decodificar.
+
+Un test preexistente (`TestDeduplicacionNoEscala`) comparaba el dict de `stats` completo y hubo que agregarle la clave nueva. Se había afirmado que ningún test lo hacía; la verificación que lo descartó buscaba `assert stats ==` y este usa `assert stats_pocos ==`. Anotado como recordatorio de que un `grep` que no encuentra nada no prueba que no haya nada.
+
+---
+
+## Los parámetros de `trafilatura` van explícitos — y el hallazgo que no era lo que parecía (20/08/2026)
+
+Hallazgo B3 de la revisión. Se reportó —y se repitió como hecho— que `trafilatura.extract(html)` corría con `include_comments=True`, así que **los comentarios de lectores estaban entrando al cuerpo** y contaminando embeddings, TF-IDF, NER y el prompt de síntesis.
+
+### Lo que se verificó y lo que no
+
+El default **sí** es `include_comments=True` (comprobado sobre la versión instalada, 2.2.0). Lo que no se había verificado es **la consecuencia**: que los comentarios entraran de verdad.
+
+A/B sobre 10 artículos reales de Perfil, con spread de largos, bajando cada página una sola vez:
+
+| Configuración | Total extraído |
+|---|---:|
+| Actual (defaults) | 56.055 |
+| `include_comments=False` | **56.055** |
+| `include_comments=False, include_tables=False` | 56.055 |
+| `include_comments=False, favor_precision=True` | 54.792 (−2,3%) |
+
+**0 de 10 artículos difieren.** Byte por byte idénticos. Perfil no sirve los comentarios en el HTML —los carga por JS, como muchos medios— así que el parámetro nunca tuvo nada que capturar. **Las 47 notas ya ingeridas están limpias y no hubo nada que remediar.**
+
+Antes de eso se había buscado la contaminación por otra vía: el largo. Hay un outlier de 20.735 caracteres, 2,5× el siguiente. Auditado contra la fuente, es **legítimo** — un ensayo largo de Fontevecchia con firma de producción al final. Sirvió para descartar una idea que parecía buena: un **techo** de caracteres simétrico al piso de `EXTRACCION_MIN_CARACTERES`. Un techo que descarte habría tirado una nota real. Queda anotado que la única versión defendible sería un techo que **avise y no descarte**, como el canario de duración del scheduler.
+
+Y sirvió para entender por qué la señal de largo no alcanzaba de todos modos: si los comentarios entraran, entrarían en *todas* las notas proporcionalmente y no habría outlier que mirar.
+
+### La decisión
+
+El arreglo se hizo igual, pero cambia lo que es: **de "limpiar una contaminación" a "cerrar un riesgo latente"**, igual que B1 y B2.
+
+**Los parámetros van explícitos, incluso los que coinciden con el default.** La lección de B3 no es el valor de uno sino que **un default decidiera qué guardamos sin que nadie lo eligiera**. `include_tables=True` se conserva a propósito: en una nota de economía o de elecciones la tabla es contenido, no maquetado. `favor_precision` queda apagado — recorta 2,3% y, sin comentarios que sacar, lo que saca es contenido o boilerplate indistinguible: riesgo sin beneficio medido.
+
+**Y se le puso techo de versión mayor a la dependencia**: `trafilatura>=2.0.0,<3.0.0`. Los parámetros explícitos cubren los que hoy conocemos; un major nuevo puede cambiar otro y volver a decidir por nosotros. Subir de 3.x pasa a ser una decisión que se toma leyendo el changelog, no un `pip install`.
+
+### Verificado
+
+El test **no mockea `trafilatura`**: lleva HTML con un bloque de comentarios de verdad y la biblioteca corre en serio, así que también avisa si una versión nueva cambia el comportamiento — que es el modo de falla que produjo esto. Se comprobó **antes** de escribirlo que ese HTML distingue las dos configuraciones (801 vs 738 caracteres), para que no fuera una guarda vacía. Mutación: volviendo al default, falla.
+
+Dato menor pero anotable: un artículo dio 1.405 caracteres en la base contra 1.316 al re-bajarlo. El medio lo editó después de que lo ingerimos. No es un bug, pero confirma que los cuerpos que guardamos son una foto y no la nota viva.
+
+---
+
+## El filtro de opinión, ahora con guardas — y `/editoriales/` (20/08/2026)
+
+Hallazgo B4. El patrón de opinión de la etapa 5 era **el único entregable sin ninguna guarda en CI**: la revisión lo probó por mutación desanclándolo a `opinion|columnistas|fontevecchia`, y los 331 tests pasaban igual. Todo el razonamiento de la medición —"29 legítimas y excluye la única falsa"— no estaba sostenido por nada.
+
+### Lo que apareció al medir rama por rama
+
+| Rama | Notas |
+|---|---:|
+| `/opinion/` | 29 |
+| `/columnistas/` (El Cronista) | 56 |
+| `/editorial(es)?/` (La Nación) | **4 — no estaban en el patrón** |
+| `/modo-fontevecchia/` | 1 |
+| `/opinion-` | 1 |
+
+**`/editoriales/` era un hueco real, y no teórico**: uno de esos 4 —"Colombia, ante grandes desafíos", cluster 345— **ya estaba agrupado con cobertura de un hecho**, que es exactamente la contaminación que este filtro existe para evitar. Se agregó. La sobre-captura del otro sentido de la palabra la cubre el anclaje a segmento: `/cultura/editorial-planeta-lanza-...` no matchea, porque después de "editorial" el patrón exige `/` o `es/`, no `-`.
+
+### La rama `-` se mantiene, y por qué
+
+Aporta **una sola** nota: `/economia/opinion-los-municipios-socios-...` de La Nación, cuyo título arranca con "Opinión.". Es la rama más floja del patrón y **no hay regex que la distinga** de un titular de noticia que empiece con "opinión dividida sobre...".
+
+Se conserva por la **asimetría de los errores**:
+
+- *Falso positivo* — la nota no agrupa, pero sigue **guardada y buscable**. Recuperable, daño bajo.
+- *Falso negativo* — una columna entra al agrupamiento y la síntesis termina comparando una opinión contra crónicas. Eso ensucia el producto, que es la razón de ser del filtro.
+
+Quedó un test que fija ese trade-off **con el comentario que lo explica**, para que nadie lo "arregle" después y pierda el caso de La Nación.
+
+### Lo que quedó afuera a propósito
+
+`/opiniones/`, `/analisis/`, `/columnistas-invitados/`, `/tribuna/`, `/firmas/` y `/opinión/` con tilde: **cero coincidencias todas**. Mismo criterio que en su momento sacó `signos` de este diccionario, aplicado al revés: no se agrega lo que no tiene beneficio medido, aunque parezca inofensivo.
+
+### Un bug que encontró el propio test
+
+El patrón se escribió primero como `/editoriales?/`, pensando "editorial + `es` opcional". En realidad el `?` cae **sobre la `s` sola**, así que exige "editoriale" y `/editorial/` en singular no matchea. Los 4 casos reales son plurales, por eso la medición dio bien y el error quedaba invisible. Lo agarró el caso que se había agregado por si algún medio usa el singular. Corregido a `/editorial(?:es)?/`, con el comentario en el código para que nadie lo "simplifique" de vuelta.
+
+### Verificado
+
+Cinco mutaciones, cada una con su guarda propia: desanclar (falla 2 tests), sacar `/editorial(?:es)?/`, sacar `/columnistas/`, sacar la rama `-`, y el `editoriales?` mal escrito. **La primera es el punto de todo B4**: la mutación que antes pasaba desapercibida ahora falla.
+
+Efecto en los datos: de 85 a **91** notas clasificadas como opinión, 8 de ellas ya en un cluster. Las otras tres categorías intactas (horóscopo 42, recetas 67, juegos 1).
+
+**Cabo suelto anotado**: el agrupamiento ya hecho **no se recalcula**. Esos 8 clusters siguen conteniendo columnas y el filtro lo aplica la ingesta, no una pasada retroactiva. Como los clusters cierran a las 12 h, se limpia solo con el tiempo.
+
+---
+
+## El avisador podía trabar el pipeline — timeout de SMTP y el cooldown que contaba intentos (20/08/2026)
+
+Hallazgos I1 y M8. **De los cinco de la revisión, el único que no era latente.**
+
+### Por qué este sí estaba vivo
+
+`smtplib.SMTP(host, port)` sin `timeout` usa `socket._GLOBAL_DEFAULT_TIMEOUT`, y `socket.getdefaulttimeout()` es `None`: **bloquea indefinidamente**. Verificado que en este entorno el SMTP está configurado y en uso (`smtp.gmail.com:587`), así que cada alerta que manda el motor sale por un socket que puede colgarse para siempre. B1, B2 y B3 necesitaban una entrada rara para dispararse; a este le alcanza una condición de red.
+
+El radio es grande porque `enviar_alerta` se llama **desde el hilo del job** en cinco lugares (`_correr_paso`, el canario de duración, el fallo de feed, el `robots.txt` ilegible y la extracción fallida):
+
+1. El hilo del job queda bloqueado para siempre.
+2. Con `max_instances=1`, el scheduler **saltea todos los ciclos siguientes**.
+3. Cada salteo dispara `_avisar_corrida_perdida`, que abre un hilo daemon que también se cuelga.
+4. Sin más recuperación que reiniciar el proceso.
+
+La etapa 4 había identificado el riesgo ("sin timeout explícito") pero mitigó solo el event loop, moviendo el aviso del listener a un hilo daemon. **La vía que quedó sin cubrir era peor que la cubierta**: una API congelada se nota; un pipeline trabado, no. El avisador, cuyo trabajo es que los fallos se vean, pasaba a ser lo que mata la corrida en silencio.
+
+`SMTP_TIMEOUT_SEGUNDOS = 10.0`. Un `timeout` en el constructor cubre toda la sesión porque `starttls`, `login` y `send_message` heredan el del socket. **Acota cada operación y no la sesión entera**, así que el peor caso son ~4× esos segundos; queda escrito en el comentario para no dejar creer que son 10. Contra un ciclo de 900 s sigue siendo chico, y Gmail responde en 1-3 s.
+
+### M8: el cooldown gastaba intentos en vez de entregas
+
+`_corresponde_avisar` estampaba el timestamp **antes** de intentar el envío. Un envío fallido se comía la ventana igual: los siguientes 60 minutos quedaban mudos **sin haber entregado nada**. Con el timeout puesto los fallos pasan a ser rápidos y frecuentes, así que el problema se vuelve más visible.
+
+El cooldown existe **para no inundar la casilla de mails** —lo dice su propio comentario en `config.py`— y un envío que falla no manda ningún mail, así que no tiene por qué gastar ese presupuesto. La función pasó a llamarse `_en_cooldown` y **solo consulta**; quien estampa es `enviar_alerta`, y únicamente cuando el mail salió.
+
+Su costo, asumido: contra un SMTP roto se reintenta cada ciclo en vez de cada hora. Acotado por el timeout, son ~40 s en el peor caso sobre 900, y el canario de duración avisaría si se pusiera feo.
+
+**Efecto secundario que vale más de lo esperado**: cuando no hay SMTP configurado, el `logger.error` lleva el cuerpo entero de la alerta — **ese log *es* la entrega**. Antes el cooldown lo silenciaba una hora, o sea que se perdía la alerta en vez de ahorrarse un mail. Ahora no, y hay un test que lo fija.
+
+### Verificado, con una limitación que conviene saber
+
+Mutación: sacar el timeout falla `test_se_le_pasa_un_timeout_acotado`; volver a estampar antes del envío falla dos tests.
+
+**El test de I1 es una aserción de contrato, no de comportamiento**: no se puede colgar un socket real en un unit test, así que verifica que se pase un `timeout` acotado, no que un cuelgue se corte. Es más débil que las guardas de B1-B4 y queda dicho en su propio docstring para que nadie lo lea como equivalente.
+
+---
+
+## Corrida de validación con los cinco arreglos puestos — el pipeline paso por paso (20/08/2026)
+
+Corrida completa contra la base real y **contra el receptor real del back-end**, en el mismo orden que `main._ciclo`, midiendo cada paso por separado. Medido con `time.monotonic()` y no con el reloj de pared, que es el instrumento correcto para duraciones (ver M5 de la revisión, todavía pendiente en `main.py`).
+
+### Los tiempos
+
+| Paso | Segundos | % de la corrida | % del ciclo |
+|---|---:|---:|---:|
+| Ingesta | 71,18 | 17,2% | 7,91% |
+| Vectorización | 10,28 | 2,5% | 1,14% |
+| Cierre de clusters | 0,08 | 0,0% | 0,01% |
+| Agrupamiento | 2,60 | 0,6% | 0,29% |
+| Fusión de clusters | 0,08 | 0,0% | 0,01% |
+| **Síntesis** | **320,95** | **77,6%** | **35,66%** |
+| Entrega al back-end | 8,36 | 2,0% | 0,93% |
+| **TOTAL** | **413,60** | 100% | **45,96%** |
+
+**Es una corrida de acumulación, no de régimen** — la distinción importa porque confundirlas ya llevó a una conclusión equivocada antes. Entraron **310 noticias nuevas** de golpe porque el motor llevaba horas sin correr; en un ciclo normal de 15 minutos entran unas pocas por medio.
+
+### Lo que confirma y lo que cambia respecto del baseline de la etapa 4
+
+La etapa 4 midió 206,58 s con un backlog de 24 ángulos (23,0% del ciclo). Esta dio **413,60 s (46,0%)**, el doble, y las dos razones son claras:
+
+- **La síntesis sigue siendo el grueso**: 77,6% de la corrida, 37 clusters sintetizados a **8,7 s cada uno** — consistente con los ~8 s por ángulo de la etapa 4. El costo lo fija la cantidad de material, no el intervalo.
+- **La ingesta pasó de 4-7 s a 71,18 s, y el 90% de eso es Perfil.** Sus 47 artículos por extracción tardaron ~64 s; los otros seis medios juntos, ~7 s. Es la confirmación en producción de que **el costo variable por artículo extraído domina la ingesta**, tal como quedó documentado en `tech_stack.md`, punto 12.
+
+### El dato que conviene mirar
+
+**La corrida usó el 46% del ciclo y el canario dispara al 50%.** No sonó, pero por poco. Proyección directa: sumar **un solo medio más con extracción** del tamaño de Perfil agrega ~64 s y lleva la corrida a ~478 s, o sea **53%: el canario suena**.
+
+Eso no es una falla, es el instrumento haciendo su trabajo — y es exactamente el aviso que la etapa 4 construyó para no depender de que alguien se acuerde de mirar. Confirma también que el disparador documentado para paralelizar la extracción (**pasar los ~10 medios**) está bien puesto, quizá incluso holgado.
+
+### Que los cinco arreglos no rompieron nada
+
+| | |
+|---|---|
+| Warnings en toda la corrida | **2**, ninguno un problema: uno es la validación anti-alucinación descartando el enfoque de un medio ajeno, el otro es un aviso cosmético de HuggingFace |
+| Alertas SMTP disparadas | **0** |
+| `url_invalida` (B2) | **0** en los 7 medios — la validación nueva no rechazó nada, igual que sobre las 4.532 históricas |
+| Extracción de Perfil (B1/B3) | **47 de 47**, cero fallos; `robots.txt` releído una vez por corrida |
+| Entrega al back-end | **40 de 40 aceptadas**, 0 rechazadas, 0 fallidas |
+
+### El filtro de opinión en producción (B4)
+
+Sobre las 4.842 noticias que quedaron en la base: **99 clasificadas como opinión** (El Cronista 59, La Nación 21, TN 12, Perfil 7), más recetas 70, horóscopo 44 y juegos 1.
+
+**91 de esas 99 (92%) quedaron fuera del agrupamiento**, que es el filtro haciendo su trabajo. Las 8 restantes son las que ya estaban en un cluster desde antes de que el patrón existiera: el filtro lo aplica la ingesta y no hay pasada retroactiva, así que se limpian solas cuando esos clusters cierren a las 12 h.

@@ -115,16 +115,40 @@ def _parser_robots(base: str) -> Optional[urllib.robotparser.RobotFileParser]:
 
 
 def permitido(url: str) -> bool:
-    """Si el `robots.txt` del medio habilita pedir esa URL."""
-    partes = urlparse(url)
-    if not partes.scheme or not partes.netloc:
-        logger.warning(f"URL sin esquema o dominio, no se extrae: {url!r}")
-        return False
+    """
+    Si el `robots.txt` del medio habilita pedir esa URL.
 
-    parser = _parser_robots(f"{partes.scheme}://{partes.netloc}")
-    if parser is None:
+    **Nunca levanta.** Es una guarda, y una guarda que no puede responder tiene
+    que decir que no: quien la llama corre dentro del `try` de `ingerir_feed`,
+    donde una excepción cuesta el rollback del feed entero.
+
+    Hay dos formas de romperla, y las dos son con una URL malformada. La
+    evidente es `urlparse`, que levanta `ValueError` ante un IPv6 mal cerrado.
+    La otra es menos visible: `can_fetch` hace `urlparse(unquote(url))` puertas
+    adentro, así que una URL percent-encoded puede pasar el primer parseo y
+    reventar en el segundo. La ingesta ya descarta las dos formas en el borde
+    (`ingestion.url_utilizable`); esto es la segunda línea, para cuando a esta
+    función la llame algo que no venga de un feed.
+    """
+    try:
+        partes = urlparse(url)
+        if not partes.scheme or not partes.netloc:
+            logger.warning(f"URL sin esquema o dominio, no se extrae: {url!r}")
+            return False
+
+        parser = _parser_robots(f"{partes.scheme}://{partes.netloc}")
+        if parser is None:
+            return False
+        return parser.can_fetch(USER_AGENT, url)
+    except Exception as error:
+        # El mensaje NO afirma que la URL esté malformada, aunque sea la causa
+        # conocida: si un refactor mete un TypeError acá, un log que declare la
+        # causa equivocada manda a quien depure por el camino de al lado.
+        logger.warning(
+            f"No se pudo evaluar el permiso de {url!r}, no se extrae "
+            f"({type(error).__name__}: {error})"
+        )
         return False
-    return parser.can_fetch(USER_AGENT, url)
 
 
 def _descargar_pagina(url: str) -> str:
@@ -183,7 +207,21 @@ def extraer_articulo(url: str) -> Optional[str]:
         return None
 
     try:
-        crudo = trafilatura.extract(html)
+        # Los parámetros van EXPLÍCITOS, incluso los que hoy coinciden con el
+        # default. La lección de este bug no fue el valor de uno sino que un
+        # default decidiera qué guardamos sin que nadie lo eligiera: `extract`
+        # traía `include_comments=True`, así que los comentarios de lectores
+        # podían entrar al cuerpo y persistirse como si fueran la nota. Escrito
+        # así, una versión nueva de trafilatura no puede cambiarlo en silencio.
+        #
+        # `include_tables=True` se mantiene a propósito: en una nota de
+        # economía o de elecciones la tabla es contenido, no maquetado.
+        #
+        # `favor_precision` queda en su default (False). Medido sobre 10
+        # artículos reales de Perfil: recorta un 2,3% del texto, y como los
+        # comentarios no estaban ahí, lo que saca es contenido o boilerplate
+        # que no sabemos distinguir. Riesgo sin beneficio demostrado.
+        crudo = trafilatura.extract(html, include_comments=False, include_tables=True)
     except Exception as error:
         logger.warning(f"trafilatura falló sobre {url}: {type(error).__name__}: {error}")
         return None
@@ -220,10 +258,29 @@ def extraer_varios(urls: Sequence[str]) -> Dict[str, Optional[str]]:
 
     Se devuelven también los `None` en vez de filtrarlos: quien llama necesita
     saber cuántas fallaron para contabilizarlas.
+
+    **Un artículo no puede llevarse el lote.** `extraer_articulo` promete no
+    propagar excepciones, pero hasta ahora esa promesa se sostenía por
+    vigilancia —cada operación riesgosa con su propio `try`— y ya se comprobó
+    que a una se le puede pasar: `permitido` levantaba ante una URL malformada.
+    El `try` de acá la vuelve estructural, con el mismo criterio con el que
+    `ingerir_feed` aísla un feed de los demás.
+
+    Se usa `logger.exception` y no `warning` a propósito: el riesgo de una red
+    así es tapar un bug propio —un `TypeError` de un refactor se leería como
+    "no se pudo extraer"—, y el traceback completo en el log es lo que evita
+    que sea silencioso.
     """
     resultados: Dict[str, Optional[str]] = {}
     for numero, url in enumerate(urls):
         if numero:
             time.sleep(settings.EXTRACCION_PAUSA_SEGUNDOS)
-        resultados[url] = extraer_articulo(url)
+        try:
+            resultados[url] = extraer_articulo(url)
+        except Exception as error:
+            logger.exception(
+                f"Excepción inesperada extrayendo {url}, se cuenta como fallida "
+                f"({type(error).__name__}: {error})"
+            )
+            resultados[url] = None
     return resultados

@@ -4,6 +4,7 @@ Tests de la segunda vía de ingesta (extracción del cuerpo desde la URL).
 Se mockea `_descargar_pagina`, que es la frontera con la red — mismo patrón
 que `test_ingestion.py` con `_descargar_feed`. Ningún test sale a internet.
 """
+import logging
 from unittest.mock import patch
 
 import httpx
@@ -198,6 +199,54 @@ class TestExtraerArticulo:
              patch.object(extraccion.time, "sleep"):
             assert extraer_articulo("https://medio.test/nota") is None
 
+    @pytest.mark.parametrize(
+        "url, donde",
+        [
+            ("http://[::1/nota", "urlparse, el primero"),
+            # Sobrevive al primer urlparse y revienta adentro de can_fetch, que
+            # hace urlparse(unquote(url)). Es la vía que casi se nos pasa.
+            ("https://medio.test%5B/nota", "can_fetch, al decodificar"),
+        ],
+    )
+    def test_una_url_malformada_no_escapa_por_permitido(self, robots_ok, url, donde):
+        """
+        El agujero que tenía el contrato: `permitido` corría fuera de todo
+        `try`, así que una URL malformada propagaba `ValueError` hasta el
+        `except` de `ingerir_feed` -- rollback del feed, mail de alerta y un
+        `feeds_fallados`. Un artículo con la URL rota se contabilizaba y se
+        alertaba como el medio entero caído.
+        """
+        assert extraer_articulo(url) is None, donde
+
+    def test_los_comentarios_de_lectores_no_entran_al_cuerpo(self, robots_ok):
+        """
+        `trafilatura.extract` trae `include_comments=True` por default, así que
+        durante toda la etapa 2 los comentarios de lectores podían entrar al
+        cuerpo y persistirse como si fueran la nota — contaminando el embedding,
+        el TF-IDF, el NER y el prompt de síntesis. El piso de caracteres no lo
+        detecta: caza cuerpos cortos, y esto los hace más largos.
+
+        **No se mockea `trafilatura`**: el HTML lleva un bloque de comentarios
+        de verdad y la biblioteca corre en serio. Así el test también avisa si
+        una versión nueva cambia el comportamiento, que es el modo de falla que
+        lo produjo. Verificado que el HTML distingue: con el default el
+        comentario entra, sin él no.
+        """
+        cuerpo = "Este es el cuerpo real de la nota periodística. " * 15
+        html = f"""<html><body>
+        <article><h1>Titular</h1><p>{cuerpo}</p></article>
+        <div id="comments" class="comments">
+          <div class="comment"><p>PEPITO123 dice: qué barbaridad, no lo puedo creer.</p></div>
+        </div>
+        </body></html>"""
+
+        with patch.object(extraccion, "_descargar_pagina", return_value=html):
+            texto = extraer_articulo("https://medio.test/nota")
+
+        assert texto is not None
+        assert "PEPITO123" not in texto
+        assert "cuerpo real de la nota" in texto
+
     def test_una_excepcion_de_trafilatura_tampoco_escapa(self, robots_ok):
         with patch.object(extraccion, "_descargar_pagina", return_value="<html/>"), \
              patch.object(
@@ -265,3 +314,30 @@ class TestExtraerVarios:
             extraer_varios(["https://m.test/a"])
 
         dormir.assert_not_called()
+
+    def test_un_articulo_que_revienta_no_se_lleva_el_lote(self, robots_ok, caplog):
+        """
+        La red del batch. `extraer_articulo` promete no propagar excepciones,
+        pero esa promesa se sostenía por vigilancia y ya se comprobó que a una
+        operación se le puede pasar. Sin este aislamiento, un artículo raro se
+        lleva puestos los otros 46 del ciclo -- y encima como "feed caído".
+
+        Se verifica además que **no sea silencioso**: el riesgo de una red así
+        es tapar un bug propio, y el traceback en el log es lo que lo evita.
+        """
+        urls = ["https://m.test/a", "https://m.test/b", "https://m.test/c"]
+        with patch.object(
+            extraccion,
+            "extraer_articulo",
+            side_effect=[CUERPO_LARGO, TypeError("un bug nuestro"), CUERPO_LARGO],
+        ), patch.object(extraccion.time, "sleep"), caplog.at_level(logging.ERROR):
+            resultado = extraer_varios(urls)
+
+        assert list(resultado) == urls
+        assert resultado["https://m.test/b"] is None
+        # Las otras dos sobreviven: es todo el punto del aislamiento.
+        assert resultado["https://m.test/a"] == CUERPO_LARGO
+        assert resultado["https://m.test/c"] == CUERPO_LARGO
+
+        assert "TypeError" in caplog.text
+        assert "Traceback" in caplog.text

@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: Optional[str] = None
     ALERT_EMAIL_TO: Optional[str] = None
 
+    # Segundos que se espera al servidor SMTP. **Sin esto el default de
+    # `smtplib` es bloquear indefinidamente** (`socket.getdefaulttimeout()` es
+    # `None`), y `enviar_alerta` se llama desde el hilo del job en cinco
+    # lugares: un servidor colgado deja el pipeline trabado para siempre, con
+    # `max_instances=1` salteando todos los ciclos siguientes y sin más
+    # recuperación que reiniciar el proceso. O sea que el avisador, cuyo
+    # trabajo es que los fallos se vean, pasaba a ser lo que mata la corrida
+    # en silencio.
+    #
+    # OJO: acota **cada operación de socket**, no la sesión entera. Con las
+    # cuatro del envío (connect, starttls, login, send) el peor caso es ~4x
+    # este valor, no este valor. Contra un ciclo de 900 s sigue siendo chico.
+    # Gmail responde en 1-3 s, así que 10 deja margen de sobra.
+    SMTP_TIMEOUT_SEGUNDOS: float = 10.0
+
     # Tiempo mínimo entre dos avisos del mismo problema. Un fallo permanente
     # dispararía 96 mails por día al intervalo de 15 minutos del scheduler, y a
     # partir del tercero ya nadie los lee.
@@ -98,10 +113,35 @@ class Settings(BaseSettings):
     # positivo— y se sacó igual, porque "signos de recuperación" es español
     # corriente y el riesgo no compensa. Las notas sueltas que se escapen no
     # llegan a formar cluster: les falta el segundo medio.
+    # "opinion" va ANCLADO a segmento de URL y no como palabra suelta. Medido
+    # sobre las 4.532 noticias reales: `opinion` a secas caza 30 y el patrón
+    # anclado 29; la que sobra es un falso positivo genuino de Paparazzi ("la
+    # letal opinión de Yanina Latorre..."), que no es una columna.
+    #
+    # Aporte de cada rama, medido: `/opinion/` 29 · `/columnistas/` 56 (El
+    # Cronista) · `/editoriales?/` 4 (La Nación) · `/modo-fontevecchia/` 1.
+    #
+    # La rama `-` aporta UNA sola nota —`/economia/opinion-los-municipios...`
+    # de La Nación, cuyo título arranca con "Opinión."— y se mantiene a
+    # sabiendas de que es la más floja: no hay regex que la distinga de un
+    # titular de noticia que empiece con "opinión dividida sobre...". Se
+    # conserva por la asimetría de los errores. Un falso positivo deja la nota
+    # sin agrupar pero **guardada y buscable**; un falso negativo mete una
+    # columna al agrupamiento y termina con la síntesis comparando una opinión
+    # contra crónicas, que es justo lo que este filtro existe para evitar.
+    #
+    # Quedan AFUERA por cero coincidencias medidas: `/opiniones/`, `/analisis/`,
+    # `/columnistas-invitados/`, `/tribuna/`, `/firmas/` y `/opinión/` con
+    # tilde. Mismo criterio que sacó `signos` de acá: no se agrega lo que no
+    # tiene beneficio medido, aunque parezca inofensivo.
     CATEGORIAS_NO_EVENTO: Dict[str, str] = {
         "horoscopo": r"horoscopo|zodiaco|zodiacal|astrolog",
         "recetas": r"receta",
         "juegos": r"loteria|quiniela",
+        # OJO con `(?:es)?`: escrito `editoriales?` el opcional cae sobre la
+        # `s` sola y el patrón pasa a exigir "editoriale", así que `/editorial/`
+        # en singular no matchearía. Lo encontró un test.
+        "opinion": r"/opinion[/-]|/columnistas/|/editorial(?:es)?/|/modo-fontevecchia/",
     }
 
     # --- Preproceso de evidencia para la síntesis (Fase 4) ---

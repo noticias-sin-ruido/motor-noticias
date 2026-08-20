@@ -3,6 +3,7 @@ Tests del servicio de ingesta: parseo de feed, limpieza de HTML, filtro de
 notas en vivo, deduplicación por guid y manejo de fallos de red.
 """
 import logging
+import urllib.robotparser
 from datetime import datetime
 from unittest.mock import patch
 
@@ -11,7 +12,7 @@ import pytest
 from sqlmodel import Session, select
 
 from src.models import Medio, Noticia
-from src.services import ingestion
+from src.services import extraccion, ingestion
 from tests.conftest import contar_queries
 
 FEED_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -324,7 +325,7 @@ class TestDeduplicacionNoEscala:
                 stats_pocos = ingestion.ingerir_medio(session, medio)
         assert stats_pocos == {"medio": medio.nombre, "feeds": 1, "feeds_fallados": 0,
                                 "nuevas": 0, "duplicadas": 3, "en_vivo": 0,
-                                "sin_contenido": 0, "extraidas": 0,
+                                "sin_contenido": 0, "url_invalida": 0, "extraidas": 0,
                                 "extraccion_fallida": 0, "errores": []}
 
         self._precargar(session, medio, 40, "muchos")
@@ -706,3 +707,172 @@ class TestExtraccionPorUrl:
         extraer.assert_not_called()
         assert stats["sin_contenido"] == 3
         assert stats["nuevas"] == 0
+
+
+class TestUrlUtilizable:
+    """
+    La validación de la URL en el borde.
+
+    `Noticia(...)` se instancia en un solo punto de todo `src/`, así que este es
+    el único lugar por el que una URL entra al motor. Validarla acá cubre de una
+    a `extraccion.permitido`, `topicos.topico_declarado`,
+    `categorias.categoria_no_evento` y el payload que va al back-end.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://medio.test/nota",
+            "http://medio.test/seccion/nota-con-guiones",
+            "https://medio.test/nota?utm_source=rss&x=1",
+            "https://medio.test/nota#fragmento",
+            # Percent-encoding legítimo en la ruta: no toca el dominio.
+            "https://medio.test/nota%20con%20espacios",
+        ],
+    )
+    def test_acepta_las_urls_que_los_medios_emiten(self, url):
+        assert ingestion.url_utilizable(url) is True
+
+    @pytest.mark.parametrize(
+        "url, motivo",
+        [
+            ("http://[::1/nota", "IPv6 sin cerrar: urlparse levanta ValueError"),
+            # Pasa el primer urlparse (netloc='medio.test%5B') y revienta al
+            # decodificarla, que es lo que hace can_fetch puertas adentro.
+            ("https://medio.test%5B/nota", "corchete percent-encoded en el dominio"),
+            ("/nota/relativa", "relativa: no se puede pedir ni entregar"),
+            ("medio.test/nota", "sin esquema"),
+            ("", "vacía"),
+        ],
+    )
+    def test_descarta_las_que_no_sirven(self, url, motivo):
+        assert ingestion.url_utilizable(url) is False, motivo
+
+    def test_el_item_con_url_invalida_no_llega_a_la_base(
+        self, session: Session, medio: Medio
+    ):
+        """
+        Lo que importa río abajo: el item se descarta y **se cuenta aparte**.
+        Mezclarlo con `sin_contenido` falsearía el aviso de "ningún item traía
+        contenido", que compara ese contador contra el total del feed.
+        """
+        feed = _feed_con_url_invalida()
+        with patch.object(ingestion, "_descargar_feed", return_value=feed):
+            stats = ingestion.ingerir_medio(session, medio)
+
+        assert stats["url_invalida"] == 1
+        assert stats["sin_contenido"] == 0
+        assert stats["nuevas"] == 1
+
+        urls = [
+            n.url
+            for n in session.exec(
+                select(Noticia).where(Noticia.medio_id == medio.id)
+            ).all()
+        ]
+        assert urls == ["https://test.com/nota-buena"]
+
+
+def _feed_con_url_invalida() -> str:
+    """Un feed con una nota sana y otra con el `<link>` malformado."""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+<item>
+  <title>Nota con URL sana</title>
+  <link>https://test.com/nota-buena</link>
+  <guid>guid-buena</guid>
+  <pubDate>Thu, 06 Aug 2026 10:00:00 GMT</pubDate>
+  <content:encoded><![CDATA[<p>Cuerpo de la nota sana.</p>]]></content:encoded>
+</item>
+<item>
+  <title>Nota con URL rota</title>
+  <link>http://[::1/nota-rota</link>
+  <guid>guid-rota</guid>
+  <pubDate>Thu, 06 Aug 2026 11:00:00 GMT</pubDate>
+  <content:encoded><![CDATA[<p>Cuerpo de la nota rota.</p>]]></content:encoded>
+</item>
+</channel>
+</rss>"""
+
+
+def _respuesta_robots(texto: str = "User-agent: *\nAllow: /\n") -> httpx.Response:
+    """Lo que devuelve el `httpx.get` del `robots.txt` en `extraccion`."""
+    return httpx.Response(
+        status_code=200, text=texto, request=httpx.Request("GET", "https://test.com/robots.txt")
+    )
+
+
+class TestVidaUtilDelRobotsTxt:
+    """
+    Cuánto dura un permiso leído.
+
+    La caché de `robots.txt` es un diccionario de módulo, así que sobrevive a
+    la corrida que la llenó: con el scheduler embebido, semanas. Por eso
+    `ingerir_todos_los_medios` la vacía al arrancar y la ata a la corrida.
+
+    Se prueba por **comportamiento y no por `assert mock.called`**: se envenena
+    la caché igual que lo haría una corrida anterior y se verifica que el
+    artículo se extraiga de todas formas. Sacar el vaciado hace fallar los dos.
+    """
+
+    def test_una_corrida_no_hereda_el_robots_cacheado_por_la_anterior(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        Un `None` cacheado es el rastro de una corrida donde no se pudo leer el
+        `robots.txt`. Si sobrevive, el medio deja de extraerse hasta el próximo
+        reinicio del proceso **y encima deja de avisar**: la caché corta antes
+        del `except` que manda el mail, así que sale un solo aviso y nunca más.
+        """
+        extraccion._robots["https://test.com"] = None
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(1)
+        ), patch.object(
+            extraccion.httpx, "get", return_value=_respuesta_robots()
+        ), patch.object(
+            extraccion, "_descargar_pagina", return_value="<html></html>"
+        ), patch.object(
+            extraccion.trafilatura, "extract", return_value=CUERPO_EXTRAIDO
+        ):
+            ingestion.ingerir_todos_los_medios(session)
+
+        noticia = session.exec(
+            select(Noticia).where(Noticia.medio_id == medio_extractor.id)
+        ).one()
+        # `.strip()` porque el cuerpo pasa por `normalizar` en el camino real.
+        assert noticia.contenido_limpio == CUERPO_EXTRAIDO.strip()
+
+    def test_un_disallow_nuevo_se_respeta_en_la_corrida_siguiente(
+        self, session: Session, medio_extractor: Medio
+    ):
+        """
+        El lado que importa para el permiso, no para la cobertura: si el medio
+        agrega un `Disallow` después de que lo leímos, la caché vieja nos
+        dejaría extrayendo con una autorización vencida. `extraer_por_url`
+        marca los medios donde vamos a buscar lo que no publicaron en el feed,
+        así que releer el permiso es parte del trato.
+        """
+        permisivo = urllib.robotparser.RobotFileParser()
+        permisivo.parse(["User-agent: *", "Allow: /"])
+        extraccion._robots["https://test.com"] = permisivo
+
+        with patch.object(
+            ingestion, "_descargar_feed", return_value=_feed_sin_cuerpo(1)
+        ), patch.object(
+            extraccion.httpx,
+            "get",
+            return_value=_respuesta_robots("User-agent: *\nDisallow: /\n"),
+        ), patch.object(
+            extraccion, "_descargar_pagina", return_value="<html></html>"
+        ), patch.object(
+            extraccion.trafilatura, "extract", return_value=CUERPO_EXTRAIDO
+        ):
+            stats = ingestion.ingerir_todos_los_medios(session)
+
+        assert stats[0]["extraidas"] == 0
+        assert stats[0]["nuevas"] == 0
+        assert not session.exec(
+            select(Noticia).where(Noticia.medio_id == medio_extractor.id)
+        ).all()

@@ -7,6 +7,7 @@ diseño detrás de cada paso.
 import logging
 from datetime import datetime
 from typing import Optional, Set, Tuple
+from urllib.parse import unquote, urlparse
 
 import feedparser
 import httpx
@@ -17,7 +18,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from ..tiempo import ahora_utc
 from ..models import Medio, Noticia
 from . import alerts
-from .extraccion import extraer_varios
+from .extraccion import extraer_varios, limpiar_cache_robots
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,45 @@ def _parsear_entry(
         "contenido_limpio": contenido_limpio,
         "fecha_publicacion": fecha_publicacion,
     }
+
+
+def url_utilizable(url: str) -> bool:
+    """
+    Si la URL sirve para todo lo que el motor va a hacer después con ella.
+
+    Se valida **una sola vez y acá**, porque acá es el único lugar por donde una
+    URL entra: `Noticia(...)` se instancia en un solo punto de todo `src/`. Río
+    abajo la usan `extraccion.permitido`, `topicos.topico_declarado` y
+    `categorias.categoria_no_evento`, ninguno de los cuales la valida ni tiene
+    por qué hacerlo, y además **viaja al back-end en el payload**: una URL rota
+    es salida rota se extraiga o no. Defender cada consumidor por separado es la
+    vigilancia que ya nos falló una vez -- ver change_logs.md, "URLs malformadas".
+
+    El criterio es el mínimo para que la URL sirva de algo. Medido contra las
+    4.532 noticias reales de la base: **cero rechazos**, así que no descarta
+    nada de lo que hoy funciona.
+
+    Una URL relativa (`/nota/123`, que emiten algunos feeds descuidados) sí se
+    descarta, y es lo correcto: no se puede pedir ni entregar. Resolverla contra
+    `Medio.url_base` sería una funcionalidad aparte, no un arreglo.
+    """
+    try:
+        partes = urlparse(url)
+        # `unquote` antes de parsear es lo que hace `RobotFileParser.can_fetch`,
+        # y no es una rareza suya: cualquiera que decodifique la URL pasa por
+        # acá. Una URL puede sobrevivir al parseo directo y romperse decodificada
+        # -- `https://x.com%5B/nota` es válida hasta que el `%5B` vuelve a ser
+        # `[` y el dominio queda con un corchete sin cerrar.
+        urlparse(unquote(url))
+    except ValueError as error:
+        logger.warning(f"URL malformada, se descarta el item: {url!r} ({error})")
+        return False
+
+    if not partes.scheme or not partes.netloc:
+        logger.warning(f"URL sin esquema o dominio, se descarta el item: {url!r}")
+        return False
+
+    return True
 
 
 def enviar_alerta(medio: Medio, feed_url: str, error: Exception) -> None:
@@ -223,6 +263,13 @@ def _seleccionar_nuevas(
             # (ej. horóscopos, cables de agencia) que no trae cuerpo completo.
             stats["sin_contenido"] += 1
             sin_contenido_aca += 1
+            continue
+
+        # Contador propio y no `sin_contenido`: son descartes por motivos
+        # distintos, y mezclarlos además falsearía el aviso de más abajo, que
+        # compara `sin_contenido_aca` contra el total de items del feed.
+        if not url_utilizable(datos["url"]):
+            stats["url_invalida"] += 1
             continue
 
         if es_en_vivo(datos["titulo"]):
@@ -393,6 +440,10 @@ def ingerir_medio(session: Session, medio: Medio) -> dict:
         "duplicadas": 0,
         "en_vivo": 0,
         "sin_contenido": 0,
+        # Items cuyo `<link>` no sirve para nada de lo que viene después. Es
+        # su propio contador porque un feed que empiece a emitirlos es un
+        # problema del feed, no falta de contenido -- ver `url_utilizable`.
+        "url_invalida": 0,
         # Solo se mueven en los medios con `extraer_por_url`. Ahí `sin_contenido`
         # deja de contar los items sin `content:encoded` —son candidatos, no
         # descartes— y su señal pasa a vivir en estas dos.
@@ -411,6 +462,28 @@ def ingerir_medio(session: Session, medio: Medio) -> dict:
 
 
 def ingerir_todos_los_medios(session: Session) -> list[dict]:
-    """Corre el pipeline de ingesta para todos los medios activos."""
+    """
+    Corre el pipeline de ingesta para todos los medios activos.
+
+    **Arranca vaciando la caché de `robots.txt`**, y eso no es limpieza: es lo
+    que le fija la vida útil a un permiso leído. La caché existe para no pedir
+    el archivo una vez por artículo, pero es un diccionario de módulo, así que
+    sin este vaciado dura lo que dure el proceso —con el scheduler embebido,
+    semanas—. Dos consecuencias, las dos malas:
+
+    - Un fallo de red puntual queda cacheado como `None` para siempre y el
+      medio deja de extraerse hasta el próximo reinicio, en silencio: el
+      `except` que avisa ni se vuelve a ejecutar, porque la caché corta antes.
+    - Si el medio agrega un `Disallow` mañana, no nos enteramos nunca. Seguir
+      extrayendo con un permiso leído hace semanas es justo lo que este motor
+      no puede hacer, porque `extraer_por_url` marca los medios donde vamos a
+      buscar lo que el medio no publicó en su feed.
+
+    Vaciarla acá ata el permiso a la corrida: se relee una vez por medio y por
+    ciclo. **Ese es el costo por medio que hay que tener presente al sumar
+    medios** — ver specs/tech_stack.md, "Puntos de quiebre".
+    """
+    limpiar_cache_robots()
+
     medios_activos = session.exec(select(Medio).where(Medio.activo.is_(True))).all()
     return [ingerir_medio(session, medio) for medio in medios_activos]

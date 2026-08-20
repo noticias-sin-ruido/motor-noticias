@@ -584,8 +584,8 @@ def llamar_modelo(prompt: str) -> RespuestaSintesis:
     Con `response_schema` la salida es JSON válido por construcción, así que casi
     toda la familia de fallos de formato desaparece de raíz. Los reintentos con
     espera creciente cubren el rate limit, que es esperable: en una corrida se
-    sintetizan todos los clusters publicables de una (medido: 21) y la capa
-    gratuita limita por minuto.
+    sintetizan todos los clusters publicables de una (medido: 21) y el
+    proveedor limita por minuto.
 
     El bloqueo por filtros de contenido no se reintenta: la misma entrada da el
     mismo bloqueo.
