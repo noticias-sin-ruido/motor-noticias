@@ -2047,3 +2047,46 @@ Prometía respetar la fila *"si el operador la editó — otro modelo, otra temp
 El barrido corría **antes** del corte por `sin_modelo`, así que una instalación recién migrada iba marcando clusters como caducados y a las 72 h avisaba *"el plazo quedó corto, subilo"*. La causa no era el plazo. Ahora se corta antes de barrer.
 
 Al moverlo apareció una trampa de SQLAlchemy que vale anotar: **`expunge` sobre un objeto ya expirado lo desprende sin valores**, así que el primer acceso tira `DetachedInstanceError` en vez de recargar. El barrido commitea, y `expire_on_commit` está en `True`. El `expunge` tiene que ir antes de cualquier cosa que commitee, no solo antes del bucle.
+
+### Corrida completa contra el back-end tras la etapa 4 (21/08/2026)
+
+Pipeline entero por los endpoints reales, con el back-end levantado. **16 de 16 entregadas, cero rechazos.**
+
+| Paso | Segundos | % del total | Resultado |
+|---|---:|---:|---|
+| `/ingest` | 71,08 | 37,5% | 36 nuevas de El Cronista, 311 pendientes de vectorizar |
+| `/vectorize` | 10,86 | 5,7% | 311/311 |
+| `/cluster` | 1,58 | 0,8% | 37 cerrados, 22 clusters nuevos, 0 fusiones |
+| `/synthesize` | 102,27 | 54,0% | 17 clusters, 16 ángulos creados, 8 descartados, **0 fallidos** |
+| `/deliver` | 3,65 | 1,9% | 16/16, 0 rechazadas |
+| **TOTAL** | **189,44** | | **21% del ciclo de 15 min** |
+
+La síntesis sigue siendo el paso más caro (54%), consistente con lo medido en la etapa 4 del punto 1. La corrida anterior con la que se puede comparar usó el 46% del ciclo; ésta el 21%, pero con menos backlog de síntesis, así que **no son comparables directamente**: lo que fija el trabajo de síntesis es cuántos clusters publicables hay, no el código.
+
+#### Lo que esta corrida existía para verificar
+
+- **Sin modelo activo la síntesis no corre y lo dice**: `POST /synthesize` devolvió `sin_modelo: true` en 0,02 s, sin tocar ningún cluster y sin un solo traceback.
+- **Activar sondea de verdad**: el `PATCH ?activo=true` tardó **8,33 s** —el costo real de una llamada al proveedor— y devolvió *"responde y respeta el esquema vía `response_format`"*. Ese es el precio de que un 401 aparezca con el botón apretado y no quince minutos después.
+- **`GET /modelos` no publica `api_key_env` ni `base_url`**, verificado sobre la respuesta real.
+- **Toda síntesis nueva queda atribuida**: las 16 llevan `modelo_usado='gemini-por-defecto'`. Las 296 anteriores mantienen `NULL`, que sigue significando "anteriores a la columna" — no se rellenaron hacia atrás.
+- **El fallback de credencial funciona**: `MODELO_API_KEY` no está en ese `.env` y la síntesis corrió igual leyendo `GEMINI_API_KEY`.
+
+#### Lo que la corrida encontró, y que ningún test podía encontrar
+
+**19 avisos idénticos del fallback en una sola corrida** — uno por cluster sintetizado, más el sondeo, más cada `GET /modelos`. A 96 corridas por día son unas **1.800 líneas iguales**.
+
+El argumento original era correcto —un fallback silencioso es indistinguible de una configuración correcta— pero la frecuencia estaba mal: a ese volumen el aviso deja de ser visibilidad y pasa a ser ruido que uno aprende a filtrar, y filtrado no avisa nada.
+
+Pasó a **una vez por proceso**, que conserva lo que importa: aparece en cada arranque, o sea después de cada deploy, que es cuando hay alguien mirando.
+
+Vale anotar el patrón: este defecto no era detectable por tests unitarios —cada llamada era correcta por separado— sino solo mirando el log de una corrida real. Es el mismo tipo de hallazgo que el `_llamar_gemini` sin timeout: emerge del volumen, no de la lógica.
+
+#### Un cabo suelto de la misma familia, encontrado al explicar la corrida
+
+Preguntando por qué la corrida había funcionado sin `MODELO_API_KEY` —la respuesta es el fallback a `GEMINI_API_KEY`— salió a la luz qué pasaría el día que esa vía no esté: **`SintesisSinConfigurar` caía en el `except Exception` genérico** de `sintetizar_pendientes`.
+
+O sea, 17 clusters, 17 tracebacks y 17 "fallidos" para una sola causa. Es exactamente el diagnóstico engañoso que la etapa 4 había corregido para el caso *"no hay ninguna fila activa"*, y que se le había escapado al caso *"la fila está pero no tiene con qué autenticarse"* — que llega por un camino distinto (una excepción desde adentro del bucle, no un chequeo previo).
+
+Ahora corta la corrida y lo dice una sola vez. Los clusters quedan sin marca, así que entran en carrera solos cuando la configuración esté.
+
+`stats` distingue las dos formas de "el motor no está configurado", porque se arreglan distinto: `sin_modelo` es que nadie eligió proveedor, `sin_credencial` es que el elegido no tiene credencial. **Ninguna de las dos cuenta como cluster fallido**, que es el punto.

@@ -918,7 +918,12 @@ def sintetizar_pendientes(session: Session) -> dict:
         "descartados": 0,
         "bloqueados": 0,
         "fallidos": 0,
+        # Las dos formas de "el motor no está configurado para sintetizar", que
+        # se distinguen porque se arreglan distinto: `sin_modelo` es que nadie
+        # eligió proveedor, `sin_credencial` es que el elegido no tiene con qué
+        # autenticarse. Ninguna de las dos cuenta como cluster fallido.
         "sin_modelo": False,
+        "sin_credencial": False,
     }
 
     # **Se corta acá y no cluster por cluster.** Sin modelo no hay síntesis
@@ -973,6 +978,30 @@ def sintetizar_pendientes(session: Session) -> dict:
             stats["bloqueados"] += 1
             logger.warning(f"Cluster {cluster.id} bloqueado por el proveedor: {error}")
             continue
+        except SintesisSinConfigurar as error:
+            # **Corta la corrida entera, no solo este cluster**, por el mismo
+            # motivo que el chequeo de modelo activo de más arriba: una
+            # credencial que falta o un adaptador que no existe no se arreglan
+            # entre un cluster y el siguiente.
+            #
+            # Sin esta rama caía en el `except` genérico de abajo: 17 clusters,
+            # 17 tracebacks y 17 "fallidos" para una sola causa — que apunta a
+            # un problema con los clusters cuando el problema es la
+            # configuración del motor. Es el mismo diagnóstico engañoso que ya
+            # se había corregido para el caso "no hay ninguna fila activa", y
+            # que se le escapaba al caso "la fila está pero no tiene con qué
+            # autenticarse".
+            #
+            # Los clusters quedan sin marca, así que entran en carrera solos en
+            # la corrida siguiente.
+            session.rollback()
+            stats["sin_credencial"] = True
+            logger.error(
+                f"Se corta la síntesis: {error}. Los {len(pendientes)} clusters "
+                f"pendientes quedan intactos y se reintentan solos cuando la "
+                f"configuración esté."
+            )
+            break
         except Exception as error:
             session.rollback()
             stats["fallidos"] += 1

@@ -123,22 +123,41 @@ def _del_entorno(nombre: str) -> Optional[str]:
     return dotenv_values(".env").get(nombre)
 
 
+# Si ya se avisó del fallback en este proceso. Ver `_heredada`.
+_ya_se_aviso = False
+
+
 def _heredada() -> Optional[str]:
     """
     La credencial vieja de Gemini, si es que está y la nueva no.
 
-    Existe para que actualizar no rompa: ver `VARIABLE_HEREDADA`. Avisa cada vez
-    porque un fallback silencioso es indistinguible de una configuración
-    correcta, y entonces nadie migra nunca.
+    Existe para que actualizar no rompa: ver `VARIABLE_HEREDADA`.
+
+    **Avisa una vez por proceso, no una por lectura.** La primera versión
+    avisaba siempre, con el argumento de que un fallback silencioso es
+    indistinguible de una configuración correcta. El argumento sigue en pie,
+    pero la frecuencia estaba mal: medido en una corrida real, **19 avisos
+    idénticos** —uno por cluster sintetizado, más el sondeo, más cada
+    `GET /modelos`—, que a 96 corridas por día son unas 1.800 líneas iguales.
+    Eso no es visibilidad, es ruido que uno aprende a filtrar, y filtrado no
+    avisa nada.
+
+    Una vez por proceso conserva lo que importa: aparece en cada arranque, o sea
+    después de cada deploy, que es cuando alguien está mirando.
     """
+    global _ya_se_aviso
+
     valor = _del_entorno(VARIABLE_HEREDADA)
     if valor and not valor.startswith("tu_"):
-        logger.warning(
-            f"Usando {VARIABLE_HEREDADA} porque {VARIABLE_UNICA} no está "
-            f"definida. Es compatibilidad temporal: renombrá la variable en tu "
-            f"`.env`, que ahora la credencial es una sola para el proveedor que "
-            f"uses, sea cual sea."
-        )
+        if not _ya_se_aviso:
+            _ya_se_aviso = True
+            logger.warning(
+                f"Usando {VARIABLE_HEREDADA} porque {VARIABLE_UNICA} no está "
+                f"definida. Es compatibilidad temporal: renombrá la variable en "
+                f"tu `.env`, que ahora la credencial es una sola para el "
+                f"proveedor que uses, sea cual sea. (Este aviso sale una vez "
+                f"por arranque.)"
+            )
         return valor
     return None
 

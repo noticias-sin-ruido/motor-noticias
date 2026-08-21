@@ -1126,7 +1126,7 @@ class TestManejoDeFallos:
             "vencidos_sin_publicar": 0,
             "pendientes": 2, "sintetizados": 1, "creados": 1,
             "actualizados": 0, "descartados": 0, "bloqueados": 0, "fallidos": 1,
-            "sin_modelo": False,
+            "sin_modelo": False, "sin_credencial": False,
         }
 
     def test_el_cluster_que_fallo_se_reintenta(self, session: Session, medios):
@@ -1244,6 +1244,38 @@ class TestLlamarModelo:
         assert stats["fallidos"] == 0, "no son clusters fallidos, es falta de config"
         assert stats["sintetizados"] == 0
         construir.assert_not_called()
+
+    def test_sin_credencial_corta_la_corrida_en_vez_de_fallar_cluster_por_cluster(
+        self, session: Session, medios
+    ):
+        """
+        Una credencial que falta no se arregla entre un cluster y el siguiente.
+
+        Sin la rama que corta, esto caía en el `except Exception` genérico: un
+        traceback y un "fallido" **por cada cluster**, para una sola causa. Ese
+        conteo apunta a un problema con los clusters cuando el problema es la
+        configuración del motor — el mismo diagnóstico engañoso que ya se había
+        corregido para "no hay ninguna fila activa".
+        """
+        for i in range(4):
+            cluster = crear_cluster(session)
+            crear_noticia(session, medios[0], i * 2 + 1, cluster)
+            crear_noticia(session, medios[1], i * 2 + 2, cluster)
+
+        falla = synthesis.SintesisSinConfigurar("falta MODELO_API_KEY")
+        with patch.object(synthesis, "llamar_modelo", side_effect=falla) as llamar:
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["sin_credencial"] is True
+        assert stats["fallidos"] == 0, "no son clusters fallidos, es falta de credencial"
+        assert llamar.call_count == 1, (
+            f"se intentaron {llamar.call_count} clusters con la misma credencial "
+            f"que ya se sabe que falta"
+        )
+
+        # Y quedan en carrera: la marca solo se escribe cuando la síntesis se
+        # persiste, así que la corrida siguiente los retoma sola.
+        assert len(synthesis.clusters_pendientes(session)) == 4
 
     def test_sin_modelo_no_caduca_clusters_ni_culpa_al_plazo(
         self, session: Session, medios
