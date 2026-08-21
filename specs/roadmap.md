@@ -197,9 +197,9 @@ Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
 - **La credencial es una sola variable, `MODELO_API_KEY`.** Cambiar de proveedor es cambiar su valor, no agregar otra. Tener dos proveedores vivos a la vez es el punto 6-bis. Como el nombre ya no distingue proveedores, **activar un modelo sondea contra él** en vez de mirar el entorno.
 - **`POST /modelos` no es un CRUD**: sondea antes de aceptar y descubre solo cómo pedirle estructura al proveedor. Medido: la capa de compatibilidad de Anthropic responde 200 e **ignora `response_format` en silencio**.
 
-> ⚠️ **Los tres endpoints de `/modelos` no tienen autenticación**, como el resto de la API, y son los primeros que aceptan una URL arbitraria para que el motor la llame. Hay puesto: enum cerrado de adaptadores, prefijo obligatorio para `api_key_env`, validación de `base_url` (solo http/https, sin credenciales embebidas, sin link-local), respuestas que no publican `api_key_env` ni `base_url`, y errores que no reflejan el cuerpo del proveedor.
+> ⚠️ **Los tres endpoints de `/modelos` son los primeros que aceptan una URL arbitraria para que el motor la llame.** Además de la autenticación del punto 10, hay puesto: enum cerrado de adaptadores, prefijo obligatorio para `api_key_env`, validación de `base_url` (solo http/https, sin credenciales embebidas, sin link-local), respuestas que no publican `api_key_env` ni `base_url`, y errores que no reflejan el cuerpo del proveedor.
 >
-> **Nada de eso reemplaza la autenticación.** Quien pueda hacer POST puede apuntar `base_url` a su propio servidor con un `api_key_env` válido y quedarse con la key de IA del operador. Hasta que exista auth —punto 9—, esto se despliega en una red donde solo llega el operador.
+> **Nada de eso reemplaza la autenticación**, que llegó en el punto 10: con `API_TOKEN` definido, estos endpoints la exigen. **Sin token la API queda abierta a propósito** —es la elección de quien despliega— y ahí sigue valiendo que quien pueda hacer POST puede apuntar `base_url` a su propio servidor y quedarse con la key de IA del operador.
 
 ### 3. El alta de medios la hace el operador, no el repo
 
@@ -222,7 +222,7 @@ Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí 
 
 1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
 2. **Migración**: la instancia que corre hoy tiene seis medios cargados. Sacar el seed no puede dejarla vacía.
-3. **Seguridad**: sería el primer endpoint que hace que el motor **busque una URL arbitraria a pedido de quien llame**, y hoy la API no tiene autenticación en ninguno de sus once endpoints. Un alta abierta es un vector de SSRF y de uso del motor como proxy hacia terceros. Necesita autenticación y validación del destino desde el diseño, no después.
+3. **Seguridad**: hace que el motor **busque una URL arbitraria a pedido de quien llame**, o sea SSRF y uso del motor como proxy hacia terceros. **La autenticación ya está** (punto 10), así que lo que queda es la validación del destino, que se diseña con el endpoint y no después. El patrón está hecho en `proveedores/base.validar_base_url`, pero acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida: hay que revisarlo, no copiarlo.
 
 **Va después del punto 2**, por decisión del usuario.
 
@@ -282,6 +282,41 @@ Hoy `ALERT_EMAIL_TO` es una variable de entorno única: quien despliegue el moto
 
 **Los cuidados, que acá pesan más que en otros puntos**:
 
-- **La API no tiene autenticación en ninguno de sus endpoints.** Un endpoint que cambie el destino de las alertas deja que cualquiera **desvíe los avisos** —y quien los desvía, los apaga— o **los apunte a un tercero**, convirtiendo al motor en un emisor de mails no solicitados con nuestras credenciales SMTP. Es el mismo problema de fondo que el SSRF del punto 3 y probablemente se resuelvan juntos.
+- **La autenticación existe desde el punto 10, pero es opcional.** Un endpoint que cambie el destino de las alertas deja que cualquiera **desvíe los avisos** —y quien los desvía, los apaga— o **los apunte a un tercero**, convirtiendo al motor en un emisor de mails no solicitados con nuestras credenciales SMTP. En un despliegue sin `API_TOKEN` eso queda abierto, así que este endpoint es candidato a exigir token **siempre**, y no solo cuando el operador lo activó.
 - **Verificar la dirección antes de usarla**, o un typo silencia las alertas sin que nadie se entere hasta que algo se rompa y no llegue el aviso.
 - Conviene decidir a la vez si el destino es **uno o varios**, y si `SMTP_*` sigue siendo del repo o también pasa al operador: hoy las credenciales de envío y la casilla de destino están en el mismo lugar, y esto las separa.
+
+### 10. Token de operador para la API ✅ COMPLETO (21/08/2026)
+
+**Cerrado el 21/08/2026.** Estaba en tres lugares como prerrequisito y en ninguno como tarea: el punto 3 lo pedía "desde el diseño", el punto 9 decía que se resolvería junto con el 3, y los comentarios del código apuntaban a "el punto 9" — que es el mail de alertas. Una deuda sin acreedor.
+
+La confusión era de vocabulario. Lo que este roadmap difirió (arriba, en Fase 5) es **autenticación pública**: usuarios, roles, rate limiting — y eso sigue diferido, porque es un problema de tráfico que el proyecto no tiene. Lo que hacía falta es otra cosa y mucho más chica: **un token de operador**.
+
+**Qué se construyó.** `API_TOKEN` en el entorno; con la variable definida los once endpoints piden `Authorization: Bearer`, menos `GET /` (el healthcheck de Docker) y la documentación. Sin la variable la API queda abierta y el motor lo avisa en cada arranque.
+
+**Que sea opcional es la decisión de diseño**, no una concesión: el motor es software libre que otros despliegan, y cómo lo exponen es asunto suyo. Un solo interruptor, del lado del operador, sin comportamiento que dependa del entorno.
+
+**Lo que el inventario destapó**, y que ninguna nota anterior decía:
+
+- **`POST /synthesize` es un ataque financiero.** Cuesta plata por invocación, y el gasto en APIs es el límite duro del proyecto.
+- **`POST /ingest` es reputacional.** Hace que el motor golpee todos los feeds **con la IP y el User-Agent del operador**, contra medios cuyos términos de uso revisamos con cuidado.
+- **El `docker-compose.yml` contradecía la mitigación documentada**: ligaba `8000:8000`, o sea `0.0.0.0`. La nota decía "desplegala donde solo llegue el operador" mientras el archivo publicaba la API entera. Ahora liga a `127.0.0.1`.
+- **Nada externo consume esta API.** El back-end recibe por push y no hace polling, así que proteger todo no rompió ninguna integración — eso hizo la decisión barata.
+
+**Lo que NO cubre**: no es TLS ni firewall. El token viaja en claro si la API se expone por HTTP sin proxy adelante.
+
+### 11. La URL del webhook la configura el operador, no el `.env`
+
+Hoy el destino de las síntesis vive en `settings.WEBHOOK_URL` ([webhook_delivery.py:239](../src/services/webhook_delivery.py#L239)), así que cambiarlo exige editar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2, 3 y 9 —cada operador con su modelo, su roster de medios y sus alertas— no, porque **el back-end también es suyo**.
+
+Es la misma forma que `modelo_ia`: una fila con la configuración, endpoints para verla y cambiarla, y la credencial —el `WEBHOOK_SECRET`— **quedándose en el entorno**, nunca en la base.
+
+**Pero es el más delicado de la familia, y por un motivo que no tienen los otros.** `POST /modelos` deja que alguien redirija una *credencial*; esto dejaría redirigir **el producto**: los cuerpos sintetizados, las comparativas por medio, todo lo que el motor genera. Y peor, **firmado**: el payload viaja con una firma HMAC válida, así que quien reciba una entrega desviada obtiene contenido que *parece legítimo* porque lo es.
+
+Tres cuidados que no se pueden saltear:
+
+1. **Exige token siempre**, no solo cuando el operador activó `API_TOKEN`. Es el mismo caso que el punto 9: un despliegue abierto no puede tener un endpoint que redirija su propia salida.
+2. **Validación del destino**, con el patrón de `proveedores/base.validar_base_url` pero más estricto: acá no hay caso de uso legítimo para un destino en la red interna.
+3. **Cambiar la URL no debería re-entregar lo ya entregado.** `enviado_backend` marca la síntesis, no el destino, así que apuntar a otro back-end lo deja con la base vacía y sin forma de pedir el histórico — hay que decidir si eso es lo correcto o si el cambio de destino resetea las marcas.
+
+**Va después del punto 3**, que comparte el diseño de "el operador configura por API" y es el que más valor entrega.

@@ -2144,3 +2144,52 @@ Vale anotar que el fallback cumplió su función de manual: existió para que un
 #### Y el aislamiento de los tests se generalizó
 
 El `chdir` a un temporal dejó de ser una fixture de la clase de credenciales y pasó a ser **autouse de todo el archivo**. El problema no era de esos tests en particular: `_del_entorno` lee `dotenv_values(".env")` relativo al directorio actual, así que **cualquier** test del archivo que llegue a esa función lee el `.env` de la máquina. Los dos que sí quieren un `.env` se crean el suyo en su propio `tmp_path`.
+
+---
+
+## Token de operador para la API (punto 10 del backlog, 21/08/2026)
+
+Salió de preguntarse si el punto 3 (alta de medios por el operador) podía arrancar. Resultó que no, y que el motivo estaba escrito en el propio roadmap sin que nadie lo hubiera juntado.
+
+### Una deuda sin acreedor
+
+Tres lugares pedían autenticación y **ninguno la tenía asignada**:
+
+- El punto 3: *"Necesita autenticación y validación del destino desde el diseño, no después"*
+- El punto 9: *"Es el mismo problema de fondo que el SSRF del punto 3 y probablemente se resuelvan juntos"*
+- El punto 2 y varios comentarios del código: *"hasta que exista auth —punto 9—"*… **y el punto 9 es el mail de alertas**
+
+Y la Fase 5 la dejaba explícitamente afuera: *"rate limiting de la API y autenticación pública no están en esta lista a propósito — son problemas de tráfico público que el proyecto todavía no tiene"*.
+
+**Ese razonamiento era correcto cuando se escribió y dejó de serlo con el punto 2.** Desde que existe `POST /modelos`, la API tiene un endpoint que busca una URL arbitraria a pedido de quien llame **y le entrega una credencial**. Eso no es un problema de volumen: existe con un solo visitante.
+
+**La confusión era de vocabulario.** Lo diferido es autenticación *pública* —usuarios, roles, rate limiting—, y eso sigue diferido con razón. Lo que hacía falta es otra cosa y mucho más chica: un token de operador. Conflatirlas es por qué quedó sin dueño.
+
+### El inventario, que era lo que faltaba
+
+Once endpoints, y **todos son del operador**: el back-end recibe las síntesis por push y no consulta nada, el frontend cuelga del back-end. Nada externo consume esta API, así que protegerla entera no rompe ninguna integración — eso hizo la decisión barata.
+
+Dos riesgos que ninguna nota anterior nombraba:
+
+- **`POST /synthesize` es un ataque financiero.** Cuesta plata por invocación, y el gasto en APIs es el límite duro del proyecto. Cualquiera podía vaciar la cuota.
+- **`POST /ingest` es reputacional.** Hace que el motor golpee todos los feeds **con la IP y el User-Agent del operador**, contra medios cuyos términos de uso se revisaron con cuidado. En loop es un mini-DDoS con identidad ajena.
+
+Y una contradicción concreta: **el `docker-compose.yml` ligaba `"8000:8000"`**, o sea `0.0.0.0`. La mitigación documentada decía *"desplegala en una red donde solo llegue el operador"* mientras el archivo que define el despliegue publicaba la API entera — y el pendiente operativo del roadmap es justamente elegir el VPS. Ahora liga a `127.0.0.1`.
+
+### El diseño, y por qué es tan chico
+
+**`API_TOKEN` definido → se exige. Sin definir → la API queda abierta y el motor lo avisa al arrancar.** Una sola regla, sin comportamiento que dependa del entorno.
+
+Se evaluó un tercer modo —abierto en `development`, cerrado en `production`— y **se descartó por decisión del usuario**: el motor es software libre que otros despliegan, así que cómo se expone tiene que ser elección de quien lo corre, no del repo. Un interruptor, de su lado.
+
+Tres decisiones menores que valen escribirse:
+
+- **La puerta se declara en el `app`, no en cada ruta.** Un endpoint que se agregue mañana nace protegido en vez de nacer abierto hasta que alguien se acuerde del decorador. La excepción vive en un solo lugar (`auth.RUTAS_ABIERTAS`).
+- **`GET /` queda abierto porque lo llama el `HEALTHCHECK` del Dockerfile** desde adentro del contenedor. Pedirle token lo rompería, o forzaría a meter la credencial en el `Dockerfile`. La documentación también, porque expone la forma y no los datos.
+- **`hmac.compare_digest` y no `==`.** La comparación de strings de Python corta en el primer byte distinto, así que el tiempo de respuesta filtra cuántos caracteres acertó quien prueba. Como ningún test de comportamiento puede distinguir las dos —dan el mismo 401—, la guarda mira el código fuente.
+
+### Verificado, no supuesto
+
+Contra un servidor real: `/` y `/docs` responden 200 sin token, `/modelos` y `/clusters` dan 401, y con el token correcto pasan. Las 6 mutaciones sobre la puerta caen.
+
+Y una que salió de probar: **la puerta corre antes que la validación de FastAPI.** Un pedido mal formado y sin token da 401, no 422 — si fuera al revés, un anónimo podría sondear qué campos existen y qué rangos aceptan. Depende de un detalle del orden de resolución de dependencias, así que quedó con test propio.

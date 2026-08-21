@@ -9,12 +9,13 @@ from apscheduler.events import (
     EVENT_JOB_MISSED,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from .auth import RUTAS_ABIERTAS, avisar_si_esta_abierta, exigir_token
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .models import Adaptador, ModeloIA
@@ -247,6 +248,7 @@ async def lifespan(app: FastAPI):
     # Startup: habilita la extensión pgvector, crea las tablas si no existen,
     # y arranca el scheduler embebido (ver CLAUDE.md, Fase 2 -- "Scheduler").
     init_db()
+    avisar_si_esta_abierta()
     scheduler.add_job(
         _job_ingesta_programada,
         "interval",
@@ -266,6 +268,18 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown.
     scheduler.shutdown()
+
+
+def _puerta(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
+    """
+    La comprobación de token que corre antes de cada endpoint.
+
+    Existe para saltear las rutas abiertas —la salud y la documentación— sin
+    tener que declarar la dependencia ruta por ruta. Ver `auth.py`.
+    """
+    if request.url.path in RUTAS_ABIERTAS:
+        return
+    exigir_token(authorization)
 
 
 app = FastAPI(
@@ -289,6 +303,13 @@ app = FastAPI(
         "url": "https://www.gnu.org/licenses/agpl-3.0.html",
     },
     lifespan=lifespan,
+    # **La puerta se pone acá y no en cada ruta**, y la diferencia importa: un
+    # endpoint que se agregue mañana nace protegido en vez de nacer abierto
+    # hasta que alguien se acuerde del decorador. El modo de fallo correcto para
+    # una lista de rutas que va a crecer es "protegido salvo que se diga lo
+    # contrario", y la excepción está escrita en un solo lugar
+    # (`auth.RUTAS_ABIERTAS`).
+    dependencies=[Depends(_puerta)],
 )
 
 

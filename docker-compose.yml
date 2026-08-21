@@ -32,7 +32,15 @@ services:
       # dentro de la red de compose la app resuelve "db", no localhost.
       DATABASE_URL: postgresql+psycopg://usuario:password@db:5432/sin_ruido
     ports:
-      - "8000:8000"
+      # **Solo loopback.** `"8000:8000"` liga a 0.0.0.0, así que en un VPS con
+      # IP pública publicaba la API entera a internet — y la API trae endpoints
+      # que gastan plata (`/synthesize`), que hacen al motor golpear los feeds
+      # con tu identidad (`/ingest`) y que le entregan la credencial de IA a un
+      # host arbitrario (`POST /modelos`).
+      #
+      # Para exponerla de verdad: definí `API_TOKEN` y poné un proxy con TLS
+      # adelante. Ver `src/auth.py`.
+      - "127.0.0.1:8000:8000"
     # alembic upgrade head antes de uvicorn, en el mismo comando en vez de un
     # service `migrate` aparte: es idempotente (no-op si ya está al día) y
     # falla rápido y ruidoso si la migración está rota -- el contenedor no

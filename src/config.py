@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
     ENVIRONMENT: str = "development"
 
+    # Token de operador para la API. **Opcional a propósito**: sin él la API
+    # queda abierta y el motor lo avisa al arrancar. Ver `src/auth.py` para el
+    # razonamiento completo — en dos líneas, este motor lo despliega gente
+    # distinta en contextos distintos y cómo lo exponen es decisión suya.
+    API_TOKEN: Optional[str] = None
+
     # Cada cuánto corre el pipeline completo (ver specs/change_logs.md, Fase 2 --
     # "Scheduler", para el razonamiento del intervalo uniforme).
     #

@@ -179,7 +179,22 @@ Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que ade
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 
-> ⚠️ **La API no tiene autenticación**, y los tres endpoints de `/modelos` son los primeros que aceptan una URL arbitraria para que el motor la llame. Hasta que exista auth, desplegala en una red donde solo llegue el operador. Ver `specs/roadmap.md`, puntos 2 y 9.
+### Token de operador
+
+**Todos los endpoints son del operador.** El back-end recibe las síntesis por *push* y no consulta nada, así que nada externo consume esta API.
+
+Definí `API_TOKEN` en el entorno y los endpoints piden `Authorization: Bearer <token>` — todos menos la salud (`GET /`, que usa el healthcheck de Docker) y la documentación. **Sin la variable, la API queda abierta y el motor te lo avisa en cada arranque.**
+
+Es opcional a propósito: quien lo corre en su notebook no debería pelearse con una credencial, y cómo se expone el servicio es decisión de quien lo despliega. Pero si lo exponés, ponelo — hay endpoints que **gastan plata por invocación** (`POST /synthesize`), que hacen al motor **golpear todos los feeds con tu identidad** (`POST /ingest`), y que **le entregan tu credencial de IA** a la URL que le indiquen (`POST /modelos`).
+
+```bash
+# Generá uno
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+curl -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/modelos
+```
+
+El `docker-compose.yml` liga el puerto a `127.0.0.1` y no a `0.0.0.0`, así que por defecto no sale de la máquina. Para exponerlo de verdad: token **y** un proxy con TLS adelante.
 
 ### Qué proveedores entran
 
