@@ -231,7 +231,7 @@ En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— si
 ### Variables de entorno críticas
 
 - `DATABASE_URL` — PostgreSQL con pgvector (obligatorio en producción)
-- `GEMINI_API_KEY` — Google Gemini (usada desde Fase 4)
+- `MODELO_API_KEY` — la credencial del proveedor de IA que el operador haya configurado en `modelo_ia` (desde el punto 2 del backlog). Reemplaza a `GEMINI_API_KEY`, que se sigue leyendo como compatibilidad temporal y avisando
 - `ENVIRONMENT` — `development` | `production`
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)
 - `WEBHOOK_URL` / `WEBHOOK_SECRET` — entrega de síntesis al back-end. **Sin ellas la entrega no corre**: las síntesis se acumulan en la base con `enviado_backend=False` y salen cuando se configuran (ver `webhook_contract.md`)

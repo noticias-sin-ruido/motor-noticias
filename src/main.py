@@ -47,8 +47,8 @@ logger = logging.getLogger(__name__)
 # de APScheduler, pero se declara porque el valor correcto no es obvio y la
 # tentación de subirlo "para que se ponga al día" es real: dos pipelines
 # concurrentes se pisarían en la asignación de clusters y podrían sintetizar dos
-# veces el mismo hecho -- que cuesta plata en Gemini y que, una vez entregado al
-# back-end, no se retracta.
+# veces el mismo hecho -- que cuesta plata con cualquier proveedor y que, una vez
+# entregado al back-end, no se retracta.
 SCHEDULER_MAX_INSTANCES = 1
 
 # Si se acumularon varias corridas pendientes, se ejecuta una sola. También es
@@ -495,12 +495,16 @@ def _nombre_en_uso(session: Session) -> str:
     formas de decir lo mismo obligan a quien consume a saber cuál mira.
     """
     activo = modelo_activo(session)
-    return activo.nombre if activo else HISTORICO
+    return activo.nombre if activo else SIN_MODELO
 
 
-# Etiqueta del camino por defecto: no hay fila que lo represente, pero decir
-# `null` deja al operador sin saber si el motor está sintetizando o no.
-HISTORICO = "(Gemini, camino histórico)"
+# Qué se responde cuando ninguna fila está activa.
+#
+# **Es un estado de alarma, no un default.** Hasta la etapa 3 del punto 2 esto
+# significaba "corre el camino histórico de Gemini" y el motor sintetizaba
+# igual; desde la 4 no hay proveedor de reserva, así que sin fila activa **no se
+# sintetiza nada**. El texto lo dice para que nadie lo lea como "anda solo".
+SIN_MODELO = "(ninguno activo — la síntesis no corre)"
 
 
 @app.get("/modelos")
@@ -548,6 +552,11 @@ def alta_modelo(datos: AltaModelo, session: Session = Depends(get_session)):
 
     modelo.modo_estructura = modo
     modelo.activo = datos.activar
+    if datos.activar:
+        # Mismo criterio que el PATCH: como mucho uno prendido. Ver
+        # `_apagar_los_demas`. `id_que_queda=None` porque este todavía no tiene
+        # id — se apaga todo lo demás y este entra prendido en el mismo commit.
+        _apagar_los_demas(session, None)
     session.add(modelo)
     try:
         session.commit()
@@ -559,7 +568,16 @@ def alta_modelo(datos: AltaModelo, session: Session = Depends(get_session)):
         return duplicado
     session.refresh(modelo)
 
-    return {"status": "ok", "sondeo": resumen, "modelo": _vista_publica(modelo)}
+    # **`en_uso` va también acá**, y no es simetría por prolijidad. Era el único
+    # de los tres endpoints que no lo devolvía, así que quien daba de alta su
+    # modelo con `activar=true` recibía `200` y `"activo": true` sin ninguna
+    # forma de enterarse de que el motor estaba sintetizando con otro.
+    return {
+        "status": "ok",
+        "sondeo": resumen,
+        "modelo": _vista_publica(modelo),
+        "en_uso": _nombre_en_uso(session),
+    }
 
 
 @app.patch("/modelos/{modelo_id}")
@@ -567,11 +585,22 @@ def activar_modelo(
     modelo_id: int, activo: bool = Query(...), session: Session = Depends(get_session)
 ):
     """
-    Prende o apaga un modelo.
+    Prende o apaga un modelo. **Prender uno apaga a los demás.**
 
-    Apagar todos es una operación válida y no deja al motor sin síntesis:
-    vuelve al camino histórico de Gemini. Es la marcha atrás si un modelo nuevo
-    resulta peor de lo esperado.
+    La exclusividad no es una comodidad: es lo único que hace que la respuesta
+    signifique algo. Sin ella, dos filas activas empataban en `prioridad` —el
+    default es 100 para todas— y desempataba el `id`, o sea **ganaba la más
+    vieja, en silencio**. Quien prendía su modelo recibía `200` y `activo: true`
+    mientras el motor seguía sintetizando con otro.
+
+    Y no se pierde nada, porque **la credencial es una sola**: tener dos
+    proveedores prendidos a la vez es un estado que no se puede usar. El día que
+    exista multimodelo (punto 6-bis del backlog) esto se revisa junto con
+    `prioridad`, que es la columna que hoy queda dormida.
+
+    Apagar el último es válido, **pero deja el motor sin sintetizar**: desde la
+    etapa 4 no hay proveedor de reserva. Es la marcha atrás si un modelo nuevo
+    resulta peor de lo esperado, a condición de prender otro.
 
     **Activar sondea contra el proveedor, no mira el entorno.** Antes alcanzaba
     con comprobar que la variable existiera, porque cada proveedor tenía la
@@ -602,6 +631,7 @@ def activar_modelo(
                 status_code=422, content={"status": "error", "detalle": str(error)}
             )
         modelo.modo_estructura = modo
+        _apagar_los_demas(session, modelo_id)
 
     modelo.activo = activo
     session.add(modelo)
@@ -616,3 +646,19 @@ def activar_modelo(
     if resumen:
         respuesta["sondeo"] = resumen
     return respuesta
+
+
+def _apagar_los_demas(session: Session, id_que_queda: Optional[int]) -> None:
+    """
+    Deja como mucho un modelo activo. Ver `activar_modelo`.
+
+    Se hace en la misma transacción que el `activo = True` que lo motiva, así
+    que no existe un instante con dos prendidos ni uno con ninguno.
+    """
+    otros = session.exec(
+        select(ModeloIA).where(ModeloIA.activo.is_(True), ModeloIA.id != id_que_queda)
+    ).all()
+    for otro in otros:
+        otro.activo = False
+        session.add(otro)
+        logger.info(f"Se apaga '{otro.nombre}': solo puede haber un modelo activo")

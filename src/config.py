@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     )
 
     DATABASE_URL: Optional[str] = None
-    GEMINI_API_KEY: Optional[str] = None
     ENVIRONMENT: str = "development"
 
     # Cada cuánto corre el pipeline completo (ver specs/change_logs.md, Fase 2 --
@@ -196,26 +195,17 @@ class Settings(BaseSettings):
     # silencio. Ver `descartar_vencidos_sin_sintetizar`.
     HORAS_MAXIMAS_SIN_SINTETIZAR: int = 72
 
-    # --- Síntesis con Gemini (Fase 4) ---
-    # Medido: 68.534 tokens de entrada para 21 clusters publicables, o sea del
-    # orden de US$0,01 por corrida completa. Verificá los precios vigentes.
-    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
-
-    # Baja a propósito: la tarea es resumir sin inventar, no escribir bonito.
-    GEMINI_TEMPERATURA: float = 0.2
-
-    # Cuánto razonamiento previo hace el modelo: MINIMAL, LOW, MEDIUM o HIGH.
-    # Importa porque **los tokens de razonamiento se facturan como salida**, y
-    # la salida es ~80% del costo de esta fase.
+    # --- Síntesis ---
     #
-    # Medido contra gemini-3.5-flash-lite con un prompt corto: MINIMAL y LOW
-    # gastan 0 tokens de razonamiento, MEDIUM 349 y HIGH 448. Se usa LOW porque
-    # no cuesta nada en las tareas simples y deja margen para escalar solo
-    # cuando el caso lo pide.
+    # **Acá ya no se configura ningún modelo.** El modelo, su temperatura y su
+    # nivel de razonamiento viven en la tabla `modelo_ia`, que es lo que permite
+    # cambiarlos sin redeployar y comparar dos configuraciones en la misma
+    # instancia. Ver specs/roadmap.md, backlog punto 2, etapa 4.
     #
-    # NO usar `thinking_budget`: este modelo rechaza el 0 con un 400 genérico
-    # (verificado). `thinking_level` es la palanca que sí acepta.
-    GEMINI_THINKING_LEVEL: str = "LOW"
+    # Lo único que queda del lado del entorno es la credencial, en
+    # `MODELO_API_KEY` — y no como campo de `Settings`, porque no la lee la
+    # configuración sino el adaptador, en el momento de usarla. Ver
+    # `services/proveedores/base.leer_api_key`.
 
     # --- Entrega al back-end por webhook (Fase 4) ---
     # Ver specs/webhook_contract.md para el payload y specs/change_logs.md para

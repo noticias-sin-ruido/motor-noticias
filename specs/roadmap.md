@@ -6,7 +6,7 @@ Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qu�
 
 **Siguiente:** el punto 2 del backlog priorizado de abajo (desacoplar el motor de IA). El punto 1 (segunda vía de ingesta) ya cerró: Perfil está de alta y en producción.
 
-**Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `GEMINI_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
+**Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `MODELO_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
 ---
 
@@ -163,15 +163,23 @@ Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el moto
 
 Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
 
-**🚧 EN CURSO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ⬜** Anthropic nativo · **4 ⬜** retirar el camino histórico.
+**✅ COMPLETO salvo la etapa 3.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ⬜** Anthropic nativo · **4 ✅** retirado el camino histórico.
+
+Con la etapa 4, **el motor ya no tiene proveedor preferido**: sin fila activa en `modelo_ia` la síntesis no corre y lo dice.
+
+**Al actualizar hay un paso manual, y es a propósito.** La migración `5f80e67d5404` convierte la configuración de entorno del despliegue en una fila, pero **la deja apagada**: la regla es que ninguna migración elige proveedor. Hay que prenderla con `PATCH /modelos/{id}?activo=true`. La credencial sí es automática — `GEMINI_API_KEY` se sigue leyendo como compatibilidad temporal, avisando en cada lectura.
+
+**Prender un modelo apaga a los demás.** Con una sola credencial, dos proveedores prendidos es un estado que no se puede usar; y sin exclusividad dos filas empataban en `prioridad` y desempataba el `id`, o sea ganaba la más vieja en silencio.
+
+**La etapa 3 queda abierta y no bloquea nada**: Anthropic ya es usable por el adaptador compatible con `tools`, que es el modo que el sondeo le detecta solo. Lo que un adaptador nativo agregaría es su palanca de razonamiento (`thinking.budget_tokens`), que ahora entra por `opciones` sin tocar el esquema.
 
 La etapa 2 midió lo que estaba pendiente: **los tres caminos a Gemini son equivalentes** —8,05 s el nativo, 8,55 s el compatible, 8,98 s el histórico sobre el mismo prompt de 18.447 tokens, mismos 4 ángulos en las doce corridas— y la palanca de razonamiento del nativo **funciona y se paga**: de 0 tokens con `LOW` a 6.267 con `HIGH`, con el triple de latencia.
 
-**El hallazgo que cambia la prioridad de la etapa 4**: en seis rondas, el camino histórico tardó **486 segundos** en una y no falló, porque `_llamar_gemini` no tiene timeout. Es la única llamada sin límite de tiempo del pipeline, y `llamar_modelo` la reintenta tres veces sobre un ciclo de 15 minutos. Retirarlo dejó de ser solo higiene.
+**El hallazgo que reencuadró la etapa 4**: en seis rondas, el camino histórico tardó **486 segundos** en una y no falló, porque `_llamar_gemini` **no tenía timeout** — era la única llamada sin límite de tiempo del pipeline, y `llamar_modelo` la reintentaba tres veces sobre un ciclo de 15 minutos. Retirarlo dejó de ser higiene: ahora toda llamada pasa por un adaptador, y todo adaptador tiene techo.
 
 Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
 
-- **El camino histórico de Gemini queda intacto y es el default.** Sin filas activas en `modelo_ia`, la síntesis va por donde iba siempre. No es una promesa: es el camino por defecto de una base que no configuró nada.
+- **La credencial es una sola variable, `MODELO_API_KEY`.** Cambiar de proveedor es cambiar su valor, no agregar otra. Tener dos proveedores vivos a la vez es el punto 6-bis. Como el nombre ya no distingue proveedores, **activar un modelo sondea contra él** en vez de mirar el entorno.
 - **`POST /modelos` no es un CRUD**: sondea antes de aceptar y descubre solo cómo pedirle estructura al proveedor. Medido: la capa de compatibilidad de Anthropic responde 200 e **ignora `response_format` en silencio**.
 
 > ⚠️ **Los tres endpoints de `/modelos` no tienen autenticación**, como el resto de la API, y son los primeros que aceptan una URL arbitraria para que el motor la llame. Hay puesto: enum cerrado de adaptadores, prefijo obligatorio para `api_key_env`, validación de `base_url` (solo http/https, sin credenciales embebidas, sin link-local), respuestas que no publican `api_key_env` ni `base_url`, y errores que no reflejan el cuerpo del proveedor.
@@ -199,7 +207,7 @@ Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí 
 
 1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
 2. **Migración**: la instancia que corre hoy tiene seis medios cargados. Sacar el seed no puede dejarla vacía.
-3. **Seguridad**: sería el primer endpoint que hace que el motor **busque una URL arbitraria a pedido de quien llame**, y hoy la API no tiene autenticación en ninguno de sus 8 endpoints. Un alta abierta es un vector de SSRF y de uso del motor como proxy hacia terceros. Necesita autenticación y validación del destino desde el diseño, no después.
+3. **Seguridad**: sería el primer endpoint que hace que el motor **busque una URL arbitraria a pedido de quien llame**, y hoy la API no tiene autenticación en ninguno de sus once endpoints. Un alta abierta es un vector de SSRF y de uso del motor como proxy hacia terceros. Necesita autenticación y validación del destino desde el diseño, no después.
 
 **Va después del punto 2**, por decisión del usuario.
 

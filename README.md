@@ -146,12 +146,16 @@ Casi todo el pipeline corre sin registrarse en nada:
 | `GET /search` — búsqueda semántica (KNN de pgvector) | ✅ |
 | `GET /clusters` — qué se agrupó con qué | ✅ |
 | `GET /` — healthcheck con verificación real de la base | ✅ |
-| `POST /synthesize` — síntesis con IA | ❌ pide `GEMINI_API_KEY` |
+| `POST /synthesize` — síntesis con IA | ❌ pide un modelo dado de alta |
 | `POST /deliver` — entrega firmada al back-end | ❌ pide `WEBHOOK_URL` y `WEBHOOK_SECRET` |
 
 O sea: **se puede ver el motor traer noticias de verdad, agruparlas por hecho y responder una búsqueda semántica en unos minutos y sin dar de alta ninguna cuenta.**
 
-Para la síntesis hace falta una `GEMINI_API_KEY` propia (se obtiene gratis en Google AI Studio) en el `.env`. Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
+Para la síntesis hace falta **un modelo de IA, el que vos elijas**: el que pagás, aquel donde tenés créditos, o uno corriendo en tu propia máquina —en cuyo caso los cuerpos de los artículos no salen de ahí—. Se pone su credencial en `MODELO_API_KEY` y se lo da de alta con `POST /modelos`, que **sondea al proveedor antes de aceptarlo** en vez de registrar lo que le manden — y de paso descubre solo cómo pedirle JSON estructurado.
+
+Sin ningún modelo prendido la síntesis no corre, y el motor lo avisa en cada corrida: **no hay proveedor de reserva**, justamente para que nadie termine mandándole los textos a un tercero que no eligió.
+
+Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
 
 ---
 
@@ -171,7 +175,7 @@ Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que ade
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
 | `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
 | `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
-| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=` |
+| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** |
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 

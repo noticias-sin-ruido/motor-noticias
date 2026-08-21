@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 # Mismo criterio que el adaptador compatible: no se está bajando un HTML sino
 # esperando a que un modelo razone y escriba una síntesis entera.
 TIMEOUT_SEGUNDOS = 120.0
-TIMEOUT_SONDEO_SEGUNDOS = 15.0
+
+# El del sondeo **no se define acá**: `services/modelos.sondear` usa uno solo
+# para todos los adaptadores. Tener una copia propia con el mismo valor era
+# una trampa — el día que una cambiara, la otra se lo comía sin avisar.
 
 # Las palancas que este adaptador acepta en `ModeloIA.opciones`, **y ninguna
 # más**. La lista es la llave del bolsillo: sin ella, `opciones` sería un camino

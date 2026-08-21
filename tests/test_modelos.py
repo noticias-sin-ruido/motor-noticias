@@ -1,11 +1,12 @@
 """
-Tests del desacoplamiento del modelo de IA (backlog punto 2, etapas 1 y 2).
+Tests del desacoplamiento del modelo de IA (backlog punto 2, etapas 1 a 4).
 
 Ningún test sale a internet. La frontera que se mockea depende del adaptador:
 `httpx.post` en el compatible —igual que `_descargar_feed` en la ingesta— y
 `genai.Client` en el nativo de Gemini, que habla por el SDK.
 """
 import json
+import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +16,8 @@ import pytest
 from sqlalchemy import event
 from sqlmodel import Session, select
 
-from src.main import HISTORICO
+from src.config import settings
+from src.main import SIN_MODELO
 from src.models import Adaptador, ModeloIA, ModoEstructura
 from src.services import modelos, synthesis
 from src.services.proveedores import (
@@ -200,7 +202,7 @@ class TestValidacionDeBaseUrl:
     )
     def test_rechaza_lo_que_no_puede_alcanzar(self, key, url, motivo):
         with pytest.raises(ErrorDeProveedor):
-            OpenAICompatible(_modelo(base_url=url)), motivo
+            OpenAICompatible(_modelo(base_url=url))
 
     @pytest.mark.parametrize(
         "url",
@@ -519,6 +521,120 @@ class TestGeminiNativo:
             OpenAICompatible(_modelo(opciones={"thinking_level": "LOW"}))
 
 
+class TestRespuestasQueNoSonUnChatCompletion:
+    """
+    Un 200 no garantiza nada, y el destino lo elige quien llama.
+
+    Todo esto salía como **HTTP 500 con traceback** desde un endpoint que se
+    tomó el trabajo de dar 422 explicativos: `respuesta.json()` estaba fuera del
+    `try`, así que `JSONDecodeError` —que no hereda de `ErrorDeProveedor`— se
+    escapaba del sondeo y del alta.
+    """
+
+    def _con_cuerpo(self, texto: str, content_type: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=texto.encode("utf-8"),
+            headers={"content-type": content_type},
+            request=httpx.Request("POST", "https://proveedor.test/v1/chat/completions"),
+        )
+
+    @pytest.mark.parametrize(
+        "cuerpo, content_type",
+        [
+            # **El caso que motiva todo esto**: `base_url` sin el `/v1`. Ollama
+            # contesta 200 con esto en texto plano. Es el tipeo más probable del
+            # flujo que este backlog existe para habilitar.
+            ("Ollama is running", "text/plain; charset=utf-8"),
+            ("<html><body>Nginx</body></html>", "text/html"),
+            ("", "text/plain"),
+            ("[1, 2, 3]", "application/json"),
+            ('"soy un string"', "application/json"),
+            ("no soy json", "application/json"),
+            ('{"choices": [42]}', "application/json"),
+            ('{"choices": "ninguno"}', "application/json"),
+        ],
+    )
+    def test_nunca_sale_como_500(self, client, session, key, cuerpo, content_type):
+        with patch.object(
+            httpx, "post", return_value=self._con_cuerpo(cuerpo, content_type)
+        ):
+            respuesta = client.post(
+                "/modelos",
+                json={
+                    "nombre": "prueba",
+                    "adaptador": "openai_compatible",
+                    "modelo": "un-modelo",
+                    "base_url": "https://proveedor.test/v1",
+                },
+            )
+
+        assert respuesta.status_code == 422, (
+            f"{content_type} con {cuerpo[:30]!r} salió como "
+            f"{respuesta.status_code}, no como un 422 explicativo"
+        )
+        assert session.exec(select(ModeloIA)).all() == []
+
+    def test_el_mensaje_nombra_la_causa_probable(self, key):
+        """
+        Para el caso Ollama-sin-`/v1` no alcanza con no romper: el mensaje tiene
+        que decirle al operador qué le falta, que es lo único accionable.
+        """
+        with patch.object(
+            httpx,
+            "post",
+            return_value=self._con_cuerpo("Ollama is running", "text/plain"),
+        ):
+            with pytest.raises(ErrorDeProveedor, match=r"/v1"):
+                OpenAICompatible(_modelo()).probar("hola", _EsquemaChico)
+
+
+class TestNoRefleja200:
+    """
+    **S2**: el saneo de errores cubría la rama 4xx y dejaba abierta la 200.
+
+    `_mensaje_de_error` solo corre cuando el status no es 200. Un destino que
+    contesta 200 con forma de chat-completion —un LiteLLM, un vLLM, un gateway
+    interno— pasaba por `_leer`, volvía crudo, y `sondear` lo pegaba **entero y
+    dos veces** en el 422 que devuelve un endpoint sin autenticación.
+    """
+
+    SECRETO = "INTERNO: db=prod-01 token=sk-abcdef123456 user=root"
+
+    def test_el_cuerpo_de_un_200_no_vuelve_en_la_respuesta(self, client, session, key):
+        interno = _respuesta(self.SECRETO)
+
+        with patch.object(httpx, "post", side_effect=[interno, interno]):
+            respuesta = client.post(
+                "/modelos",
+                json={
+                    "nombre": "prueba",
+                    "adaptador": "openai_compatible",
+                    "modelo": "un-modelo",
+                    "base_url": "https://interno.test/v1",
+                },
+            )
+
+        assert respuesta.status_code == 422
+        assert self.SECRETO not in respuesta.text
+        assert "sk-abcdef" not in respuesta.text
+        assert "prod-01" not in respuesta.text
+
+    def test_el_cuerpo_sigue_estando_en_el_log(self, key, caplog):
+        """
+        No devolverlo no es esconderlo: quien depura su propio modelo tiene el
+        log en la misma máquina, y ahí la pista tiene que seguir completa.
+        """
+        interno = _respuesta(self.SECRETO)
+
+        with caplog.at_level(logging.WARNING):
+            with patch.object(httpx, "post", side_effect=[interno, interno]):
+                with pytest.raises(ErrorDeProveedor):
+                    modelos.sondear(_modelo())
+
+        assert self.SECRETO in caplog.text
+
+
 class TestSondeo:
     """
     El alta comprueba que el proveedor **respete el esquema**, no que responda.
@@ -546,7 +662,7 @@ class TestSondeo:
         """
         prosa = _respuesta("Por supuesto, con gusto te ayudo.")
         with patch.object(httpx, "post", side_effect=[prosa, prosa]):
-            with pytest.raises(ErrorDeProveedor, match="sin la forma pedida"):
+            with pytest.raises(ErrorDeProveedor, match="sin la forma que pide el esquema"):
                 modelos.sondear(_modelo())
 
     def test_un_adaptador_inexistente_no_se_reporta_como_falta_de_esquema(self, key):
@@ -670,10 +786,10 @@ class TestSondeo:
 
 
 class TestSeleccion:
-    def test_sin_filas_activas_usa_el_camino_historico(self, session: Session):
+    def test_sin_filas_activas_no_hay_modelo(self, session: Session):
         """
-        `None` es la red de seguridad del desacoplamiento: una base que no
-        configuró nada se comporta como antes de que la tabla existiera.
+        `None` ya no significa "usá Gemini" sino "nadie eligió proveedor", que
+        desde la etapa 4 es configuración incompleta: la síntesis no corre.
         """
         assert modelos.modelo_activo(session) is None
 
@@ -746,14 +862,31 @@ class TestFronteraConLaSintesis:
                 synthesis.llamar_modelo("prompt", _modelo())
         assert post.call_count == 3
 
-    def test_sin_modelo_va_por_el_camino_historico(self):
+    def test_ya_no_queda_ningun_camino_a_gemini_por_fuera_de_los_adaptadores(self):
         """
-        La red de seguridad: `None` no es un caso de error, es el default de una
-        base que no configuró nada.
+        **La guarda de la etapa 4**, y es sobre una ausencia.
+
+        El camino histórico hablaba con Gemini directo desde `synthesis`,
+        leyendo su modelo y su key de `settings`. Mientras existiera, el motor
+        tenía un proveedor privilegiado escondido en el código — justo lo que
+        este punto del backlog venía a sacar. Y no era gratuito: **no tenía
+        timeout**, así que era la única llamada sin techo del pipeline (medido:
+        486 s en una ronda).
+
+        Que estos nombres no existan es lo que hace que todo pase por un
+        adaptador, y con eso por un timeout.
         """
-        with patch.object(synthesis, "_llamar_gemini", return_value="historico") as gemini:
-            assert synthesis.llamar_modelo("prompt") == "historico"
-        gemini.assert_called_once_with("prompt")
+        for muerto in ("_llamar_gemini", "get_cliente", "_cliente"):
+            assert not hasattr(synthesis, muerto), (
+                f"`synthesis.{muerto}` volvió: hay un camino al proveedor que "
+                f"esquiva los adaptadores"
+            )
+
+        for muerto in ("GEMINI_MODEL", "GEMINI_TEMPERATURA", "GEMINI_THINKING_LEVEL"):
+            assert not hasattr(settings, muerto), (
+                f"`settings.{muerto}` volvió: el modelo se configura en la "
+                f"tabla `modelo_ia`, no en el entorno"
+            )
 
 
 class TestEtiquetaDelModelo:
@@ -766,14 +899,18 @@ class TestEtiquetaDelModelo:
         """
         assert synthesis._etiqueta_del_modelo(_modelo(nombre="el-mio")) == "el-mio"
 
-    def test_el_camino_historico_se_atribuye_y_no_queda_en_none(self):
+    def test_toda_sintesis_nueva_queda_atribuida(self):
         """
-        `None` ya significa "síntesis anterior a que existiera la columna".
-        Mezclar "no sé" con "Gemini de siempre" arruinaría cualquier consulta.
+        **Lo que la etapa 4 hace posible.** Antes había dos orígenes —una fila,
+        o el camino histórico sin fila— y el segundo se etiquetaba con un
+        prefijo inventado. Ahora siempre hay fila, así que toda síntesis nueva
+        lleva el nombre de un modelo real y las dos se pueden comparar.
+
+        `None` en la columna sigue significando lo que significaba: síntesis
+        anteriores a que la columna existiera. No se rellena hacia atrás.
         """
-        etiqueta = synthesis._etiqueta_del_modelo(None)
-        assert etiqueta.startswith("historico:")
-        assert etiqueta != "None"
+        for nombre in ("gemini-por-defecto", "groq-qwen"):
+            assert synthesis._etiqueta_del_modelo(_modelo(nombre=nombre)) == nombre
 
 
 @contextmanager
@@ -891,8 +1028,8 @@ class TestEndpoints:
         # Lo que el operador sí necesita saber, sin decir cuál es la variable.
         assert fila["credencial_configurada"] is True
 
-    def test_sin_modelos_activos_informa_el_camino_historico(self, client, session):
-        assert client.get("/modelos").json()["en_uso"] == HISTORICO
+    def test_sin_modelos_activos_avisa_que_no_se_sintetiza(self, client, session):
+        assert client.get("/modelos").json()["en_uso"] == SIN_MODELO
 
     def test_el_alta_sondea_antes_de_guardar(self, client, session, key):
         with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
@@ -1054,15 +1191,128 @@ class TestEndpoints:
         assert respuesta.status_code == 200
         post.assert_not_called()
 
-    def test_apagar_todos_vuelve_al_camino_historico(self, client, session, key):
+    def test_apagar_todos_deja_el_motor_sin_sintetizar(self, client, session, key):
+        """
+        Apagar el ultimo modelo ya no cae al camino historico de Gemini: ese
+        camino se borro en la etapa 4, asi que la sintesis simplemente deja de
+        correr. El texto de `en_uso` tiene que decirlo, porque es la unica
+        senal que ve quien apago.
+        """
         fila = self._fila(session, activo=True)
 
         respuesta = client.patch(f"/modelos/{fila.id}?activo=false")
         assert respuesta.status_code == 200
-        assert respuesta.json()["en_uso"] == HISTORICO
+        assert respuesta.json()["en_uso"] == SIN_MODELO
 
     def test_patch_a_un_id_inexistente(self, client, session):
         assert client.patch("/modelos/9999?activo=true").status_code == 404
+
+
+class TestUnSoloModeloActivo:
+    """
+    **S1**: dos filas activas empatan y desempata el `id`, o sea gana la más
+    vieja en silencio.
+
+    `prioridad` tiene default 100 para todas —el de la columna y el de
+    `AltaModelo`—, así que el empate es el caso normal y no el raro. Quien
+    prendía su modelo recibía `200` y `"activo": true` mientras el motor seguía
+    sintetizando con otro.
+
+    Y no se pierde nada apagando el resto: **la credencial es una sola**, así
+    que dos proveedores prendidos es un estado que no se puede usar.
+    """
+
+    def _existente(self, session, nombre: str, **kwargs) -> ModeloIA:
+        fila = _modelo(nombre=nombre, api_key_env=VARIABLE_UNICA, **kwargs)
+        session.add(fila)
+        session.commit()
+        session.refresh(fila)
+        return fila
+
+    def test_el_alta_activa_apaga_a_la_anterior(self, client, session, key):
+        vieja = self._existente(session, "el-viejo", activo=True)
+
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            respuesta = client.post(
+                "/modelos",
+                json={
+                    "nombre": "el-nuevo",
+                    "adaptador": "openai_compatible",
+                    "modelo": "otro-modelo",
+                    "base_url": "https://proveedor.test/v1",
+                    "activar": True,
+                },
+            )
+
+        assert respuesta.status_code == 200
+        session.refresh(vieja)
+        assert vieja.activo is False
+        assert modelos.modelo_activo(session).nombre == "el-nuevo"
+
+    def test_el_alta_activa_dice_con_que_quedo_el_motor(self, client, session, key):
+        """
+        `POST /modelos` era **el único de los tres endpoints sin `en_uso`**. Sin
+        eso, quien daba de alta su modelo no tenía forma de enterarse de que el
+        motor seguía usando otro.
+        """
+        self._existente(session, "el-viejo", activo=True)
+
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            respuesta = client.post(
+                "/modelos",
+                json={
+                    "nombre": "el-nuevo",
+                    "adaptador": "openai_compatible",
+                    "modelo": "otro-modelo",
+                    "base_url": "https://proveedor.test/v1",
+                    "activar": True,
+                },
+            )
+
+        assert respuesta.json()["en_uso"] == "el-nuevo"
+
+    def test_el_patch_activa_apaga_a_las_demas(self, client, session, key):
+        vieja = self._existente(session, "el-viejo", activo=True)
+        nueva = self._existente(session, "el-nuevo")
+
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            respuesta = client.patch(f"/modelos/{nueva.id}?activo=true")
+
+        assert respuesta.json()["en_uso"] == "el-nuevo"
+        session.refresh(vieja)
+        assert vieja.activo is False
+
+    def test_el_id_mas_bajo_ya_no_gana_por_empate(self, client, session, key):
+        """
+        **El escenario exacto que esto cierra.** La fila que deja la migración
+        tiene `id=1` y `prioridad=100`; el modelo que da de alta el operador
+        también sale con 100. Sin exclusividad, ganaba la 1 — o sea Gemini,
+        aunque el operador hubiera elegido otra cosa.
+        """
+        gemini = self._existente(
+            session, "gemini-por-defecto", adaptador=Adaptador.GEMINI,
+            base_url=None, activo=True,
+        )
+        assert gemini.id < 2
+
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            client.post(
+                "/modelos",
+                json={
+                    "nombre": "mi-ollama-local",
+                    "adaptador": "openai_compatible",
+                    "modelo": "llama3.1",
+                    "base_url": "http://localhost:11434/v1",
+                    "activar": True,
+                },
+            )
+
+        activo = modelos.modelo_activo(session)
+        assert activo.nombre == "mi-ollama-local", (
+            f"ganó '{activo.nombre}' por tener el id más bajo: el operador eligió "
+            f"otro y el motor sintetiza con éste"
+        )
+        assert activo.adaptador == Adaptador.OPENAI_COMPATIBLE
 
 
 # Esquema chico para no arrastrar `RespuestaSintesis` a los tests del adaptador:

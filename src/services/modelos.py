@@ -32,13 +32,17 @@ def modelo_activo(session: Session) -> Optional[ModeloIA]:
     """
     El modelo con el que hay que sintetizar, o `None`.
 
-    `None` significa **usar el camino histórico de Gemini**, y es el estado de
-    una base que nunca configuró nada. Es la red de seguridad del
-    desacoplamiento: mientras no haya filas activas, el motor se comporta
-    exactamente como antes de que esta tabla existiera.
+    `None` significa **que nadie eligió proveedor**, y desde la etapa 4 del
+    punto 2 eso no es un default sino configuración incompleta: la síntesis no
+    corre y `sintetizar_pendientes` lo dice. Hasta la etapa 3 significaba "usá
+    el camino histórico de Gemini", que era un proveedor privilegiado escondido
+    en el código; se retiró.
 
-    Con varias activas gana la de menor `prioridad`. Hoy eso solo desempata;
-    el día que se arme la cadena de fallback, es el orden en que se intenta.
+    El `order_by` es defensa en profundidad, no la regla: prender un modelo
+    apaga a los demás (`main._apagar_los_demas`), así que en condiciones
+    normales hay como mucho una fila activa. Si por lo que fuera hubiera dos,
+    gana la de menor `prioridad` y desempata el `id` — determinista, aunque no
+    sea un estado que la API deje construir.
     """
     return session.exec(
         select(ModeloIA)
@@ -52,9 +56,9 @@ def construir(modelo: ModeloIA):
     El adaptador de este modelo, listo para usar.
 
     Levanta si el adaptador todavía no existe en vez de reventar con un
-    `KeyError`: `Adaptador` ya declara los tres protocolos, pero en la etapa 1
-    solo está implementado el compatible con OpenAI, y quien dé de alta un
-    `gemini` nativo merece leer por qué no se puede todavía.
+    `KeyError`: `Adaptador` declara los tres protocolos pero `anthropic`
+    todavía no está implementado (etapa 3), y quien lo elija merece leer por
+    qué no se puede y cuál es la salida mientras tanto.
     """
     fabrica = REGISTRO.get(modelo.adaptador)
     if fabrica is None:
@@ -134,12 +138,29 @@ def sondear(modelo: ModeloIA) -> Tuple[ModoEstructura, str]:
             logger.info(f"Sondeo de {candidato.nombre}: sirve vía {modo.value}")
             return modo, f"responde y respeta el esquema vía `{modo.value}`"
 
-        intentos.append(f"{modo.value} → respondió sin la forma pedida: {crudo[:80]!r}")
+        # **El cuerpo va al log y NO a la respuesta**, aunque sea la pista más
+        # útil que hay acá. Es la misma regla que ya aplica `_mensaje_de_error`
+        # para las respuestas 4xx, extendida a la rama que se le había escapado:
+        # la que contesta 200. `POST /modelos` no tiene autenticación y acepta
+        # cualquier `base_url`, así que devolver lo que contestó el destino
+        # convierte un SSRF a ciegas en una lectura de servicios internos —
+        # basta con que ese servicio hable formato OpenAI, que es justamente el
+        # caso de un LiteLLM o un vLLM en la red de al lado.
+        #
+        # El operador que depura su propio modelo tiene el log en la misma
+        # máquina; quien sondea a ciegas desde afuera, no.
+        logger.warning(
+            f"Sondeo de {candidato.nombre} vía {modo.value}: respondió 200 sin la "
+            f"forma pedida. Lo que devolvió: {crudo[:500]!r}"
+        )
+        intentos.append(
+            f"{modo.value} → respondió 200 pero sin la forma que pide el esquema "
+            f"(el cuerpo quedó en el log del motor)"
+        )
 
     # El mensaje **no afirma la causa**: puede ser que el proveedor ignore el
     # esquema (el caso Anthropic), pero también un modelo inexistente o una key
-    # inválida, y desde acá no se distinguen. Lo accionable es lo que dijo el
-    # proveedor, así que va primero y completo.
+    # inválida, y desde acá no se distinguen.
     raise ErrorDeProveedor(
         f"No se pudo obtener la estructura que el motor necesita, por ninguno "
         f"de los {len(modos)} mecanismos que soporta este adaptador. Lo que "

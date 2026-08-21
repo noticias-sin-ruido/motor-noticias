@@ -175,14 +175,35 @@ class OpenAICompatible:
         if respuesta.status_code != 200:
             raise ErrorDeProveedor(_mensaje_de_error(respuesta))
 
-        return self._leer(respuesta.json())
+        return self._leer(_json_de(respuesta))
 
     def _leer(self, datos: dict) -> str:
+        if not isinstance(datos, dict):
+            # Un JSON válido que no es un objeto —una lista, un número, un
+            # string—. Sin esto, el `.get` de abajo tira `AttributeError`, que no
+            # es un `ErrorDeProveedor` y por lo tanto se escapaba de todo el
+            # manejo de errores del alta hasta salir como HTTP 500.
+            raise ErrorDeProveedor(
+                f"El destino contestó 200 con un JSON que no es un objeto "
+                f"({type(datos).__name__}). No parece una API compatible con "
+                f"OpenAI. El cuerpo quedó en el log del motor."
+            )
+
         opciones = datos.get("choices") or []
-        if not opciones:
+        if not isinstance(opciones, list) or not opciones:
             raise ErrorDeProveedor("La respuesta no trajo ningún `choice`.")
 
         opcion = opciones[0]
+        if not isinstance(opcion, dict):
+            # Mismo motivo que arriba: un `choices` que existe pero cuyos
+            # elementos no son objetos hacía estallar el `.get` con
+            # `AttributeError` y el alta terminaba en 500.
+            raise ErrorDeProveedor(
+                f"El primer `choice` no es un objeto ({type(opcion).__name__}). "
+                f"El destino no habla el formato de OpenAI; el cuerpo quedó en "
+                f"el log del motor."
+            )
+
         motivo = opcion.get("finish_reason")
 
         # La normalización que le toca a este adaptador: el bloqueo por filtros
@@ -203,8 +224,8 @@ class OpenAICompatible:
                 f"partido y reintentar da el mismo resultado."
             )
 
-        mensaje = opcion.get("message") or {}
-        crudo = _texto_estructurado(mensaje)
+        mensaje = opcion.get("message")
+        crudo = _texto_estructurado(mensaje if isinstance(mensaje, dict) else {})
         if not crudo:
             raise ErrorDeProveedor("El modelo devolvió una respuesta vacía.")
 
@@ -222,6 +243,61 @@ class OpenAICompatible:
         return f"<OpenAICompatible {self.modelo.nombre} ({self.modelo.modelo})>"
 
 
+def _json_de(respuesta: httpx.Response) -> object:
+    """
+    El JSON de una respuesta 200, o un `ErrorDeProveedor` que dice qué pasó.
+
+    **Existe porque un 200 no garantiza nada.** Antes esto era un
+    `respuesta.json()` pelado fuera del `try`, así que cualquier destino que
+    contestara 200 con algo que no fuera JSON levantaba `JSONDecodeError` — que
+    no hereda de `ErrorDeProveedor`, se escapaba del `except` del sondeo y salía
+    como **HTTP 500 con traceback** en un endpoint que se tomó todo el trabajo
+    de dar 422 explicativos.
+
+    Y el caso no es adversarial, es el error de tipeo más probable de todo este
+    backlog: `base_url` sin el `/v1` final. Ollama contesta 200 con
+    `"Ollama is running"` en texto plano. Por eso el mensaje **nombra esa
+    causa**: es la que va a estar detrás la mayoría de las veces.
+
+    El cuerpo va al log y no a la respuesta, por lo mismo que en
+    `services/modelos.sondear`: este endpoint no tiene autenticación y acepta
+    cualquier `base_url`.
+    """
+    tipo = (respuesta.headers.get("content-type") or "").lower()
+
+    # Laxo a propósito: alcanza con que diga "json" en alguna parte, para que
+    # entren `application/json`, `application/json; charset=utf-8` y las
+    # variantes raras que usan algunos gateways. Lo que se quiere descartar es
+    # `text/plain` y `text/html`, que son lo que contesta un servicio que no es
+    # esto.
+    if "json" not in tipo:
+        logger.warning(
+            f"Respuesta 200 no-JSON desde {respuesta.request.url} "
+            f"(content-type: {tipo or '(ninguno)'}): {respuesta.text[:500]}"
+        )
+        raise ErrorDeProveedor(
+            f"El destino contestó 200 pero con `content-type: "
+            f"{tipo or '(ninguno)'}` en vez de JSON, así que no es una API "
+            f"compatible con OpenAI. Lo más común es que a `base_url` le falte "
+            f"el sufijo del proveedor — por ejemplo `/v1`. El cuerpo quedó en "
+            f"el log del motor."
+        )
+
+    try:
+        return respuesta.json()
+    except ValueError as error:
+        # Red por debajo del chequeo de arriba: un destino puede declarar JSON y
+        # mandar cualquier cosa.
+        logger.warning(
+            f"Respuesta 200 que dice ser JSON y no lo es, desde "
+            f"{respuesta.request.url}: {respuesta.text[:500]}"
+        )
+        raise ErrorDeProveedor(
+            f"El destino contestó 200 declarando JSON pero el cuerpo no lo es "
+            f"({type(error).__name__}). El cuerpo quedó en el log del motor."
+        ) from error
+
+
 def _texto_estructurado(mensaje: dict) -> str:
     """
     El JSON de la respuesta, venga por donde venga y envuelto como venga.
@@ -237,8 +313,9 @@ def _texto_estructurado(mensaje: dict) -> str:
     `JSONDecodeError`—, se escapaba de todos los `except` y salía como HTTP 500.
     """
     llamadas = mensaje.get("tool_calls") or []
-    if llamadas:
-        crudo = (llamadas[0].get("function") or {}).get("arguments") or ""
+    if isinstance(llamadas, list) and llamadas and isinstance(llamadas[0], dict):
+        funcion = llamadas[0].get("function")
+        crudo = (funcion if isinstance(funcion, dict) else {}).get("arguments") or ""
     else:
         crudo = mensaje.get("content") or ""
 

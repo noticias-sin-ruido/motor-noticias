@@ -1948,3 +1948,102 @@ Esto refuerza la etapa 4: retirar el camino histórico no es solo sacar duplicac
 **~2 segundos por llamada** (9,50 s contra 7,53 s de mediana), que es el handshake TLS que el cliente cacheado se ahorra. Con 26 clusters en una corrida son unos 50 segundos, alrededor del 12% del costo de la síntesis medido en la etapa 4.
 
 No se corrigió en esta etapa. La salida no es volver al cliente global —eso es lo que congela la credencial en el proceso— sino **resolver el proveedor una vez por corrida y pasarlo**, igual que ya se hace con el `ModeloIA` y por el mismo motivo. Queda anotado con su medición.
+
+---
+
+## Etapa 4 del punto 2: se retira el camino histórico (21/08/2026)
+
+El camino histórico —`_llamar_gemini` + `get_cliente` + `_cliente`, unas 60 líneas que hablaban Gemini directo leyendo `settings.GEMINI_*`— se borró. Con él se fueron `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_TEMPERATURA` y `GEMINI_THINKING_LEVEL` de `Settings` y del `.env.example`.
+
+### Por qué ahora, y no era solo higiene
+
+El motivo original era la duplicación. El que lo volvió prioritario lo encontró la medición de la etapa 2: **`_llamar_gemini` no tenía timeout**, y en seis rondas tardó 486 segundos en una sin fallar. Era la única llamada del pipeline sin techo, y `llamar_modelo` la reintenta hasta tres veces sobre un ciclo de 15 minutos.
+
+Todo lo que queda pasa por un adaptador, y todo adaptador tiene timeout.
+
+Vale nombrar el otro motivo, que no es de rendimiento: mientras existiera, **el motor tenía un proveedor privilegiado escondido en el código**. Un despliegue que no configuraba nada terminaba mandándole los cuerpos de los artículos a Google sin haberlo elegido. Eso es exactamente lo que el punto 2 venía a sacar, así que dejarlo habría sido cerrar el punto sin cumplirlo.
+
+### La decisión: qué pasa sin ninguna fila activa
+
+Se evaluaron dos caminos y **el usuario eligió el segundo**, con un argumento que el planteo original no tenía: si toda síntesis queda atribuida a un modelo real, **se pueden comparar las síntesis que entregó cada uno**. Con una fila implícita, las del default se habrían agrupado bajo una etiqueta inventada.
+
+1. **La fila implícita.** Sin fila activa, se arma un `ModeloIA` en memoria desde `settings` y se pasa por el adaptador nativo. Cero acción del operador, pero `settings.GEMINI_*` quedaba vivo para siempre y el default oculto seguía ahí.
+2. **Configurar es obligatorio.** ✅ Sin fila activa la síntesis **no corre** y se dice con todas las letras. Un solo lugar donde se configura el modelo: la tabla.
+
+Lo que hace seguro al (2) es la **migración de datos** `5f80e67d5404`, que traduce la configuración de entorno de cada despliegue a la fila que ahora la representa. No inventa nada: lee las mismas variables que leía el código que se borró.
+
+> ⚠️ Esta primera versión insertaba la fila **activa** cuando no hubiera otra activa, y eso resultó estar mal: la revisión de más abajo explica por qué y cómo quedó. La fila entra apagada.
+
+Dos guardas, cada una por un caso distinto. Si ya existe el nombre, no hace nada (la migración se corrió antes, o alguien creó la fila a mano). Y **si ya hay una fila activa, la inserta apagada**: ese despliegue ya eligió su modelo y no estaba usando el camino histórico, así que activarle una de Gemini le cambiaría el proveedor por debajo.
+
+**La credencial es la única acción manual**, y está amortiguada: `leer_api_key` cae a `GEMINI_API_KEY` cuando `MODELO_API_KEY` no está, **avisando en cada lectura**. Es deuda con fecha, no una segunda forma válida — un fallback silencioso es indistinguible de una configuración correcta, y entonces nadie migra nunca.
+
+### Dos detalles que costaron un intento
+
+- **`bulk_insert` no sirve contra un ENUM de Postgres.** `adaptador` y `modo_estructura` son tipos ENUM, y una tabla declarada al vuelo con `sa.String` produce un INSERT que falla con *"column is of type adaptador but expression is of type character varying"*. La migración usa SQL con casts explícitos. De paso quedó verificado contra `pg_enum` que las etiquetas guardadas son los **nombres** del enum de Python (`GEMINI`), no sus valores (`gemini`).
+- **Sin modelo, la corrida corta arriba y no cluster por cluster.** Dejar que cada uno lo descubriera daba 26 excepciones con 26 tracebacks para una sola causa, todas contadas como "fallidas" — que sugiere un problema con los clusters cuando el problema es que falta configurar el motor. `sintetizar_pendientes` devuelve `sin_modelo: True` y no procesa nada.
+
+### Lo que cambió en el vocabulario
+
+`GET /modelos` y `PATCH` devolvían `"(Gemini, camino histórico)"` cuando no había fila activa. Ahora devuelven `"(ninguno activo — la síntesis no corre)"`: **es un estado de alarma, no un default**, y el texto tiene que impedir que se lo lea como "anda solo".
+
+### Lo que la etapa 3 ya no bloquea
+
+Anthropic es usable hoy por el adaptador compatible en modo `tools`, que es el que el sondeo detecta solo. Un adaptador nativo agregaría su palanca de razonamiento, y esa ahora entra por `opciones` sin tocar el esquema. La etapa 3 quedó abierta pero dejó de ser un prerrequisito de nada.
+
+### La revisión de la etapa 4, y lo que encontró (21/08/2026)
+
+Antes de commitear se pasó un revisor sobre las etapas 2 y 4. Encontró siete cosas, y **dos eran agujeros en razonamientos que este mismo documento defiende**. Vale dejarlas escritas con esa forma, porque el patrón —una guarda correcta aplicada a un caso y ciega al otro— es el que hay que aprender a ver.
+
+#### La migración le devolvía a Gemini el privilegio que la etapa 4 vino a sacar
+
+La versión original insertaba la fila **activa cuando no hubiera ninguna otra activa**, y el razonamiento estaba escrito acá arriba: *"ese despliegue ya eligió su modelo"*.
+
+Ese razonamiento vale para el despliegue que **actualiza**. Pero la migración también corre en el que **nace**, y ahí la condición se cumple siempre. Consecuencia, verificada:
+
+1. Instalación limpia. `init_db()` exige `alembic upgrade head`, así que la fila existe **antes** del primer `POST /modelos`.
+2. El operador da de alta su modelo con `activar=true`. Recibe `200` y `"activo": true`.
+3. Las dos filas empatan en `prioridad` —el default es 100 en la columna y en `AltaModelo`— y **desempata el `id`**, o sea gana la de la migración.
+4. Cada 15 minutos los cuerpos de los artículos salen hacia Google, con una credencial que ni siquiera es de Google.
+
+O sea, exactamente *"un despliegue que no configuraba nada terminaba mandándole los cuerpos a Google sin haberlo elegido"*, que es la frase con la que se justificó la etapa 4 — ahora con una fila que lo hacía parecer deliberado.
+
+**La corrección tiene tres partes, y la regla que queda no depende de adivinar en qué caso estamos:**
+
+- **Ninguna migración elige proveedor**: la fila entra siempre apagada. El costo asumido es que quien actualiza tiene que prenderla; a cambio nadie sintetiza contra un proveedor que no eligió.
+- **Prender un modelo apaga a los demás.** No se pierde nada: desde la etapa 2 la credencial es una sola, así que dos proveedores prendidos es un estado que no se puede usar. De paso muere el desempate silencioso por `id`.
+- **`POST /modelos` devuelve `en_uso`**, que era el único de los tres endpoints que no lo hacía — o sea el único punto donde el operador podía quedarse creyendo que el motor usaba su modelo.
+
+#### El saneo de errores cubría la rama 4xx y dejaba abierta la 200
+
+`_mensaje_de_error` está construido con cuidado para no convertir el SSRF en lectura de servicios internos, **pero solo corre cuando el status no es 200**. Si el destino contesta 200, el cuerpo pasaba por `_leer`, volvía crudo, y `sondear` lo pegaba entero —dos veces, una por modo— en el 422 de un endpoint sin autenticación.
+
+Alcanza con que el destino hable formato OpenAI, que es justo lo que hace un LiteLLM o un vLLM en la red de al lado.
+
+Ahora el cuerpo va **solo al log** y la respuesta dice *"respondió 200 pero sin la forma que pide el esquema"*. Se evaluó devolver una caracterización estructural —qué claves traía— y se descartó: los nombres de las claves también son información del servicio interno, y el operador que depura su propio modelo tiene el log en la misma máquina.
+
+**Y el test que supuestamente guardaba esto usaba `httpx.Response(403, ...)`**: la rama que sí estaba tapada. Tercera aparición del mismo modo de fallo en este repo.
+
+#### Un 200 que no es un chat-completion salía como HTTP 500
+
+`respuesta.json()` estaba fuera del `try`, así que `JSONDecodeError` —que no hereda de `ErrorDeProveedor`— se escapaba del sondeo y del alta.
+
+El caso no es adversarial: es **el tipeo más probable de todo este backlog**, `base_url` sin el `/v1` final. Ollama contesta 200 con `"Ollama is running"` en texto plano.
+
+Se eligió chequear el `content-type` antes de parsear —laxo, alcanza con que diga `json`— para poder dar el mensaje que **diagnostica**: *"no es una API compatible con OpenAI; lo más común es que a `base_url` le falte el sufijo del proveedor, por ejemplo `/v1`"*. Debajo quedó igual la red de `try`, más las guardas de tipo para un JSON que no es objeto, un `choices` que no es lista y un `choice` que no es objeto — todos daban `AttributeError` y salían como 500.
+
+#### La migración escribía sin pasar por la puerta que el endpoint sí custodia
+
+Dos lecturas del entorno sin validar. `float(GEMINI_TEMPERATURA)` **abortaba el upgrade entero** ante cualquier tipeo — y `dotenv_values` no pela comentarios de fin de línea sin comillas, así que `0.2 # baja a propósito` bastaba. Y `GEMINI_THINKING_LEVEL` se insertaba sin contrastar, produciendo una fila que el adaptador rechaza pero recién en la síntesis, por la rama "esto se arregla solo": tres intentos con backoff **por cluster**.
+
+Ahora las dos caen al default avisando. Lo que hace aceptable el fallback hoy y no lo hubiera hecho antes: la configuración vive en una fila que se mira con `GET /modelos`, así que un valor que no se respetó queda a la vista en vez de perderse en el entorno.
+
+#### El `downgrade` no miraba los campos que su propio docstring prometía
+
+Prometía respetar la fila *"si el operador la editó — otro modelo, otra temperatura"* y filtraba por `adaptador`, `base_url` y `max_tokens`, que no discriminan nada: en el adaptador de Gemini `base_url` se rechaza en el constructor, así que **siempre** es NULL. Los dos casos que el texto nombraba pasaban el filtro y se borraban igual. Ahora el `WHERE` mira `modelo`, `temperatura`, `opciones` y `activo`.
+
+#### Sin modelo, la alerta de caducados mandaba al lugar equivocado
+
+El barrido corría **antes** del corte por `sin_modelo`, así que una instalación recién migrada iba marcando clusters como caducados y a las 72 h avisaba *"el plazo quedó corto, subilo"*. La causa no era el plazo. Ahora se corta antes de barrer.
+
+Al moverlo apareció una trampa de SQLAlchemy que vale anotar: **`expunge` sobre un objeto ya expirado lo desprende sin valores**, así que el primer acceso tira `DetachedInstanceError` en vez de recargar. El barrido commitea, y `expire_on_commit` está en `True`. El `expunge` tiene que ir antes de cualquier cosa que commitee, no solo antes del bucle.

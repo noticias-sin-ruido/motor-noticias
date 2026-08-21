@@ -20,7 +20,7 @@ docker compose ps   # debe decir "healthy"
 Copy-Item .env.example .env
 ```
 
-Los valores por defecto de `DATABASE_URL` ya coinciden con las credenciales del `docker-compose.yml` (`usuario`/`password`/`sin_ruido` en `localhost:5432`). `GEMINI_API_KEY` y las variables `SMTP_*` pueden quedar como están — no bloquean esta validación.
+Los valores por defecto de `DATABASE_URL` ya coinciden con las credenciales del `docker-compose.yml` (`usuario`/`password`/`sin_ruido` en `localhost:5432`). `MODELO_API_KEY` y las variables `SMTP_*` pueden quedar como están — no bloquean esta validación.
 
 ## 3. Entorno virtual y dependencias
 

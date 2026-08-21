@@ -114,8 +114,12 @@ class Sintesis(SQLModel, table=True):
     # ser una query y no un proyecto de medición.
     #
     # Guarda el **nombre que le puso el operador** al modelo, no el id del
-    # proveedor, y el camino histórico lleva el prefijo `historico:`. El motivo
-    # está en `synthesis._etiqueta_del_modelo`.
+    # proveedor. El motivo está en `synthesis._etiqueta_del_modelo`.
+    #
+    # Desde la etapa 4 del punto 2 **siempre hay un nombre**: no existe más el
+    # camino histórico sin fila, que se etiquetaba con un prefijo `historico:`.
+    # Eso es lo que vuelve comparable la serie: dos modelos distintos sobre el
+    # mismo corpus se distinguen con un GROUP BY.
     #
     # Se **actualiza** en una re-síntesis, a diferencia del título y el tópico:
     # aquéllos son identidad ya publicada, esto describe quién escribió el texto

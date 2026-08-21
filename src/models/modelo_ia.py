@@ -80,10 +80,19 @@ class ModeloIA(SQLModel, table=True):
     afuera— sin editar código ni redeployar. Ver specs/roadmap.md, backlog
     punto 2.
 
-    **Si no hay ninguna fila activa, la síntesis usa el camino histórico de
-    Gemini tal cual está.** Eso no es un descuido: es la red de seguridad. Una
-    base sin filas se comporta exactamente como antes de que esta tabla
-    existiera, así que el desacoplamiento no puede romper lo que ya funciona.
+    **Sin ninguna fila activa la síntesis no corre.** Hasta la etapa 3 del punto
+    2 ese caso caía a un camino histórico que hablaba Gemini directo; se retiró
+    en la 4, porque mientras existiera el motor tenía un proveedor privilegiado
+    escondido en el código —justo lo que este punto venía a sacar— y encima era
+    la única llamada del pipeline sin timeout.
+
+    A los despliegues que ya existían la migración `5f80e67d5404` les convierte
+    su configuración de entorno en una fila, **apagada**: la regla es que
+    ninguna migración elige proveedor. Prenderla es un `PATCH` explícito.
+
+    Y **hay como mucho una activa**: prender un modelo apaga a los demás (ver
+    `main._apagar_los_demas`). Con una sola credencial, dos prendidos es un
+    estado que no se puede usar.
     """
 
     __tablename__ = "modelo_ia"
@@ -130,9 +139,10 @@ class ModeloIA(SQLModel, table=True):
     # Techo de tokens de salida. **`None` = sin techo, y ese es el default a
     # propósito**: un límite arbitrario corta la síntesis a mitad, el JSON queda
     # partido y se reintenta tres veces lo mismo, porque la causa no es
-    # transitoria. Existe igual porque el adaptador nuevo no tiene ninguna
-    # palanca de costo —el camino histórico sí, vía `thinking_level`— y el gasto
-    # en APIs es un límite duro del proyecto. Quien lo configure está eligiendo
+    # transitoria. Existe igual porque el gasto en APIs es un límite duro del
+    # proyecto y no todo proveedor ofrece una palanca propia: Gemini gradúa el
+    # razonamiento vía `opciones`, pero la mayoría no tiene equivalente y este
+    # techo es lo único que les queda. Quien lo configure está eligiendo
     # acotar el gasto sabiendo el riesgo; el corte se detecta y se avisa con
     # todas las letras en vez de fallar de forma opaca.
     max_tokens: Optional[int] = Field(default=None)

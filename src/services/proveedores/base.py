@@ -2,6 +2,7 @@
 El contrato que cumple todo proveedor, y la lectura segura de credenciales.
 """
 import ipaddress
+import logging
 import os
 import socket
 from typing import Optional, Protocol
@@ -11,6 +12,8 @@ from dotenv import dotenv_values
 
 from ...models import ModeloIA
 from ...models.modelo_ia import PREFIJO_API_KEY_ENV, VARIABLE_UNICA
+
+logger = logging.getLogger(__name__)
 
 # `PREFIJO_API_KEY_ENV` y `VARIABLE_UNICA` se definen junto al modelo —son parte
 # de la forma del dato— y se re-exportan acá porque es donde se aplican.
@@ -89,6 +92,16 @@ class RespuestaBloqueada(Exception):
     """
 
 
+# El nombre que llevaba la credencial de Gemini antes de que el modelo fuera
+# configurable. Se sigue leyendo como **último recurso** para que actualizar el
+# motor no corte la síntesis de un día para el otro en un despliegue que ya
+# existe: el `.env` de esa instancia dice `GEMINI_API_KEY` y nadie le avisó.
+#
+# Es deuda con fecha, no una segunda forma válida: cada lectura por esta vía
+# loguea un aviso, y se saca cuando el punto 2 quede cerrado y difundido.
+VARIABLE_HEREDADA = "GEMINI_API_KEY"
+
+
 def _del_entorno(nombre: str) -> Optional[str]:
     """
     El valor de una variable, del entorno del proceso o del `.env`.
@@ -96,9 +109,9 @@ def _del_entorno(nombre: str) -> Optional[str]:
     **Los dos, y en ese orden.** `pydantic-settings` lee el `.env` para llenar
     los campos que `Settings` declara, pero **no lo vuelca a `os.environ`**:
     verificado, una variable puesta ahí es invisible para `os.environ.get`. Como
-    los nombres `MODELO_API_KEY_*` los inventa el operador, no hay campo que los
-    declare, así que sin esto el `.env` —que es donde cualquiera los pondría, y
-    donde `.env.example` dice que van— simplemente no funcionaba.
+    `MODELO_API_KEY` no es un campo de `Settings`, sin esto el `.env` —que es
+    donde cualquiera la pondría, y donde `.env.example` dice que va— simplemente
+    no funcionaba.
 
     El entorno real gana sobre el archivo, que es la precedencia que espera
     cualquiera: en producción la credencial la inyecta Docker o el orquestador,
@@ -108,6 +121,26 @@ def _del_entorno(nombre: str) -> Optional[str]:
     if del_proceso:
         return del_proceso
     return dotenv_values(".env").get(nombre)
+
+
+def _heredada() -> Optional[str]:
+    """
+    La credencial vieja de Gemini, si es que está y la nueva no.
+
+    Existe para que actualizar no rompa: ver `VARIABLE_HEREDADA`. Avisa cada vez
+    porque un fallback silencioso es indistinguible de una configuración
+    correcta, y entonces nadie migra nunca.
+    """
+    valor = _del_entorno(VARIABLE_HEREDADA)
+    if valor and not valor.startswith("tu_"):
+        logger.warning(
+            f"Usando {VARIABLE_HEREDADA} porque {VARIABLE_UNICA} no está "
+            f"definida. Es compatibilidad temporal: renombrá la variable en tu "
+            f"`.env`, que ahora la credencial es una sola para el proveedor que "
+            f"uses, sea cual sea."
+        )
+        return valor
+    return None
 
 
 def leer_api_key(modelo: ModeloIA) -> str:
@@ -131,6 +164,8 @@ def leer_api_key(modelo: ModeloIA) -> str:
         )
 
     valor = _del_entorno(nombre)
+    if not valor and nombre == VARIABLE_UNICA:
+        valor = _heredada()
     if not valor:
         raise ProveedorNoConfigurado(
             f"La variable {nombre!r} no está definida o está vacía. Definila en "
@@ -253,9 +288,15 @@ class Proveedor(Protocol):
         """La respuesta validada contra el esquema."""
         ...
 
-    def probar(self, prompt: str, esquema) -> str:
+    def probar(self, prompt: str, esquema, timeout: Optional[float] = None) -> str:
         """
         Lo mismo pero crudo, sin validar, para el sondeo del alta.
+
+        **`timeout` no es opcional de verdad**: `sondear` se lo pasa siempre,
+        con el suyo, que es mucho más corto que el de una síntesis. Un
+        adaptador que lo omitiera de su firma reventaría con `TypeError` en
+        el alta. Lleva default solo para que `generar` pueda llamarlo sin
+        argumentos.
 
         Existe porque el sondeo comprueba que el proveedor respete la **forma**
         del esquema, no que haya producido contenido que cumpla las reglas de
