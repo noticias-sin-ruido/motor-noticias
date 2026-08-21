@@ -49,6 +49,19 @@ class Adaptador(str, Enum):
 
     OPENAI_COMPATIBLE = "openai_compatible"
     GEMINI = "gemini"
+
+    # **Reservado, sin implementar, y con motivo.** Ver specs/roadmap.md, punto 2.
+    #
+    # Anthropic expone capa compatible con OpenAI, así que se lo usa con
+    # `OPENAI_COMPATIBLE` y su `base_url`. Un adaptador nativo daría dos cosas
+    # que esa capa no expone —salida estructurada de verdad vía
+    # `output_config.format`, y `output_config.effort` como palanca de costo—,
+    # pero construirlo sin poder correrlo ni una vez sería repetir el error del
+    # episodio de Groq: dar por bueno un mecanismo que nunca se probó.
+    #
+    # El valor se queda en el enum en vez de sacarse porque sacarlo es una
+    # migración de ENUM de Postgres a cambio de nada: `construir` ya rechaza
+    # estas filas con un mensaje que dice qué hacer en su lugar.
     ANTHROPIC = "anthropic"
 
 
@@ -64,7 +77,14 @@ class ModoEstructura(str, Enum):
     habría aceptado ese modelo y el fallo habría aparecido recién en la síntesis.
 
     `TOOLS` es el plan B y es más portable de lo que parece: muchos servidores
-    compatibles soportan tool-calling sin soportar `response_format`.
+    compatibles soportan tool-calling sin soportar `response_format`. **Groq lo
+    confirmó**: su documentación declara "JSON Object Mode", que no es JSON
+    Schema, y el sondeo cayó solo a `tools`.
+
+    ⚠️ **Que Anthropic caiga a `TOOLS` es un supuesto, no una medición.** Está
+    verificado que su capa de compatibilidad ignora `response_format`; que
+    acepte `tools` **no se probó nunca** —no hubo con qué— y de eso depende que
+    Anthropic sea usable sin adaptador nativo. Ver specs/roadmap.md, punto 2.
     """
 
     RESPONSE_FORMAT = "response_format"

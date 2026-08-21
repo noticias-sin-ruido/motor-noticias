@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 from sqlmodel import Session, select
 
-from ..models import ModeloIA, ModoEstructura
+from ..models import Adaptador, ModeloIA, ModoEstructura
 from .proveedores import (
     REGISTRO,
     AdaptadorNoImplementado,
@@ -51,23 +51,42 @@ def modelo_activo(session: Session) -> Optional[ModeloIA]:
     ).first()
 
 
+# Qué hacer en lugar de cada adaptador que quedó reservado. Un mensaje genérico
+# deja al operador sin saber si su proveedor está fuera de alcance o si hay una
+# forma de usarlo hoy mismo — que en el caso de Anthropic, la hay.
+SALIDAS = {
+    Adaptador.ANTHROPIC: (
+        "Anthropic se usa hoy con el adaptador `openai_compatible` y "
+        "`base_url=https://api.anthropic.com/v1`: expone capa compatible. "
+        "Dos advertencias. Su capa **ignora `response_format` en silencio** "
+        "(verificado), así que el sondeo va a caer a `tools` — y que `tools` "
+        "funcione ahí **no está comprobado**, porque el proyecto nunca tuvo una "
+        "credencial con crédito para probarlo. Si el alta falla, ése es el "
+        "motivo, y la salida es un gateway (LiteLLM, OpenRouter) que traduzca."
+    ),
+}
+
+
 def construir(modelo: ModeloIA):
     """
     El adaptador de este modelo, listo para usar.
 
-    Levanta si el adaptador todavía no existe en vez de reventar con un
-    `KeyError`: `Adaptador` declara los tres protocolos pero `anthropic`
-    todavía no está implementado (etapa 3), y quien lo elija merece leer por
-    qué no se puede y cuál es la salida mientras tanto.
+    Levanta si el adaptador no existe en vez de reventar con un `KeyError`:
+    `Adaptador` declara tres protocolos y `anthropic` quedó reservado a
+    propósito (ver specs/roadmap.md, punto 2), así que quien lo elija merece
+    leer por qué no está y **qué hacer en su lugar**.
     """
     fabrica = REGISTRO.get(modelo.adaptador)
     if fabrica is None:
         disponibles = ", ".join(sorted(a.value for a in REGISTRO))
+        salida = SALIDAS.get(
+            modelo.adaptador,
+            "Un proveedor que no hable ninguno de estos se resuelve poniéndole "
+            "adelante un gateway que traduzca a formato OpenAI.",
+        )
         raise AdaptadorNoImplementado(
-            f"El adaptador {modelo.adaptador.value!r} todavía no está "
-            f"implementado. Disponibles: {disponibles}. "
-            f"Un proveedor que no hable ninguno de estos se resuelve poniéndole "
-            f"adelante un gateway que traduzca a formato OpenAI."
+            f"El adaptador {modelo.adaptador.value!r} no está implementado. "
+            f"Disponibles: {disponibles}. {salida}"
         )
     return fabrica(modelo)
 

@@ -145,8 +145,9 @@ def upgrade() -> None:
 
     **La credencial no se toca ni se copia acá.** La fila guarda el nombre de la
     variable, nunca su valor: la base se respalda y se dumpea. Quien migre tiene
-    que tener `MODELO_API_KEY` definida — y mientras no lo esté, el motor cae a
-    `GEMINI_API_KEY` avisando que está deprecada.
+    que definir `MODELO_API_KEY` con la key que antes estaba en `GEMINI_API_KEY`
+    — es un renombre, mismo valor. Si no lo hace, el motor no sintetiza y lo
+    dice; no adivina.
     """
     conexion = op.get_bind()
 

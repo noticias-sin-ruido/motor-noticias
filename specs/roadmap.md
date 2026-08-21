@@ -163,15 +163,30 @@ Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el moto
 
 Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
 
-**✅ COMPLETO salvo la etapa 3.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ⬜** Anthropic nativo · **4 ✅** retirado el camino histórico.
+**✅ COMPLETO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ❌ no se implementa** (ver abajo) · **4 ✅** retirado el camino histórico.
 
 Con la etapa 4, **el motor ya no tiene proveedor preferido**: sin fila activa en `modelo_ia` la síntesis no corre y lo dice.
 
-**Al actualizar hay un paso manual, y es a propósito.** La migración `5f80e67d5404` convierte la configuración de entorno del despliegue en una fila, pero **la deja apagada**: la regla es que ninguna migración elige proveedor. Hay que prenderla con `PATCH /modelos/{id}?activo=true`. La credencial sí es automática — `GEMINI_API_KEY` se sigue leyendo como compatibilidad temporal, avisando en cada lectura.
+**Al actualizar hay un paso manual, y es a propósito.** La migración `5f80e67d5404` convierte la configuración de entorno del despliegue en una fila, pero **la deja apagada**: la regla es que ninguna migración elige proveedor. Hay que prenderla con `PATCH /modelos/{id}?activo=true`, y **renombrar la credencial en el `.env`**: `GEMINI_API_KEY` pasa a `MODELO_API_KEY`, mismo valor. Si falta, el motor no sintetiza y lo dice — no adivina.
 
 **Prender un modelo apaga a los demás.** Con una sola credencial, dos proveedores prendidos es un estado que no se puede usar; y sin exclusividad dos filas empataban en `prioridad` y desempataba el `id`, o sea ganaba la más vieja en silencio.
 
-**La etapa 3 queda abierta y no bloquea nada**: Anthropic ya es usable por el adaptador compatible con `tools`, que es el modo que el sondeo le detecta solo. Lo que un adaptador nativo agregaría es su palanca de razonamiento (`thinking.budget_tokens`), que ahora entra por `opciones` sin tocar el esquema.
+### La etapa 3 (Anthropic nativo) no se implementa — decidido el 21/08/2026
+
+**Anthropic se usa con el adaptador `openai_compatible`** y `base_url=https://api.anthropic.com/v1`. El valor `Adaptador.ANTHROPIC` queda reservado en el enum y `construir` lo rechaza con un mensaje que explica esto mismo.
+
+**⚠️ El supuesto que sostiene esto no está verificado.** Está comprobado que la capa de compatibilidad de Anthropic **ignora `response_format` en silencio**, así que el sondeo tiene que caer a `tools`. Que `tools` funcione ahí **nunca se probó**: el proyecto no tiene una credencial de Anthropic con crédito. Si alguien la consigue, esa medición cuesta menos de un centavo y es lo primero que hay que hacer — si `tools` no sirve, Anthropic no entra por ningún lado y la etapa 3 pasa de opcional a necesaria.
+
+**Lo que se pierde**, y es más de lo que decía la versión anterior de este documento:
+
+- **Salida estructurada nativa** vía `output_config.format`, que da JSON válido por construcción igual que `response_schema` en Gemini. Por `tools` el esquema es una guía, no una garantía.
+- **`output_config.effort`** (`low` a `max`) como palanca de costo.
+
+> Corrección: este roadmap decía que el nativo aportaría `thinking.budget_tokens`. **Eso ya no existe** — está removido en los modelos actuales de Anthropic y devuelve 400. Lo reemplazaron `thinking: {type: "adaptive"}` y `output_config.effort`.
+
+**Por qué no se construye igual.** No es solo que no haya key para testear: **no hay presupuesto para correrlo.** Con el prompt real medido (18.447 tokens de entrada, ~2.200 de salida) y unas 20 síntesis por día, Anthropic sale entre **US$18 y US$88 por mes** según el modelo, contra **US$0** del tier gratuito de Gemini que corre hoy. Construir un adaptador que el proyecto no puede pagar es agregar una dependencia y ~250 líneas que nadie va a ejecutar.
+
+**Cuándo se revisa**: si el proyecto consigue una credencial de Anthropic, o si alguien que despliega el motor la tiene y reporta que el compatible no le alcanza. Hasta entonces es una limitación documentada, no una tarea pendiente.
 
 La etapa 2 midió lo que estaba pendiente: **los tres caminos a Gemini son equivalentes** —8,05 s el nativo, 8,55 s el compatible, 8,98 s el histórico sobre el mismo prompt de 18.447 tokens, mismos 4 ángulos en las doce corridas— y la palanca de razonamiento del nativo **funciona y se paga**: de 0 tokens con `LOW` a 6.267 con `HIGH`, con el triple de latencia.
 

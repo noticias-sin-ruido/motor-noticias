@@ -181,6 +181,12 @@ Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 
 > ⚠️ **La API no tiene autenticación**, y los tres endpoints de `/modelos` son los primeros que aceptan una URL arbitraria para que el motor la llame. Hasta que exista auth, desplegala en una red donde solo llegue el operador. Ver `specs/roadmap.md`, puntos 2 y 9.
 
+### Qué proveedores entran
+
+**Cualquiera que hable el protocolo de OpenAI**, que es el estándar de hecho: OpenAI, Azure, Groq, OpenRouter, Together, DeepSeek, Mistral, xAI, vLLM, LM Studio, Ollama y el propio Gemini. Se dan de alta cambiando `base_url`, sin tocar código. Gemini además tiene adaptador nativo, que es el único camino a su palanca de razonamiento.
+
+**Limitación conocida — Anthropic.** Se usa con el adaptador `openai_compatible` y `base_url=https://api.anthropic.com/v1`. No hay adaptador nativo, así que no se accede a su salida estructurada (`output_config.format`) ni a `output_config.effort`. Además: está verificado que su capa de compatibilidad **ignora `response_format`**, con lo cual el alta va a caer al modo `tools` — y **eso no está comprobado contra el proveedor real**, porque el proyecto no tuvo una credencial con crédito para probarlo. Si el alta falla, ése es el motivo, y la salida es poner adelante un gateway (LiteLLM, OpenRouter). Ver `specs/roadmap.md`, punto 2.
+
 <details>
 <summary><b>Respuestas reales de ejemplo</b></summary>
 

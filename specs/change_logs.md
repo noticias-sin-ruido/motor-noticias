@@ -2090,3 +2090,57 @@ O sea, 17 clusters, 17 tracebacks y 17 "fallidos" para una sola causa. Es exacta
 Ahora corta la corrida y lo dice una sola vez. Los clusters quedan sin marca, así que entran en carrera solos cuando la configuración esté.
 
 `stats` distingue las dos formas de "el motor no está configurado", porque se arreglan distinto: `sin_modelo` es que nadie eligió proveedor, `sin_credencial` es que el elegido no tiene credencial. **Ninguna de las dos cuenta como cluster fallido**, que es el punto.
+
+---
+
+## Se cierra el punto 2: la etapa 3 no se implementa (21/08/2026)
+
+**Anthropic nativo queda como limitación documentada, no como tarea pendiente.** Con eso el punto 2 del backlog cierra.
+
+### Lo primero: el roadmap estaba desactualizado
+
+Decía que un adaptador nativo aportaría *"su palanca de razonamiento (`thinking.budget_tokens`)"*. **Eso ya no existe**: `budget_tokens` está removido en los modelos actuales de Anthropic y devuelve **400**. Lo reemplazaron `thinking: {type: "adaptive"}` y `output_config.effort` (`low` a `max`).
+
+Y hay algo que no sabíamos y que hace al nativo **más** valioso de lo que decíamos: Anthropic tiene **salida estructurada nativa** vía `output_config.format`, o sea JSON válido por construcción, igual que `response_schema` en Gemini. Por la capa de compatibilidad, en cambio, el esquema viaja como `tools` y es una guía, no una garantía.
+
+### La decisión, y el número que la define
+
+| Modelo | Por síntesis | ~20/día | Al mes |
+|---|---:|---:|---:|
+| Opus 5 | US$0,147 | US$2,95 | **~US$88** |
+| Sonnet 5 | US$0,088 | US$1,77 | ~US$53 |
+| Haiku 4.5 | US$0,029 | US$0,59 | ~US$18 |
+
+Contra **US$0** del tier gratuito de Gemini que corre hoy. Anthropic no tiene tier gratuito.
+
+Se evaluaron dos caminos: construir el adaptador validándolo con una corrida barata (~US$1,50, que sí es asumible), o cerrar el punto documentando la limitación. **Se eligió el segundo**, y el motivo decisivo no fue el costo de construirlo sino el de **correrlo**: agregar una dependencia y ~250 líneas para un camino que el proyecto no puede pagar es deuda sin contrapartida.
+
+### El supuesto que queda abierto, dicho como supuesto
+
+Está verificado que la capa de compatibilidad de Anthropic **ignora `response_format` en silencio**. Que acepte `tools` —de lo que depende que Anthropic sea usable sin adaptador nativo— **nunca se probó**: no hubo credencial con crédito.
+
+Eso quedó escrito en tres lugares donde alguien lo va a leer antes de tropezarse: el docstring de `ModoEstructura`, el comentario de `Adaptador.ANTHROPIC`, y el mensaje de error de `construir`, que ahora dice qué hacer en lugar de cada adaptador reservado en vez de dar un texto genérico.
+
+Es deliberado no venderlo como hecho: exactamente el error que costó el episodio de Groq fue dar por bueno un mecanismo sin probarlo.
+
+### Dos defectos que aparecieron mientras se documentaba esto
+
+**El placeholder del `.env.example` tapaba el fallback de credencial.** Al renombrar `GEMINI_API_KEY` a `MODELO_API_KEY` en un `.env` real, el valor que quedó fue `tu_api_key_aqui` — que es *truthy*. `leer_api_key` lo devolvía como si fuera una credencial y nunca llegaba a `_heredada`, así que la síntesis habría dado **401 en cada cluster**; y como un 401 es `ErrorDeProveedor`, eso son **tres reintentos con espera creciente por cluster**. El síntoma —"el proveedor rechaza la key"— no se parece en nada a la causa, que es una línea sin completar.
+
+Ahora un valor que empieza con `tu_` cuenta como no configurada y el mensaje lo dice con todas las letras. La comprobación ya existía dentro de `_heredada`; lo que faltaba era aplicarla también en la vía principal.
+
+**Y los tests de credenciales no eran herméticos.** `_del_entorno` hace `dotenv_values(".env")` relativo al directorio actual, así que los tests que no se movían a un temporal leían **el `.env` real del desarrollador**. Se descubrió de la peor forma: cinco tests se rompieron sin que se tocara una línea de código, solo porque el `.env` de la máquina cambió. Ahora la fixture hace `chdir` a un `tmp_path` sin `.env`.
+
+### Se saca el fallback a `GEMINI_API_KEY` (21/08/2026)
+
+La compatibilidad temporal duró lo que tenía que durar: el `.env` del despliegue ya usa `MODELO_API_KEY`, así que `leer_api_key` dejó de mirar el nombre viejo. Con eso se van `VARIABLE_HEREDADA`, `_heredada()`, el flag `_ya_se_aviso` y los cinco tests que lo cubrían.
+
+Sobrevive lo único de ese bloque que no era transitorio: **la comprobación de placeholder**. Nació adentro de `_heredada` y se había extendido a la vía principal el mismo día que se encontró el defecto; ahora es `_es_placeholder`, con `PREFIJO_PLACEHOLDER = "tu_"` como convención declarada del `.env.example`.
+
+Vale anotar que el fallback cumplió su función de manual: existió para que una actualización no cortara la síntesis, avisó hasta que alguien renombró la variable, y se borró apenas dejó de hacer falta. Lo que lo hizo funcionar fue ponerle un aviso — un fallback silencioso habría quedado para siempre porque nadie se habría enterado de que estaba ahí.
+
+**Actualizar el motor ahora exige un renombre en el `.env`**: `GEMINI_API_KEY` → `MODELO_API_KEY`, mismo valor. Está dicho en `.env.example`, `roadmap.md`, `tech_stack.md` y el docstring de la migración `5f80e67d5404`. Si falta, el motor no sintetiza y lo dice; no adivina.
+
+#### Y el aislamiento de los tests se generalizó
+
+El `chdir` a un temporal dejó de ser una fixture de la clase de credenciales y pasó a ser **autouse de todo el archivo**. El problema no era de esos tests en particular: `_del_entorno` lee `dotenv_values(".env")` relativo al directorio actual, así que **cualquier** test del archivo que llegue a esa función lee el `.env` de la máquina. Los dos que sí quieren un `.env` se crean el suyo en su propio `tmp_path`.

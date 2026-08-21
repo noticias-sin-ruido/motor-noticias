@@ -29,7 +29,6 @@ from src.services.proveedores import (
     ProveedorNoConfigurado,
     RespuestaBloqueada,
 )
-from src.services.proveedores import base
 from src.services.proveedores.openai_compatible import TIMEOUT_SONDEO_SEGUNDOS
 
 # La forma con sufijo. Hoy ninguna fila nace así —el alta no acepta el campo—
@@ -40,6 +39,24 @@ ENV_OK = f"{PREFIJO_API_KEY_ENV}TEST"
 
 # Lo mínimo que `_valida_la_forma` acepta como "respetó el esquema".
 FORMA_OK = json.dumps({"angulos": []})
+
+
+@pytest.fixture(autouse=True)
+def sin_el_env_de_la_maquina(monkeypatch, tmp_path):
+    """
+    Ningún test de este archivo lee el `.env` real del desarrollador.
+
+    `_del_entorno` hace `dotenv_values(".env")` **relativo al directorio
+    actual**, así que un test que no se mueva a un temporal termina leyendo el
+    archivo de la máquina — y pasando o fallando según lo que ése tenga adentro.
+    Se descubrió de la peor forma: cinco tests se rompieron sin que se tocara
+    una línea de código, solo porque cambió un archivo que ni siquiera está
+    versionado.
+
+    Los dos tests que sí quieren un `.env` se crean el suyo en su propio
+    `tmp_path`, así que este `chdir` no les molesta.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture
@@ -170,6 +187,22 @@ class TestCredenciales:
 
         assert OpenAICompatible(_modelo()).api_key == "la-del-entorno"
 
+    def test_el_valor_de_ejemplo_no_cuenta_como_credencial(self, monkeypatch):
+        """
+        **El caso que se encontró en un `.env` real**, al renombrar la variable.
+
+        `tu_api_key_aqui` es lo que trae el `.env.example`, y es un valor
+        *truthy*: sin esta comprobación viajaba al proveedor como si fuera una
+        credencial. Eso da **401 en cada síntesis**, y como un 401 es
+        `ErrorDeProveedor`, son tres reintentos con espera creciente **por
+        cluster**. El síntoma —"el proveedor rechaza la key"— no se parece en
+        nada a la causa, que es una línea del `.env` sin completar.
+        """
+        monkeypatch.setenv(VARIABLE_UNICA, "tu_api_key_aqui")
+
+        with pytest.raises(ProveedorNoConfigurado, match="valor de ejemplo"):
+            OpenAICompatible(_modelo(api_key_env=VARIABLE_UNICA))
+
     def test_la_key_viaja_en_el_header(self, key):
         """
         Sin esto se podía mandar el header sin la key y ningún test protestaba:
@@ -179,71 +212,6 @@ class TestCredenciales:
             OpenAICompatible(_modelo()).probar("hola", _EsquemaChico)
 
         assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer clave-de-prueba"
-
-
-class TestCredencialHeredada:
-    """
-    `GEMINI_API_KEY` se sigue leyendo cuando `MODELO_API_KEY` no está.
-
-    Es lo que hace que actualizar el motor no corte la síntesis de un día para
-    el otro: el `.env` de una instancia que ya venía corriendo dice
-    `GEMINI_API_KEY` y nadie le avisó. Es deuda con fecha, no una segunda forma
-    válida.
-    """
-
-    @pytest.fixture(autouse=True)
-    def sin_avisar_todavia(self, monkeypatch):
-        monkeypatch.setattr(base, "_ya_se_aviso", False)
-
-    def test_cae_a_la_heredada(self, monkeypatch):
-        monkeypatch.delenv(VARIABLE_UNICA, raising=False)
-        monkeypatch.setenv(base.VARIABLE_HEREDADA, "la-vieja")
-
-        assert OpenAICompatible(_modelo(api_key_env=VARIABLE_UNICA)).api_key == "la-vieja"
-
-    def test_la_nueva_le_gana_a_la_heredada(self, monkeypatch):
-        monkeypatch.setenv(VARIABLE_UNICA, "la-nueva")
-        monkeypatch.setenv(base.VARIABLE_HEREDADA, "la-vieja")
-
-        assert OpenAICompatible(_modelo(api_key_env=VARIABLE_UNICA)).api_key == "la-nueva"
-
-    def test_el_placeholder_del_env_example_no_cuenta(self, monkeypatch):
-        """`tu_api_key_aqui` es lo que trae el `.env.example`, no una key."""
-        monkeypatch.delenv(VARIABLE_UNICA, raising=False)
-        monkeypatch.setenv(base.VARIABLE_HEREDADA, "tu_api_key_aqui")
-
-        with pytest.raises(ProveedorNoConfigurado):
-            OpenAICompatible(_modelo(api_key_env=VARIABLE_UNICA))
-
-    def test_la_forma_con_sufijo_no_cae_a_la_heredada(self, monkeypatch):
-        """
-        El fallback es **solo** para el nombre único. Una fila que nombra
-        `MODELO_API_KEY_GROQ` y no la tiene definida está mal configurada, y
-        darle la key de Gemini sería mandarle al proveedor equivocado una
-        credencial que no es suya.
-        """
-        monkeypatch.delenv(ENV_OK, raising=False)
-        monkeypatch.setenv(base.VARIABLE_HEREDADA, "la-de-gemini")
-
-        with pytest.raises(ProveedorNoConfigurado):
-            OpenAICompatible(_modelo(api_key_env=ENV_OK))
-
-    def test_avisa_una_vez_por_proceso_y_no_una_por_lectura(self, monkeypatch, caplog):
-        """
-        **Medido en una corrida real: 19 avisos idénticos** —uno por cluster
-        sintetizado, más el sondeo, más cada `GET /modelos`—, que a 96 corridas
-        por día son unas 1.800 líneas iguales. Eso no es visibilidad: es ruido
-        que uno aprende a filtrar, y filtrado no avisa nada.
-        """
-        monkeypatch.delenv(VARIABLE_UNICA, raising=False)
-        monkeypatch.setenv(base.VARIABLE_HEREDADA, "la-vieja")
-
-        with caplog.at_level(logging.WARNING):
-            for _ in range(20):
-                OpenAICompatible(_modelo(api_key_env=VARIABLE_UNICA))
-
-        avisos = [r for r in caplog.records if base.VARIABLE_HEREDADA in r.getMessage()]
-        assert len(avisos) == 1, f"{len(avisos)} avisos para 20 lecturas"
 
 
 class TestValidacionDeBaseUrl:
@@ -751,7 +719,7 @@ class TestSondeo:
             with pytest.raises(ErrorDeProveedor) as capturado:
                 modelos.sondear(_modelo(adaptador=Adaptador.ANTHROPIC))
 
-        assert "todavía no está" in str(capturado.value)
+        assert "no está implementado" in str(capturado.value)
         assert "No se pudo obtener la estructura" not in str(capturado.value)
         post.assert_not_called()
 
@@ -875,7 +843,7 @@ class TestSeleccion:
         `Adaptador` ya declara los tres, pero en la etapa 1 solo existe uno.
         Quien dé de alta un `gemini` nativo merece leer por qué no se puede.
         """
-        with pytest.raises(ErrorDeProveedor, match="todavía no está"):
+        with pytest.raises(ErrorDeProveedor, match="no está implementado"):
             modelos.construir(_modelo(adaptador=Adaptador.ANTHROPIC))
 
 

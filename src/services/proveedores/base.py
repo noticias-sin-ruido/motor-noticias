@@ -92,16 +92,6 @@ class RespuestaBloqueada(Exception):
     """
 
 
-# El nombre que llevaba la credencial de Gemini antes de que el modelo fuera
-# configurable. Se sigue leyendo como **último recurso** para que actualizar el
-# motor no corte la síntesis de un día para el otro en un despliegue que ya
-# existe: el `.env` de esa instancia dice `GEMINI_API_KEY` y nadie le avisó.
-#
-# Es deuda con fecha, no una segunda forma válida: cada lectura por esta vía
-# loguea un aviso, y se saca cuando el punto 2 quede cerrado y difundido.
-VARIABLE_HEREDADA = "GEMINI_API_KEY"
-
-
 def _del_entorno(nombre: str) -> Optional[str]:
     """
     El valor de una variable, del entorno del proceso o del `.env`.
@@ -123,43 +113,14 @@ def _del_entorno(nombre: str) -> Optional[str]:
     return dotenv_values(".env").get(nombre)
 
 
-# Si ya se avisó del fallback en este proceso. Ver `_heredada`.
-_ya_se_aviso = False
+# Prefijo de los valores de ejemplo del `.env.example` (`tu_api_key_aqui`,
+# `tu_secreto_compartido`, ...). Es la convención de la casa para "acá va lo
+# tuyo", así que un valor que empieza así **no es una credencial**.
+PREFIJO_PLACEHOLDER = "tu_"
 
 
-def _heredada() -> Optional[str]:
-    """
-    La credencial vieja de Gemini, si es que está y la nueva no.
-
-    Existe para que actualizar no rompa: ver `VARIABLE_HEREDADA`.
-
-    **Avisa una vez por proceso, no una por lectura.** La primera versión
-    avisaba siempre, con el argumento de que un fallback silencioso es
-    indistinguible de una configuración correcta. El argumento sigue en pie,
-    pero la frecuencia estaba mal: medido en una corrida real, **19 avisos
-    idénticos** —uno por cluster sintetizado, más el sondeo, más cada
-    `GET /modelos`—, que a 96 corridas por día son unas 1.800 líneas iguales.
-    Eso no es visibilidad, es ruido que uno aprende a filtrar, y filtrado no
-    avisa nada.
-
-    Una vez por proceso conserva lo que importa: aparece en cada arranque, o sea
-    después de cada deploy, que es cuando alguien está mirando.
-    """
-    global _ya_se_aviso
-
-    valor = _del_entorno(VARIABLE_HEREDADA)
-    if valor and not valor.startswith("tu_"):
-        if not _ya_se_aviso:
-            _ya_se_aviso = True
-            logger.warning(
-                f"Usando {VARIABLE_HEREDADA} porque {VARIABLE_UNICA} no está "
-                f"definida. Es compatibilidad temporal: renombrá la variable en "
-                f"tu `.env`, que ahora la credencial es una sola para el "
-                f"proveedor que uses, sea cual sea. (Este aviso sale una vez "
-                f"por arranque.)"
-            )
-        return valor
-    return None
+def _es_placeholder(valor: Optional[str]) -> bool:
+    return bool(valor) and valor.startswith(PREFIJO_PLACEHOLDER)
 
 
 def leer_api_key(modelo: ModeloIA) -> str:
@@ -183,8 +144,20 @@ def leer_api_key(modelo: ModeloIA) -> str:
         )
 
     valor = _del_entorno(nombre)
-    if not valor and nombre == VARIABLE_UNICA:
-        valor = _heredada()
+
+    # **El placeholder cuenta como "no está".** Es un valor *truthy*, así que
+    # sin esto tapaba el fallback y se lo mandaba al proveedor como si fuera una
+    # credencial: 401 en cada síntesis, y como un 401 es `ErrorDeProveedor`, tres
+    # reintentos con espera creciente **por cluster**. El síntoma no se parece en
+    # nada a la causa, que es que alguien copió el `.env.example` y no completó
+    # esta línea. Encontrado al renombrar la variable en un `.env` real.
+    if _es_placeholder(valor):
+        raise ProveedorNoConfigurado(
+            f"La variable {nombre!r} tiene el valor de ejemplo del "
+            f"`.env.example` ({valor!r}), no una credencial. Reemplazalo por la "
+            f"key real de tu proveedor."
+        )
+
     if not valor:
         raise ProveedorNoConfigurado(
             f"La variable {nombre!r} no está definida o está vacía. Definila en "
