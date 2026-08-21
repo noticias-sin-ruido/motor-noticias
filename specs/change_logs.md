@@ -1854,3 +1854,97 @@ El 400 del cluster 464 —el único que entraba en el límite— quedó **sin ex
 O sea que **el sondeo valida el mecanismo, no la capacidad**. Es una distinción que hoy no está dicha en ningún lado, y se descubrió de la peor forma posible: dando de alta un modelo que parecía servir.
 
 Queda anotado como mejora: que el sondeo estime el tamaño de un prompt real y avise cuando los límites declarados por el proveedor no lo admitan. Mientras tanto, la garantía que da el alta es más chica de lo que parece y conviene decirlo.
+
+---
+
+## Etapa 2 del punto 2: la credencial única y el adaptador nativo de Gemini (21/08/2026)
+
+Dos decisiones grandes, y la primera **contradice lo que la etapa 1 había construido una semana antes**. Vale dejar escrito el razonamiento completo porque el cambio se ve como un retroceso si solo se mira el diff.
+
+### Decisión 1 — Una sola variable de entorno para la credencial
+
+La etapa 1 diseñó `api_key_env`: cada fila guardaba el **nombre** de su variable (`MODELO_API_KEY_GEMINI`, `MODELO_API_KEY_GROQ`), lo que permitía tener varios proveedores configurados a la vez.
+
+**Se cambió a una sola variable de nombre fijo, `MODELO_API_KEY`**, y el alta ya no acepta el campo.
+
+Lo que hizo caer el diseño anterior fue notar en qué se apoyaba. El argumento para varias variables era la **cadena de fallback** —si un proveedor pega contra su rate limit, caer al siguiente—, que necesita las dos credenciales vivas en el mismo instante. Pero esa cadena es el punto 6 del backlog: **no está construida**, y `prioridad` hoy solo desempata. Se estaba pagando complejidad permanente por una función que no existe.
+
+Y el costo era real: el `.env` crecía una línea por cada proveedor que alguien probara, para siempre.
+
+**El usuario aportó el argumento que cerró la discusión**: la cadena de fallback no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden, y eso es lógica nueva de peso. Con eso, multimodelo pasó a ser un punto propio del backlog en vez de un requisito implícito de éste.
+
+**Lo que se conservó, y por qué.** La columna `api_key_env` sigue existiendo con default `VARIABLE_UNICA`, y `leer_api_key` sigue aceptando la forma con sufijo. Diferir multimodelo así sale gratis: el día que se implemente es exponer un campo, no rehacer la validación ni migrar la tabla. Y las instancias que ya tengan filas con nombres sufijados **siguen funcionando sin tocar nada**.
+
+#### La consecuencia que hubo que atacar
+
+Con nombres por proveedor, que la variable existiera era evidencia útil: si activabas un modelo de Groq sin haber definido su variable, la ausencia lo delataba. `PATCH ?activo=true` se apoyaba en eso y **solo miraba el entorno**, con el argumento explícito de que no valía gastar una llamada al proveedor para prender un interruptor.
+
+**Con una credencial única ese razonamiento se da vuelta.** `MODELO_API_KEY` existe siempre, tenga adentro la key del proveedor que tenga. El chequeo pasaba igual cuando el operador cambiaba de modelo y se olvidaba de cambiar el valor, y el 401 aparecía quince minutos después, en el paso más caro del pipeline y sin nadie mirando.
+
+Así que **activar pasó a sondear de verdad** contra el proveedor, con el timeout corto del sondeo. Cuesta una llamada y a cambio el error sale con el botón todavía apretado. **Apagar no sondea**, y eso es deliberado: apagar es la marcha atrás y tiene que funcionar justamente cuando el proveedor está caído.
+
+#### Un cambio menor con el mismo criterio
+
+`AltaModelo` pasó a `extra="forbid"`. Sin eso, mandar `api_key_env` en el alta se descartaba **en silencio** y quien lo mandó se quedaba creyendo que el motor iba a leer la variable que él eligió. En un endpoint donde el campo de más es justamente el que alguien usaría para desviar la credencial, el silencio es la peor respuesta. Por el mismo motivo, el adaptador nativo **rechaza** `base_url` en vez de ignorarlo.
+
+### Decisión 2 — Dónde viven las palancas específicas de un proveedor
+
+El adaptador nativo existe para dar acceso a `thinking_config`, que no tiene equivalente fuera de Gemini. Eso obligaba a decidir dónde se configura.
+
+Se evaluaron dos caminos:
+
+1. **Columna `thinking_level` propia.** Tipada y obvia, pero es una columna que un solo adaptador lee. Con Anthropic entrando en la etapa 3 y su `thinking.budget_tokens`, serían dos columnas muertas para todos los demás: la tabla empieza a crecer por proveedor, que es justo lo que el enum cerrado había evitado.
+2. **Columna `opciones` JSON con allowlist por adaptador.** ✅ **Elegido.** Un solo cambio de esquema para siempre.
+
+**La allowlist no es prolijidad, es la llave del bolsillo.** Sin ella, `opciones` sería un camino directo desde un endpoint sin autenticación hasta el cuerpo del request que sale hacia el proveedor. Cada adaptador declara `OPCIONES_ACEPTADAS` y se valida **al construirlo** —o sea antes de guardar nada—, para que una opción inválida sea un 422 en el alta y no una síntesis que falla cada 15 minutos.
+
+El adaptador compatible declara **cero opciones**, y es una postura: habla con decenas de proveedores distintos, así que una palanca que funcione en uno no tiene por qué existir en otro. Aceptarla sería prometer un efecto que depende de contra quién apunte el `base_url` de esa fila.
+
+### Un mecanismo que no se puede probar no se cuenta como intento
+
+`sondear` probaba siempre `response_format` y después `tools`. El nativo de Gemini tiene **un solo mecanismo**, así que probarle el segundo daba un pedido idéntico al primero, fallaba igual, y el mensaje final acusaba al proveedor de no respetar el esquema *por ninguno de los dos mecanismos* — una conclusión falsa sobre uno que nunca se intentó de verdad.
+
+Cada adaptador declara ahora `MODOS_SOPORTADOS` y el sondeo solo recorre esos.
+
+### El cliente deja de ser global
+
+El camino histórico cachea un `genai.Client` en una variable de módulo. Eso significa que **la credencial queda congelada en el proceso**: cambiar la key no tiene efecto hasta reiniciar.
+
+El adaptador lo arma por instancia. Es lo que hace que cambiar de proveedor no necesite un redeploy — junto con que `_del_entorno` relee el `.env` en cada llamada.
+
+### La medición que la etapa 2 existía para hacer (21/08/2026)
+
+Los tres caminos a Gemini sobre **el mismo prompt real** — cluster 485, 13 noticias de 4 medios, 77.429 caracteres, 18.447 tokens de entrada. Tres rondas cada uno.
+
+| Camino | Éxitos | Mediana | Salida | Razonamiento |
+|---|---|---:|---:|---:|
+| histórico | 3/3 | 8,98 s | 2.099 | 0 |
+| nativo | 2/3 | 8,05 s | 1.712 | 0 |
+| nativo con `thinking_level=HIGH` | 3/3 | 28,38 s | 2.267 | 6.267 |
+| compatible (capa OpenAI de Gemini) | 3/3 | 8,55 s | 2.229 | 0 |
+
+**Los tres caminos son equivalentes.** Misma entrada exacta, 4 ángulos en las doce corridas, entre 9 y 14 puntos clave, y en la mayoría hasta el mismo título de encabezado. La latencia no se distingue: 8,05 · 8,55 · 8,98 s.
+
+**La palanca de razonamiento funciona y es cara, ahora medido de punta a punta.** De 0 tokens con `LOW` a entre 4.204 y 8.579 con `HIGH`, y la latencia se triplica. Eso confirma el motivo de existir del adaptador nativo: la capa compatible no expone `thinking_config`, así que usar Gemini por ahí es renunciar a la única palanca de costo del pipeline.
+
+#### El hallazgo que no se estaba buscando
+
+Una segunda corrida, de seis rondas, para comprobar si la varianza salía de que el adaptador arma un cliente nuevo por llamada mientras el histórico cachea uno global:
+
+| Caso | Mediana | Peor |
+|---|---:|---:|
+| histórico (cliente cacheado) | 7,41 s | **486,33 s** |
+| nativo (cliente nuevo) | 9,50 s | 9,94 s |
+| nativo (cliente reusado) | 7,53 s | 8,56 s |
+
+**El camino histórico tardó 486 segundos en una ronda — ocho minutos — y no falló.** No falló porque `_llamar_gemini` **no tiene timeout configurado**: usa el del socket. Eso no es una anécdota estadística, es una propiedad del código. Y como `llamar_modelo` reintenta hasta tres veces, el techo de un solo cluster es tres veces eso. El ciclo del scheduler es de 15 minutos.
+
+O sea que la comparación se dio vuelta: **el adaptador nuevo no hereda ese riesgo, lo acota.** Su peor caso es el timeout de 120 s, que fue exactamente lo que hizo en la corrida anterior cuando Gemini se colgó (`DEADLINE_EXCEEDED` a los 119,22 s). Lo que parecía una desventaja del adaptador —un fallo donde el histórico "no fallaba"— era el adaptador haciendo lo correcto.
+
+Esto refuerza la etapa 4: retirar el camino histórico no es solo sacar duplicación, es sacar la única llamada sin límite de tiempo del pipeline.
+
+#### Lo que sí costó armar el cliente por llamada
+
+**~2 segundos por llamada** (9,50 s contra 7,53 s de mediana), que es el handshake TLS que el cliente cacheado se ahorra. Con 26 clusters en una corrida son unos 50 segundos, alrededor del 12% del costo de la síntesis medido en la etapa 4.
+
+No se corrigió en esta etapa. La salida no es volver al cliente global —eso es lo que congela la credencial en el proceso— sino **resolver el proveedor una vez por corrida y pasarlo**, igual que ya se hace con el `ModeloIA` y por el mismo motivo. Queda anotado con su medición.

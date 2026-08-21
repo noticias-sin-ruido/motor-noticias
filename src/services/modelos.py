@@ -101,8 +101,18 @@ def sondear(modelo: ModeloIA) -> Tuple[ModoEstructura, str]:
     # mutar la copia entre vueltas.
     proveedor = construir(candidato)
 
+    # **Solo los modos que este adaptador dice soportar.** El nativo de Gemini
+    # tiene un único mecanismo (`response_schema`), así que probarle `TOOLS`
+    # daría un segundo fallo idéntico al primero y el mensaje final le diría al
+    # operador que su proveedor no respeta el esquema *por ninguno de los dos
+    # mecanismos* — una conclusión falsa sobre uno que nunca se intentó.
+    modos = getattr(proveedor, "MODOS_SOPORTADOS", None) or (
+        ModoEstructura.RESPONSE_FORMAT,
+        ModoEstructura.TOOLS,
+    )
+
     intentos = []
-    for modo in (ModoEstructura.RESPONSE_FORMAT, ModoEstructura.TOOLS):
+    for modo in modos:
         candidato.modo_estructura = modo
         try:
             crudo = proveedor.probar(
@@ -131,8 +141,9 @@ def sondear(modelo: ModeloIA) -> Tuple[ModoEstructura, str]:
     # inválida, y desde acá no se distinguen. Lo accionable es lo que dijo el
     # proveedor, así que va primero y completo.
     raise ErrorDeProveedor(
-        "No se pudo obtener la estructura que el motor necesita, por ninguno de "
-        "los dos mecanismos. Lo que respondió el proveedor: "
+        f"No se pudo obtener la estructura que el motor necesita, por ninguno "
+        f"de los {len(modos)} mecanismos que soporta este adaptador. Lo que "
+        f"respondió el proveedor: "
         + " | ".join(intentos)
         + ". Si el modelo y la credencial son correctos y aun así no respeta el "
         "esquema, usá el adaptador nativo del proveedor cuando exista, o poné "

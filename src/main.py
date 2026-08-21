@@ -1,7 +1,7 @@
 import logging
 import threading
 from contextlib import asynccontextmanager
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -11,7 +11,7 @@ from apscheduler.events import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -418,34 +418,47 @@ def clusters(
 #
 # - `Adaptador` es un enum cerrado, así que la base no puede elegir qué código
 #   se ejecuta.
-# - `api_key_env` tiene que llevar el prefijo reservado, así que una fila no
-#   puede nombrar una variable ajena.
+# - **`api_key_env` no se acepta en el alta.** La credencial vive siempre en la
+#   misma variable, así que no hay nada que elegir — y de paso desaparece la
+#   primitiva que se armaba con `base_url` propio y una variable ajena.
 # - `base_url` se valida: solo http/https, sin credenciales embebidas y sin
 #   direcciones link-local.
-# - **Ni `api_key_env` ni `base_url` se devuelven en ninguna respuesta.** Sin
-#   eso, el listado le decía a cualquiera qué variable nombrar para que el motor
-#   le mandara la key del operador a un servidor elegido por él.
+# - **Ni `api_key_env` ni `base_url` se devuelven en ninguna respuesta.**
 # - El cuerpo de la respuesta del proveedor no se refleja en los errores.
 #
 # **Nada de esto reemplaza a la autenticación.** Quien pueda hacer POST acá
-# puede seguir apuntando `base_url` a su propio servidor con un `api_key_env`
-# válido y quedarse con la key de IA. Hasta que exista auth, esto se despliega
-# en una red donde solo llega el operador. Ver specs/roadmap.md, punto 9.
+# puede seguir apuntando `base_url` a su propio servidor y quedarse con la key
+# de IA del operador. Hasta que exista auth, esto se despliega en una red donde
+# solo llega el operador. Ver specs/roadmap.md, punto 9.
 
 
 class AltaModelo(BaseModel):
     """Lo que hace falta para dar de alta un modelo. Ver `models/modelo_ia.py`."""
 
+    # **Los campos de más se rechazan, no se ignoran.** Es la diferencia entre
+    # que alguien mande `api_key_env` y se entere de que ese campo ya no existe,
+    # o que se lo descartemos en silencio y se quede creyendo que el motor va a
+    # leer la variable que él eligió. En un endpoint donde el campo de más suele
+    # ser justamente el que alguien intenta usar para desviar la credencial, el
+    # silencio es la peor respuesta.
+    model_config = ConfigDict(extra="forbid")
+
     nombre: str = Field(min_length=1, max_length=80)
     adaptador: Adaptador
     modelo: str = Field(min_length=1, max_length=200)
-    api_key_env: str
     base_url: Optional[str] = None
+    # **No se pide `api_key_env`**: la credencial va siempre en la misma variable
+    # de entorno (`VARIABLE_UNICA`) y el operador no elige su nombre. Cambiar de
+    # proveedor es cambiar el **valor** de esa variable, no agregar otra.
     # Acotada: sin esto se aceptaba `9999.0` y se lo mandaba tal cual al
     # proveedor. El rango es el que aceptan en común los que nos importan.
     temperatura: float = Field(default=0.3, ge=0.0, le=2.0)
     max_tokens: Optional[int] = Field(default=None, gt=0)
     prioridad: int = Field(default=100, ge=0)
+    # Palancas propias del adaptador —hoy solo el razonamiento de Gemini—. Qué
+    # claves se aceptan lo decide cada adaptador y se comprueba al construirlo,
+    # o sea antes de guardar nada: ver `proveedores/base.validar_opciones`.
+    opciones: Dict[str, Any] = Field(default_factory=dict)
     # No se pide `modo_estructura`: **lo descubre el sondeo**. El operador no
     # tiene por qué saber si su proveedor acepta `response_format` o solo
     # tool-calling, y de hecho la documentación del proveedor puede mentirle.
@@ -560,11 +573,19 @@ def activar_modelo(
     vuelve al camino histórico de Gemini. Es la marcha atrás si un modelo nuevo
     resulta peor de lo esperado.
 
-    **Activar comprueba la credencial primero.** El sondeo del alta pasó alguna
-    vez, pero entre aquel momento y éste la variable de entorno pudo dejar de
-    existir —un redeploy, otra máquina— y activar a ciegas dejaba el motor
-    fallando cada 15 minutos. Se mira solo el entorno, sin salir a la red: no
-    tiene sentido gastar una llamada al proveedor para prender un interruptor.
+    **Activar sondea contra el proveedor, no mira el entorno.** Antes alcanzaba
+    con comprobar que la variable existiera, porque cada proveedor tenía la
+    suya: si prendías un modelo de Groq sin haber definido su variable, la
+    ausencia lo delataba. Con una credencial única eso dejó de ser cierto —
+    `MODELO_API_KEY` existe siempre, tenga adentro la key del proveedor que
+    tenga—, así que la comprobación pasaba igual cuando el operador se olvidaba
+    de cambiar el valor, y el 401 aparecía quince minutos más tarde en el paso
+    más caro del pipeline.
+
+    Cuesta una llamada corta (el timeout del sondeo, no el de una síntesis) y a
+    cambio el error sale cuando se aprieta el botón, que es cuando hay alguien
+    mirando. De paso re-descubre `modo_estructura`: entre el alta y hoy el
+    proveedor pudo cambiar de mecanismo, y sale gratis en el mismo viaje.
     """
     modelo = session.get(ModeloIA, modelo_id)
     if modelo is None:
@@ -572,21 +593,26 @@ def activar_modelo(
             status_code=404, content={"status": "error", "detalle": "No existe ese modelo"}
         )
 
+    resumen = None
     if activo:
         try:
-            leer_api_key(modelo)
-        except ProveedorNoConfigurado as error:
+            modo, resumen = sondear(modelo)
+        except (ErrorDeProveedor, ProveedorNoConfigurado) as error:
             return JSONResponse(
                 status_code=422, content={"status": "error", "detalle": str(error)}
             )
+        modelo.modo_estructura = modo
 
     modelo.activo = activo
     session.add(modelo)
     session.commit()
 
-    return {
+    respuesta = {
         "status": "ok",
         "modelo": modelo.nombre,
         "activo": modelo.activo,
         "en_uso": _nombre_en_uso(session),
     }
+    if resumen:
+        respuesta["sondeo"] = resumen
+    return respuesta

@@ -14,7 +14,13 @@ import httpx
 from pydantic import BaseModel
 
 from ...models import ModeloIA, ModoEstructura
-from .base import ErrorDeProveedor, RespuestaBloqueada, leer_api_key, validar_base_url
+from .base import (
+    ErrorDeProveedor,
+    RespuestaBloqueada,
+    leer_api_key,
+    validar_base_url,
+    validar_opciones,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +50,15 @@ NOMBRE_HERRAMIENTA = "entregar_sintesis"
 # estricto y dejaría afuera el caso de uso que motiva todo este backlog.
 _CERCA = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
-# Nombre de la herramienta cuando se usa el modo `TOOLS`. Da igual cuál sea
-# mientras sea estable: el modelo lo ve en el prompt de tool-calling.
-NOMBRE_HERRAMIENTA = "entregar_sintesis"
+# **Ninguna, y es una postura y no un olvido.** Este adaptador habla con
+# decenas de proveedores distintos; una palanca que funcione en uno no tiene por
+# qué existir en otro, y aceptarla acá sería prometer un efecto que depende de
+# contra quién apunte el `base_url` de esa fila. Las palancas específicas viven
+# en los adaptadores nativos, que sí saben con quién están hablando.
+OPCIONES_ACEPTADAS = frozenset()
+
+# Los dos mecanismos: cuál sirve lo descubre el sondeo. Ver `ModoEstructura`.
+MODOS_SOPORTADOS = (ModoEstructura.RESPONSE_FORMAT, ModoEstructura.TOOLS)
 
 
 class OpenAICompatible:
@@ -59,10 +71,14 @@ class OpenAICompatible:
     resuelto río arriba con `tenacity`.
     """
 
+    OPCIONES_ACEPTADAS = OPCIONES_ACEPTADAS
+    MODOS_SOPORTADOS = MODOS_SOPORTADOS
+
     def __init__(self, modelo: ModeloIA):
         self.modelo = modelo
         self.api_key = leer_api_key(modelo)
         self.url = f"{validar_base_url(modelo.base_url)}/chat/completions"
+        validar_opciones(modelo.opciones, OPCIONES_ACEPTADAS, "El adaptador compatible")
 
     def _cuerpo(self, prompt: str, esquema: Type[BaseModel]) -> dict:
         """

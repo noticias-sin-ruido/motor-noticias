@@ -27,6 +27,7 @@ from ...models import Adaptador
 from .base import (
     PREFIJO_API_KEY_ENV,
     REDES_PROHIBIDAS,
+    VARIABLE_UNICA,
     AdaptadorNoImplementado,
     ErrorDeProveedor,
     Proveedor,
@@ -34,21 +35,28 @@ from .base import (
     RespuestaBloqueada,
     leer_api_key,
     validar_base_url,
+    validar_opciones,
 )
+from .gemini import GeminiNativo
 from .openai_compatible import OpenAICompatible
 
-# Un adaptador por protocolo, no por proveedor. En la etapa 1 solo entra el
-# compatible con OpenAI, que es el que cubre casi todo; `gemini` y `anthropic`
-# nativos llegan en las etapas 2 y 3 y hasta entonces sus valores del enum se
-# rechazan con un mensaje explícito en vez de fallar con un KeyError.
+# Un adaptador por protocolo, no por proveedor. `anthropic` nativo llega en la
+# etapa 3 y hasta entonces su valor del enum se rechaza con un mensaje
+# explícito en vez de fallar con un KeyError.
+#
+# Gemini está en los dos: se lo puede usar por su capa compatible poniéndole el
+# `base_url`, o por el nativo. La diferencia práctica es `thinking_config`, que
+# la capa compatible no expone y es la única palanca de costo del pipeline.
 REGISTRO: Dict[Adaptador, Callable[..., Proveedor]] = {
     Adaptador.OPENAI_COMPATIBLE: OpenAICompatible,
+    Adaptador.GEMINI: GeminiNativo,
 }
 
 __all__ = [
     "REGISTRO",
     "PREFIJO_API_KEY_ENV",
     "REDES_PROHIBIDAS",
+    "VARIABLE_UNICA",
     "AdaptadorNoImplementado",
     "ErrorDeProveedor",
     "Proveedor",
@@ -56,5 +64,7 @@ __all__ = [
     "RespuestaBloqueada",
     "leer_api_key",
     "validar_base_url",
+    "validar_opciones",
+    "GeminiNativo",
     "OpenAICompatible",
 ]

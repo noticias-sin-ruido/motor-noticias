@@ -1,7 +1,31 @@
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from sqlalchemy import JSON, Column, text
 from sqlmodel import Field, SQLModel
+
+# La variable de entorno donde va la credencial del proveedor. **Una sola, con
+# nombre fijo**, y el operador no la elige ni la escribe en ninguna fila.
+#
+# Se llegó acá descartando la alternativa: un nombre por proveedor
+# (`MODELO_API_KEY_GEMINI`, `..._GROQ`) hacía que el `.env` creciera para
+# siempre a cambio de sostener una función que no existe —tener dos proveedores
+# vivos a la vez para saltar de uno a otro—, y esa función quedó explícitamente
+# diferida a su propio punto del backlog. Cambiar de modelo es raro; cuando
+# pasa, se cambia **el valor** de esta variable y listo.
+#
+# La contrapartida está asumida y tiene su defensa: como el nombre ya no
+# distingue proveedores, que la variable exista dejó de ser evidencia de que sea
+# la credencial correcta. Por eso activar un modelo **sondea contra el
+# proveedor** en vez de mirar el entorno. Ver `main.activar_modelo`.
+VARIABLE_UNICA = "MODELO_API_KEY"
+
+# La forma con sufijo sigue siendo válida —`MODELO_API_KEY_GROQ`— aunque hoy
+# nada la use: es lo que va a necesitar el punto de multimodelo, y admitirla
+# cuesta una condición en `leer_api_key`. Lo que **no** hace es aparecer en el
+# alta: `POST /modelos` ya no acepta `api_key_env`, así que mientras ese punto
+# no se implemente, todas las filas nacen con `VARIABLE_UNICA`.
+PREFIJO_API_KEY_ENV = "MODELO_API_KEY_"
 
 
 class Adaptador(str, Enum):
@@ -89,13 +113,14 @@ class ModeloIA(SQLModel, table=True):
     # se respalda, se dumpea y se lee desde endpoints sin autenticación; una
     # credencial ahí adentro se filtra sola.
     #
-    # Y el nombre tampoco es libre: tiene que empezar con el prefijo reservado
-    # (ver `services/proveedores`). Sin esa restricción, alguien podría crear una
-    # fila con `base_url` apuntando a un servidor propio y `api_key_env` en
-    # `WEBHOOK_SECRET` o `DATABASE_URL`, y el motor le mandaría ese valor como
-    # Bearer token. Son dos campos inofensivos por separado que juntos arman una
-    # primitiva de exfiltración.
-    api_key_env: str
+    # Hoy vale siempre `VARIABLE_UNICA` y **el alta ni siquiera lo acepta**: la
+    # columna existe para el punto de multimodelo, que es el único escenario que
+    # necesita nombres distintos. Que no sea configurable es lo que cierra la
+    # primitiva de exfiltración que abría de par en par: con `base_url` propio y
+    # `api_key_env` en `WEBHOOK_SECRET` o `DATABASE_URL`, el motor mandaba ese
+    # valor como Bearer token. `leer_api_key` sigue validando el nombre igual,
+    # como segunda barrera para el día que el campo vuelva a ser configurable.
+    api_key_env: str = Field(default=VARIABLE_UNICA)
 
     # Lo descubre el sondeo, no el operador. Ver `ModoEstructura`.
     modo_estructura: ModoEstructura = Field(default=ModoEstructura.RESPONSE_FORMAT)
@@ -111,6 +136,22 @@ class ModeloIA(SQLModel, table=True):
     # acotar el gasto sabiendo el riesgo; el corte se detecta y se avisa con
     # todas las letras en vez de fallar de forma opaca.
     max_tokens: Optional[int] = Field(default=None)
+
+    # Palancas que solo entiende el adaptador de este modelo. Hoy la única es
+    # `thinking_level` en Gemini, que gradúa cuántos tokens de razonamiento se
+    # gastan **y se factura como salida**, o sea la parte cara del paso más caro
+    # del pipeline. No hay equivalente fuera de Gemini, así que ponerle una
+    # columna propia habría dejado un campo muerto para todos los demás; con
+    # Anthropic entrando en la etapa 3 y su `thinking.budget_tokens`, serían dos.
+    #
+    # **Es un bolsillo con llave, no un pasamanos.** Cada adaptador declara qué
+    # claves acepta (`OPCIONES_ACEPTADAS`) y el alta rechaza cualquier otra. Sin
+    # esa lista, `opciones` sería un camino directo desde un endpoint sin
+    # autenticación hasta el cuerpo del request que sale hacia el proveedor.
+    opciones: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False, server_default=text("'{}'")),
+    )
 
     activo: bool = Field(default=False, index=True)
 

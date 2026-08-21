@@ -10,22 +10,24 @@ from urllib.parse import urlparse
 from dotenv import dotenv_values
 
 from ...models import ModeloIA
+from ...models.modelo_ia import PREFIJO_API_KEY_ENV, VARIABLE_UNICA
 
-# Prefijo obligatorio para el nombre de la variable de entorno que guarda la key.
+# `PREFIJO_API_KEY_ENV` y `VARIABLE_UNICA` se definen junto al modelo —son parte
+# de la forma del dato— y se re-exportan acá porque es donde se aplican.
 #
-# **Alcance exacto de lo que protege, porque es fácil atribuirle de más.**
+# **Alcance exacto de lo que protegen, porque es fácil atribuirles de más.**
 #
-# Lo que SÍ hace: impedir que una fila nombre una variable ajena. Sin el
-# prefijo, `api_key_env: "WEBHOOK_SECRET"` más un `base_url` propio hacen que el
-# motor le mande ese secreto a quien lo pida, como Bearer token.
+# Lo que SÍ hacen: impedir que una fila nombre una variable ajena. Sin la regla,
+# `api_key_env: "WEBHOOK_SECRET"` más un `base_url` propio hacen que el motor le
+# mande ese secreto a quien lo pida, como Bearer token. Hoy la primera barrera
+# es más fuerte todavía: el alta no acepta el campo.
 #
-# Lo que NO hace: impedir que la key **de IA** salga hacia un destino elegido
-# por quien llama. Quien pueda dar de alta un modelo puede nombrar una variable
-# válida y apuntar `base_url` a su propio servidor, y el sondeo se la entrega.
-# Eso **solo lo cierra la autenticación**; hasta entonces la mitigación es no
-# publicar `api_key_env` ni `base_url` en las respuestas (ver `main.py`) y
-# desplegar la API donde solo llegue el operador. Ver specs/roadmap.md, punto 9.
-PREFIJO_API_KEY_ENV = "MODELO_API_KEY_"
+# Lo que NO hacen: impedir que la key **de IA** salga hacia un destino elegido
+# por quien llama. Quien pueda dar de alta un modelo puede apuntar `base_url` a
+# su propio servidor, y el sondeo le entrega la credencial igual. Eso **solo lo
+# cierra la autenticación**; hasta entonces la mitigación es no publicar
+# `base_url` en las respuestas (ver `main.py`) y desplegar la API donde solo
+# llegue el operador. Ver specs/roadmap.md, punto 9.
 
 # Rangos que `base_url` no puede alcanzar nunca.
 #
@@ -117,11 +119,15 @@ def leer_api_key(modelo: ModeloIA) -> str:
     """
     nombre = modelo.api_key_env or ""
 
-    if not nombre.startswith(PREFIJO_API_KEY_ENV):
+    # Dos formas válidas y ninguna libre: el nombre único, que es el que usan
+    # todas las filas hoy, o la forma con sufijo que va a necesitar multimodelo.
+    # `MODELO_API_KEYX` no entra por ninguna de las dos — el borde importa, es
+    # lo que separa "empieza parecido" de "es una de las nuestras".
+    if nombre != VARIABLE_UNICA and not nombre.startswith(PREFIJO_API_KEY_ENV):
         raise ProveedorNoConfigurado(
-            f"`api_key_env` tiene que empezar con {PREFIJO_API_KEY_ENV!r} "
-            f"y vino {nombre!r}. Es la restricción que impide que una fila "
-            f"pueda nombrar cualquier variable del entorno."
+            f"`api_key_env` tiene que ser {VARIABLE_UNICA!r} o empezar con "
+            f"{PREFIJO_API_KEY_ENV!r}, y vino {nombre!r}. Es la restricción que "
+            f"impide que una fila pueda nombrar cualquier variable del entorno."
         )
 
     valor = _del_entorno(nombre)
@@ -131,6 +137,38 @@ def leer_api_key(modelo: ModeloIA) -> str:
             f"el entorno del proceso o en el `.env`, nunca en la base."
         )
     return valor
+
+
+def validar_opciones(opciones: Optional[dict], aceptadas, quien: str) -> dict:
+    """
+    Las opciones de este modelo, comprobadas contra lo que su adaptador acepta.
+
+    **Es la llave del bolsillo.** `ModeloIA.opciones` existe para las palancas
+    que solo entiende un proveedor —hoy el razonamiento de Gemini—, y sin una
+    lista cerrada sería un camino directo desde un endpoint sin autenticación
+    hasta el cuerpo del request que sale hacia afuera.
+
+    Se valida **al construir el adaptador**, no al usarlo, para que una opción
+    inválida sea un 422 en el alta y no una síntesis que falla cada 15 minutos
+    sin que el operador sepa por qué.
+
+    Un adaptador que no acepte ninguna opción pasa `aceptadas` vacío y con eso
+    rechaza todo, que es lo correcto: guardar una opción que nadie va a leer es
+    prometerle al operador un efecto que no va a ocurrir.
+    """
+    opciones = dict(opciones or {})
+    de_mas = set(opciones) - set(aceptadas)
+    if de_mas:
+        disponibles = sorted(aceptadas)
+        raise ErrorDeProveedor(
+            f"{quien} no acepta {sorted(de_mas)} en `opciones`. "
+            + (
+                f"Las válidas son: {disponibles}."
+                if disponibles
+                else "Este adaptador no acepta ninguna opción."
+            )
+        )
+    return opciones
 
 
 def validar_base_url(url: str) -> str:
@@ -163,7 +201,7 @@ def validar_base_url(url: str) -> str:
     if partes.username or partes.password:
         raise ErrorDeProveedor(
             "`base_url` no puede llevar credenciales embebidas. La credencial "
-            f"va en una variable de entorno {PREFIJO_API_KEY_ENV}*, no en la URL."
+            f"va en la variable de entorno {VARIABLE_UNICA}, no en la URL."
         )
 
     for familia in _resolver(partes.hostname):

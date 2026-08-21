@@ -163,7 +163,11 @@ Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el moto
 
 Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
 
-**🚧 EN CURSO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ⬜** Gemini como adaptador (recién ahí se puede comparar nativo contra compatibilidad) · **3 ⬜** Anthropic nativo · **4 ⬜** retirar el camino histórico.
+**🚧 EN CURSO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ⬜** Anthropic nativo · **4 ⬜** retirar el camino histórico.
+
+La etapa 2 midió lo que estaba pendiente: **los tres caminos a Gemini son equivalentes** —8,05 s el nativo, 8,55 s el compatible, 8,98 s el histórico sobre el mismo prompt de 18.447 tokens, mismos 4 ángulos en las doce corridas— y la palanca de razonamiento del nativo **funciona y se paga**: de 0 tokens con `LOW` a 6.267 con `HIGH`, con el triple de latencia.
+
+**El hallazgo que cambia la prioridad de la etapa 4**: en seis rondas, el camino histórico tardó **486 segundos** en una y no falló, porque `_llamar_gemini` no tiene timeout. Es la única llamada sin límite de tiempo del pipeline, y `llamar_modelo` la reintenta tres veces sobre un ciclo de 15 minutos. Retirarlo dejó de ser solo higiene.
 
 Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
 
@@ -209,9 +213,25 @@ Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí 
 
 `tech_stack.md`, punto 10. Un cluster cierra a las 12 h; una historia larga (la muerte de Jorge Messi cubrió varios días) produce publicaciones sucesivas que pueden solaparse. Con más medios hay más cobertura y más eventos largos, así que el riesgo crece con el volumen — pero la solución no es técnica (¿son hechos distintos de verdad, o el mismo hecho que el producto debería seguir mostrando junto?), es una conversación con el equipo de producto/back-end sobre qué comportamiento quieren. Revisar con síntesis reales a la vista antes de proponer un diseño.
 
-### 6. Rate limit de Gemini al sumar medios
+### 6. Rate limit del proveedor al sumar medios
 
 `tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y el proveedor limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier con más cupo.
+
+**Se cruza con el punto 6-bis**: la cadena de fallback es una de las salidas posibles a este problema, y la otra mitad de la respuesta.
+
+### 6-bis. Multimodelo: varios proveedores vivos a la vez, y a cuál mandarle qué
+
+**Abierto el 21/08/2026, al decidir la credencial única de la etapa 2 del punto 2.** Ver `change_logs.md`.
+
+El motor puede tener varias filas en `modelo_ia`, pero **una sola credencial configurada por vez**: `MODELO_API_KEY` tiene un solo valor, y una key de Groq no sirve en Gemini. Cambiar de proveedor es cambiar ese valor. Alcanza de sobra mientras cambiar de modelo sea algo raro, que es el caso.
+
+Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el mismo instante**, que es lo que necesita la cadena de fallback: si el de `prioridad` 1 pega contra su rate limit, caer al 2 sin perder el trabajo de la corrida.
+
+**Por qué no se hizo ahora, y el argumento es del usuario**: la cadena no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden — cuántos clusters van a uno y cuántos al otro—, y eso es lógica nueva de peso que no corresponde arrastrar dentro del desacoplamiento.
+
+**Lo que ya está puesto y no hay que rehacer**: la columna `prioridad` (hoy solo desempata), la columna `api_key_env` con su default, y `leer_api_key` aceptando la forma con sufijo (`MODELO_API_KEY_GROQ`). El día que se implemente, es **exponer un campo en el alta**, no migrar la tabla ni rehacer la validación. Las instancias que hoy tengan filas con nombres sufijados siguen funcionando sin tocar nada.
+
+**Lo que sí habría que revisar**: `PATCH ?activo=true` sondea contra el proveedor justamente porque con credencial única la variable no dice de quién es la key. Con nombres por proveedor esa comprobación vuelve a poder ser barata — pero conviene medir antes de aflojarla.
 
 ### 7. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
 
