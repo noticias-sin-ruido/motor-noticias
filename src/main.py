@@ -11,11 +11,20 @@ from apscheduler.events import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse
-from sqlmodel import Session
+from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
 
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
+from .models import Adaptador, ModeloIA
 from .services.alerts import enviar_alerta
+from .services.modelos import modelo_activo, sondear
+from .services.proveedores import (
+    ErrorDeProveedor,
+    ProveedorNoConfigurado,
+    leer_api_key,
+)
 from .services.clustering import (
     agrupar_pendientes,
     cerrar_clusters_vencidos,
@@ -399,3 +408,185 @@ def clusters(
     """Lista los clusters (eventos) con sus noticias y los medios que los cubrieron."""
     resultados = listar_clusters(session, estado=estado, limite=limite)
     return {"status": "ok", "cantidad": len(resultados), "clusters": resultados}
+
+
+# --- Modelos de IA configurables (backlog punto 2) --------------------------
+#
+# ⚠️ **Estos tres endpoints no tienen autenticación, como el resto de la API**, y
+# son los primeros que aceptan una URL arbitraria para que el motor la llame y
+# los primeros que deciden qué credencial se usa. Lo que hay puesto:
+#
+# - `Adaptador` es un enum cerrado, así que la base no puede elegir qué código
+#   se ejecuta.
+# - `api_key_env` tiene que llevar el prefijo reservado, así que una fila no
+#   puede nombrar una variable ajena.
+# - `base_url` se valida: solo http/https, sin credenciales embebidas y sin
+#   direcciones link-local.
+# - **Ni `api_key_env` ni `base_url` se devuelven en ninguna respuesta.** Sin
+#   eso, el listado le decía a cualquiera qué variable nombrar para que el motor
+#   le mandara la key del operador a un servidor elegido por él.
+# - El cuerpo de la respuesta del proveedor no se refleja en los errores.
+#
+# **Nada de esto reemplaza a la autenticación.** Quien pueda hacer POST acá
+# puede seguir apuntando `base_url` a su propio servidor con un `api_key_env`
+# válido y quedarse con la key de IA. Hasta que exista auth, esto se despliega
+# en una red donde solo llega el operador. Ver specs/roadmap.md, punto 9.
+
+
+class AltaModelo(BaseModel):
+    """Lo que hace falta para dar de alta un modelo. Ver `models/modelo_ia.py`."""
+
+    nombre: str = Field(min_length=1, max_length=80)
+    adaptador: Adaptador
+    modelo: str = Field(min_length=1, max_length=200)
+    api_key_env: str
+    base_url: Optional[str] = None
+    # Acotada: sin esto se aceptaba `9999.0` y se lo mandaba tal cual al
+    # proveedor. El rango es el que aceptan en común los que nos importan.
+    temperatura: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(default=None, gt=0)
+    prioridad: int = Field(default=100, ge=0)
+    # No se pide `modo_estructura`: **lo descubre el sondeo**. El operador no
+    # tiene por qué saber si su proveedor acepta `response_format` o solo
+    # tool-calling, y de hecho la documentación del proveedor puede mentirle.
+    activar: bool = False
+
+
+def _vista_publica(modelo: ModeloIA) -> dict:
+    """
+    Lo que se puede devolver de un modelo por una API sin autenticación.
+
+    **Deja afuera `api_key_env` y `base_url`.** No son secretos en sí mismos,
+    pero juntos completan una cadena: quien lee el listado sabe qué variable
+    nombrar, y con eso más un `base_url` propio consigue que el motor le entregue
+    la key del operador en el sondeo. Publicarlos era regalar la mitad del
+    trabajo.
+
+    En su lugar va `credencial_configurada`, que es la señal que el operador
+    realmente necesita —¿está seteada la variable?— sin decir cuál es.
+    """
+    datos = modelo.model_dump(exclude={"api_key_env", "base_url"})
+    try:
+        leer_api_key(modelo)
+        datos["credencial_configurada"] = True
+    except ProveedorNoConfigurado:
+        datos["credencial_configurada"] = False
+    return datos
+
+
+def _nombre_en_uso(session: Session) -> str:
+    """
+    Con qué se está sintetizando ahora mismo, en una sola representación.
+
+    Antes el GET devolvía `null` y el PATCH un texto para el mismo estado. Dos
+    formas de decir lo mismo obligan a quien consume a saber cuál mira.
+    """
+    activo = modelo_activo(session)
+    return activo.nombre if activo else HISTORICO
+
+
+# Etiqueta del camino por defecto: no hay fila que lo represente, pero decir
+# `null` deja al operador sin saber si el motor está sintetizando o no.
+HISTORICO = "(Gemini, camino histórico)"
+
+
+@app.get("/modelos")
+def listar_modelos(session: Session = Depends(get_session)):
+    """Los modelos configurados. Ver `_vista_publica` por lo que NO se devuelve."""
+    filas = session.exec(select(ModeloIA).order_by(ModeloIA.prioridad, ModeloIA.id)).all()
+    return {
+        "status": "ok",
+        "en_uso": _nombre_en_uso(session),
+        "modelos": [_vista_publica(f) for f in filas],
+    }
+
+
+@app.post("/modelos")
+def alta_modelo(datos: AltaModelo, session: Session = Depends(get_session)):
+    """
+    Da de alta un modelo, **después de comprobar que sirve**.
+
+    No es un CRUD: antes de guardar nada se le manda un pedido mínimo y se
+    verifica que devuelva la estructura que el motor necesita. El motivo está
+    medido — la capa de compatibilidad de Anthropic responde 200 e **ignora el
+    esquema en silencio**, así que un alta que solo probara conectividad
+    aceptaría un modelo que después rompe la síntesis cada 15 minutos.
+    Ver `services/modelos.sondear`.
+    """
+    duplicado = JSONResponse(
+        status_code=409,
+        content={"status": "error", "detalle": f"Ya existe un modelo '{datos.nombre}'"},
+    )
+    if session.exec(select(ModeloIA).where(ModeloIA.nombre == datos.nombre)).first():
+        return duplicado
+
+    modelo = ModeloIA(**datos.model_dump(exclude={"activar"}))
+
+    try:
+        modo, resumen = sondear(modelo)
+    except (ErrorDeProveedor, ProveedorNoConfigurado) as error:
+        # 422 y no 500: la configuración que mandaron no sirve. El mensaje del
+        # proveedor viaja **saneado** — ver `_mensaje_de_error`, que devuelve
+        # solo su campo `error.message` y nunca el cuerpo crudo.
+        return JSONResponse(
+            status_code=422,
+            content={"status": "error", "detalle": str(error)},
+        )
+
+    modelo.modo_estructura = modo
+    modelo.activo = datos.activar
+    session.add(modelo)
+    try:
+        session.commit()
+    except IntegrityError:
+        # El chequeo de arriba deja una ventana entre el SELECT y el INSERT.
+        # El índice único protege el dato igual; esto protege la respuesta, que
+        # si no salía como un 500 por una condición perfectamente normal.
+        session.rollback()
+        return duplicado
+    session.refresh(modelo)
+
+    return {"status": "ok", "sondeo": resumen, "modelo": _vista_publica(modelo)}
+
+
+@app.patch("/modelos/{modelo_id}")
+def activar_modelo(
+    modelo_id: int, activo: bool = Query(...), session: Session = Depends(get_session)
+):
+    """
+    Prende o apaga un modelo.
+
+    Apagar todos es una operación válida y no deja al motor sin síntesis:
+    vuelve al camino histórico de Gemini. Es la marcha atrás si un modelo nuevo
+    resulta peor de lo esperado.
+
+    **Activar comprueba la credencial primero.** El sondeo del alta pasó alguna
+    vez, pero entre aquel momento y éste la variable de entorno pudo dejar de
+    existir —un redeploy, otra máquina— y activar a ciegas dejaba el motor
+    fallando cada 15 minutos. Se mira solo el entorno, sin salir a la red: no
+    tiene sentido gastar una llamada al proveedor para prender un interruptor.
+    """
+    modelo = session.get(ModeloIA, modelo_id)
+    if modelo is None:
+        return JSONResponse(
+            status_code=404, content={"status": "error", "detalle": "No existe ese modelo"}
+        )
+
+    if activo:
+        try:
+            leer_api_key(modelo)
+        except ProveedorNoConfigurado as error:
+            return JSONResponse(
+                status_code=422, content={"status": "error", "detalle": str(error)}
+            )
+
+    modelo.activo = activo
+    session.add(modelo)
+    session.commit()
+
+    return {
+        "status": "ok",
+        "modelo": modelo.nombre,
+        "activo": modelo.activo,
+        "en_uso": _nombre_en_uso(session),
+    }

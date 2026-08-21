@@ -1061,7 +1061,7 @@ class TestManejoDeFallos:
         respuesta = RespuestaSintesis(angulos=[angulo(notas=(1, 2))])
         llamadas = {"n": 0}
 
-        def falla_la_primera(_prompt):
+        def falla_la_primera(_prompt, _modelo=None):
             llamadas["n"] += 1
             if llamadas["n"] == 1:
                 raise RuntimeError("timeout")

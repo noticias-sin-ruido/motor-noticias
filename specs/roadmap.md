@@ -163,6 +163,17 @@ Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el moto
 
 Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
 
+**🚧 EN CURSO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ⬜** Gemini como adaptador (recién ahí se puede comparar nativo contra compatibilidad) · **3 ⬜** Anthropic nativo · **4 ⬜** retirar el camino histórico.
+
+Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
+
+- **El camino histórico de Gemini queda intacto y es el default.** Sin filas activas en `modelo_ia`, la síntesis va por donde iba siempre. No es una promesa: es el camino por defecto de una base que no configuró nada.
+- **`POST /modelos` no es un CRUD**: sondea antes de aceptar y descubre solo cómo pedirle estructura al proveedor. Medido: la capa de compatibilidad de Anthropic responde 200 e **ignora `response_format` en silencio**.
+
+> ⚠️ **Los tres endpoints de `/modelos` no tienen autenticación**, como el resto de la API, y son los primeros que aceptan una URL arbitraria para que el motor la llame. Hay puesto: enum cerrado de adaptadores, prefijo obligatorio para `api_key_env`, validación de `base_url` (solo http/https, sin credenciales embebidas, sin link-local), respuestas que no publican `api_key_env` ni `base_url`, y errores que no reflejan el cuerpo del proveedor.
+>
+> **Nada de eso reemplaza la autenticación.** Quien pueda hacer POST puede apuntar `base_url` a su propio servidor con un `api_key_env` válido y quedarse con la key de IA del operador. Hasta que exista auth —punto 9—, esto se despliega en una red donde solo llega el operador.
+
 ### 3. El alta de medios la hace el operador, no el repo
 
 Hoy `scripts/seed_medios.py` trae seis medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos seis en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.

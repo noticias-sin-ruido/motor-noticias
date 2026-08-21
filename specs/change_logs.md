@@ -1763,3 +1763,94 @@ Eso no es una falla, es el instrumento haciendo su trabajo — y es exactamente 
 Sobre las 4.842 noticias que quedaron en la base: **99 clasificadas como opinión** (El Cronista 59, La Nación 21, TN 12, Perfil 7), más recetas 70, horóscopo 44 y juegos 1.
 
 **91 de esas 99 (92%) quedaron fuera del agrupamiento**, que es el filtro haciendo su trabajo. Las 8 restantes son las que ya estaban en un cluster desde antes de que el patrón existiera: el filtro lo aplica la ingesta y no hay pasada retroactiva, así que se limpian solas cuando esos clusters cierren a las 12 h.
+
+---
+
+## Backlog punto 2, etapa 1 — desacoplar el motor de IA (20/08/2026)
+
+Hasta acá `synthesis.py` hablaba Gemini directo, y eso obligaba a **todo el que despliegue el motor a usar Gemini**, con su cuenta y sus términos. El objetivo es que cada operador use el modelo que paga, aquel donde tiene créditos, o uno local que no manda nada afuera.
+
+### Los dos caminos que se evaluaron, y por qué el vertical
+
+Con la arquitectura ya acordada, quedaba **en qué orden construirla**:
+
+| | Cómo | Veredicto |
+|---|---|---|
+| **Por capas** | Refactor primero (extraer el contrato), configuración y endpoints al final | ❌ El objetivo —que un operador sume su modelo sin tocar archivos— llegaba recién en la etapa 3 o 4, y lo más incierto se validaba último |
+| **Vertical** ✅ | Una rebanada completa de punta a punta para **un** adaptador, con Gemini intacto como red de seguridad | Elegido |
+
+**Lo que decidió**: el adaptador genérico se puede probar contra el **endpoint compatible de Gemini con la key que ya tenemos** (verificado el 20/08: existe y acepta nuestro esquema con `$ref` y `anyOf` sin aplanar). O sea que lo más incierto del diseño se valida el primer día, sin cuenta nueva y sin gasto. El camino por capas hacía primero lo fácil.
+
+### Las decisiones de diseño
+
+**Adaptadores por protocolo, no por proveedor.** `openai_compatible` no es un proveedor: es el estándar de hecho, y cubre OpenAI, Azure, OpenRouter, Groq, Together, DeepSeek, Mistral, xAI, vLLM, LM Studio, Ollama y Gemini. **Agregar un modelo es insertar una fila**, no escribir un `.py`. Los otros dos adaptadores del enum (`gemini`, `anthropic`) no agregan cobertura sino **fidelidad**: acceso a lo nativo de cada uno.
+
+**El enum es cerrado.** La tentación al leer "que cada uno use el modelo que quiera" es guardar en la base la ruta de import del adaptador. Eso es ejecución remota de código, y la API no tiene autenticación. Un proveedor que no hable ninguno de los tres protocolos se resuelve con un **gateway** adelante (LiteLLM, OpenRouter), no con código nuestro.
+
+**Anthropic se ganó su adaptador nativo, y no por preferencia.** Su capa de compatibilidad existe (`/v1/chat/completions` responde 401, no 404) pero **`response_format` está documentado como "Ignored"**, y `strict` en tools también. Su propia página dice que la capa "is not considered a long-term or production-ready solution". Como toda la síntesis se apoya en la salida estructurada, un operador con créditos de Anthropic no puede usarlos por ahí.
+
+**El alta sondea, no registra.** `POST /modelos` manda un pedido mínimo y verifica que **vuelva la forma pedida**, no que el endpoint conteste. El caso Anthropic es la prueba de por qué: responde 200, devuelve texto correcto y descarta el esquema en silencio. Un alta que solo probara conectividad habría aceptado ese modelo y el fallo habría aparecido en la síntesis, cada 15 minutos, en el paso más caro del pipeline.
+
+**El modo de estructura lo descubre el sondeo.** El operador no declara si su proveedor acepta `response_format` o solo tool-calling: se prueba uno, y si no da la forma se prueba el otro. Nadie tiene por qué saber ese detalle, y la documentación del proveedor puede mentirle.
+
+**La red de seguridad es el camino por defecto.** Sin filas activas en `modelo_ia`, la síntesis va por `_llamar_gemini`, que quedó **idéntico** —verificado por comparación de AST contra `HEAD`, no de palabra—. Una base que no configuró nada se comporta exactamente como antes de que la tabla existiera. Y conservarlo no es nostalgia: es el único acceso a `thinking_config`, que es la palanca de costo sobre el 77% de la corrida, y **borrarlo sería tirar la forma barata de medir cuánto vale esa palanca**.
+
+**`Sintesis.modelo_usado` desde el día uno.** Guarda el nombre que le puso el operador —no el id del modelo, porque puede haber dos filas del mismo modelo con distinta cuenta— y se actualiza en la re-síntesis, porque describe quién escribió el texto que está ahí ahora. El valor está en la **serie histórica**: el día que se quiera comparar proveedores tiene que ser una query, no un proyecto de medición.
+
+### La revisión, y lo que cambió por ella
+
+Una revisión con subagente encontró **cuatro bloqueantes reales**, dos de ellos de seguridad. Vale dejarlos escritos porque el aprendizaje no es el bug sino el patrón:
+
+- **La cadena de exfiltración seguía abierta.** El prefijo de `api_key_env` impedía nombrar variables ajenas, pero `GET /modelos` **publicaba el nombre de la variable y el `base_url`**: con eso, cualquiera daba de alta un modelo apuntando a su servidor y el motor le entregaba la key del operador en el sondeo mismo. El comentario del código afirmaba que el prefijo "tapa una vía de exfiltración" — le atribuía más de lo que hace. Ahora ninguna respuesta publica esos dos campos, y el comentario dice **exactamente** qué protege y qué no.
+- **El SSRF no era ciego.** El error del proveedor se reflejaba crudo en el 422, así que apuntando a un servicio interno la respuesta traía su cuerpo. Ahora solo viaja `error.message` cuando la respuesta tiene la forma de error de OpenAI; lo demás va al log.
+- **El `_RESOLVER` no evitaba el N+1 que decía evitar.** `expire_on_commit` está en `True` y `sintetizar_cluster` commitea por cluster, así que el `ModeloIA` se expiraba y se recargaba: **una query por cluster**, medido. Es la **misma trampa que este repo ya tenía documentada** quince líneas más arriba, en `descartar_vencidos_sin_sintetizar`. Se cierra con `session.expunge`.
+- **`ProveedorNoConfigurado` se escapaba del manejo de errores**: no se traducía ni estaba excluido del retry, así que una key faltante costaba 3 intentos con espera creciente por cluster — entre 2 y 4 minutos de sleeps por corrida. Ahora se traduce a `SintesisSinConfigurar`, igual que el camino histórico, y se sumó `AdaptadorNoImplementado` por el mismo motivo: no se arreglan reintentando.
+
+### Sobre los tests, que es lo más incómodo
+
+De 24 tests, **cinco mutaciones sobrevivieron**. Una en particular: `test_un_adaptador_inexistente_no_se_reporta_como_falta_de_esquema`, escrito con un docstring de cinco líneas para guardar un bug encontrado ese mismo día, **no lo guardaba** — el mensaje genérico incluía el detalle de cada intento, así que el `match` pasaba igual.
+
+El patrón vale más que el caso: **un test que afirma con `match=` sobre un mensaje compuesto puede pasar por la parte equivocada del mensaje**. Ahora afirma además que el mensaje genérico *no* aparece y que no se salió a la red.
+
+La segunda lección es del mismo tipo. El test del N+1 hacía su propio `expunge` y contaba queries: probaba que `expunge` funciona —cosa de SQLAlchemy— y no que `sintetizar_pendientes` lo llame. Sacando el `expunge` del código, pasaba igual. Ahora corre `sintetizar_pendientes` de verdad y cuenta lecturas de `modelo_ia`: 1 con el arreglo, 3 sin él.
+
+### Verificado
+
+**419 tests** (369 → 419), `ruff` limpio, `alembic check` sin drift, round-trip `upgrade → downgrade → upgrade` de la migración (que incluye el borrado manual de los tipos ENUM, que Alembic no autogenera y sin el cual un re-upgrade falla).
+
+Las siete mutaciones que sobrevivían ahora fallan, cada una en su propia guarda. Punta a punta contra el endpoint compatible de Gemini: alta real en 1,6 s con el modo detectado solo, y rechazo correcto de adaptador inexistente, variable prohibida, modelo inexistente y duplicado.
+
+---
+
+## La primera prueba con un proveedor de verdad — Groq / qwen3.6-27b (20/08/2026)
+
+Primer modelo de un tercero dado de alta con el sistema de la etapa 1. Se eligió `qwen/qwen3.6-27b` en Groq, que expone API compatible con OpenAI.
+
+### Lo que funcionó, que era lo que se estaba probando
+
+- **El alta no necesitó una línea de código.** Una fila con `base_url`, el id del modelo y el nombre de la variable de entorno.
+- **El sondeo detectó solo el mecanismo correcto.** La documentación de Groq declara *"JSON Object Mode"*, que **no es JSON Schema**: `response_format` no devolvió la forma, el sondeo cayó a `tools` y ahí sí. El operador no declaró nada. Tardó 7,4 s porque hizo los dos intentos, y ese costo se paga una sola vez.
+  Ese mecanismo se había construido por el caso Anthropic, **sin ningún proveedor real donde probarlo**. Groq fue su primera comprobación.
+- **El saneado de errores conservó lo accionable.** Groq devuelve errores con forma de OpenAI, así que llegó *"Limit 8000, Requested 23005"* y no un `HTTP 413` pelado. Sin eso el diagnóstico habría sido a ciegas.
+
+### Por qué el modelo no sirve igual
+
+El tier gratuito de Groq limita a **8.000 tokens por minuto**, y los prompts de síntesis miden entre 4.500 y 23.000 tokens. Medido sobre tres clusters reales:
+
+| Cluster | Notas | Prompt | Gemini | Groq |
+|---|---:|---:|---|---|
+| 190 | 20 | ~23.000 tok | 6,8 s · 2 ángulos | ❌ 413 |
+| 458 | 9 | ~16.000 tok | 3,3 s · 1 ángulo | ❌ 413 |
+| 464 | 3 | ~4.500 tok | 3,2 s · 2 ángulos | ❌ 400 en el tool call |
+
+Gemini: 3 de 3, 4,4 s promedio. Groq: 0 de 3. **No es un límite de nuestro código sino de capacidad del tier**: con `max_tokens=4000` el pedido más chico igual dio 413, porque el límite cuenta prompt + esquema + salida reservada (10.063 tokens).
+
+El 400 del cluster 464 —el único que entraba en el límite— quedó **sin explicar**. Puede ser complejidad del esquema con ese modelo, pero no se verificó y cada intento cuesta un minuto de espera por el TPM. No se atribuye sin comprobarlo.
+
+### El hallazgo sobre nuestro propio diseño
+
+**El sondeo aprueba con un prompt de juguete, y eso no garantiza que el trabajo real entre.** Pide "un solo elemento, textos de una o dos palabras" —unos cientos de tokens— y pasó sin problema; el prompt real es cincuenta veces más grande y no entra en el límite del proveedor.
+
+O sea que **el sondeo valida el mecanismo, no la capacidad**. Es una distinción que hoy no está dicha en ningún lado, y se descubrió de la peor forma posible: dando de alta un modelo que parecía servir.
+
+Queda anotado como mejora: que el sondeo estime el tamaño de un prompt real y avise cuando los límites declarados por el proveedor no lo admitan. Mientras tanto, la garantía que da el alta es más chica de lo que parece y conviene decirlo.

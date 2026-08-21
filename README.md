@@ -157,7 +157,7 @@ Para la síntesis hace falta una `GEMINI_API_KEY` propia (se obtiene gratis en G
 
 ## API
 
-Ocho endpoints. Los `POST` son disparo manual de cada paso del pipeline, que además corre solo cada 15 minutos.
+Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -169,8 +169,13 @@ Ocho endpoints. Los `POST` son disparo manual de cada paso del pipeline, que ade
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
+| `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
+| `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
+| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=` |
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
+
+> ⚠️ **La API no tiene autenticación**, y los tres endpoints de `/modelos` son los primeros que aceptan una URL arbitraria para que el motor la llame. Hasta que exista auth, desplegala en una red donde solo llegue el operador. Ver `specs/roadmap.md`, puntos 2 y 9.
 
 <details>
 <summary><b>Respuestas reales de ejemplo</b></summary>
