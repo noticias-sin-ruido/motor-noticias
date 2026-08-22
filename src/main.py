@@ -296,11 +296,19 @@ app = FastAPI(
         "Software libre bajo AGPL-3.0. Código fuente: "
         "https://github.com/noticias-sin-ruido/motor-noticias"
     ),
-    # La versión del producto, la misma del tag `v1.0.0` y del User-Agent de la
+    # La versión del producto, la misma del tag `v1.1.0` y del User-Agent de la
     # ingesta. NO es `VERSION_PAYLOAD` de `webhook_delivery`: esa versiona el
     # contrato con el back-end y se mueve sola, solo cuando cambia la forma del
-    # payload. Subir la app no la toca.
-    version="1.0.0",
+    # payload. Subir la app no la toca — de hecho la 1.1.0 no la movió.
+    #
+    # **1.1.0 y no 2.0.0 fue una decisión, no un descuido.** Lo que esta versión
+    # cambió para el consumidor es nada: el payload es idéntico y la API HTTP es
+    # retrocompatible (el token de operador es opt-in). Lo que sí rompe es la
+    # **configuración** de quien actualiza un despliegue existente: las
+    # variables `GEMINI_*` ya no se leen, y la migración deja la fila de
+    # `modelo_ia` apagada, así que la síntesis no corre hasta activarla. Eso va
+    # avisado en grande en el README en vez de escondido en un número.
+    version="1.1.0",
     # La sección 13 de la AGPL pide que un programa accesible por red le ofrezca
     # a sus usuarios la forma de conseguir el código. Declararlo acá lo publica
     # en `/docs` y en el esquema OpenAPI, que es la interfaz que el servicio
