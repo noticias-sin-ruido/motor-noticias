@@ -232,7 +232,10 @@ En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— si
 
 - `DATABASE_URL` — PostgreSQL con pgvector (obligatorio en producción)
 - `MODELO_API_KEY` — la credencial del proveedor de IA que el operador haya configurado en `modelo_ia` (desde el punto 2 del backlog). **Reemplazó a `GEMINI_API_KEY`**, que ya no se lee: al actualizar hay que renombrar la variable en el `.env`, con el mismo valor
-- `ENVIRONMENT` — `development` | `production`
+- `ENVIRONMENT` — `development` | `production`. **Ya no controla el eco de SQL**: eso pasó a `LOG_SQL` (ver el punto 12 del backlog)
+- `API_TOKEN` — token de operador. Definido, los endpoints exigen `Authorization: Bearer` (menos la salud y la documentación); sin definir, la API queda abierta y el motor lo avisa al arrancar. **Opcional a propósito** (ver `src/auth.py`)
+- `LOG_LEVEL` — detalle de los logs, `INFO` por defecto. En INFO se ve qué hizo cada paso del pipeline y **qué fracción del ciclo consumió la corrida**, que es el número con el que se calibra `INGEST_INTERVAL_MINUTES`. Un valor mal escrito no impide arrancar: se usa INFO y se avisa
+- `LOG_SQL` — el SQL sentencia por sentencia, apagado por defecto. Va aparte de `LOG_LEVEL` porque son miles de líneas por ciclo
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)
 - `WEBHOOK_URL` / `WEBHOOK_SECRET` — entrega de síntesis al back-end. **Sin ellas la entrega no corre**: las síntesis se acumulan en la base con `enviado_backend=False` y salen cuando se configuran (ver `webhook_contract.md`)
 - `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` / `DB_POOL_RECYCLE` — pool de conexiones (Fase 5), calibrados contra un solo proceso Uvicorn. Tienen default razonable en `config.py`, no son obligatorias para arrancar.

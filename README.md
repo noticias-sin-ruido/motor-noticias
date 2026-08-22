@@ -196,6 +196,25 @@ curl -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/modelos
 
 El `docker-compose.yml` liga el puerto a `127.0.0.1` y no a `0.0.0.0`, así que por defecto no sale de la máquina. Para exponerlo de verdad: token **y** un proxy con TLS adelante.
 
+### Los logs
+
+El motor escribe a stdout, así que `docker compose logs -f app` alcanza. En `INFO` —el default— cada corrida deja qué hizo cada paso, con qué modelo sintetizó, cuántos tokens costó y **qué porcentaje del ciclo consumió**:
+
+```
+2026-08-21 20:53:26-03 INFO  src.main: === Pipeline arranca 21/08 20:53:26 (UTC-3) ===
+2026-08-21 20:53:44-03 INFO  src.services.proveedores.gemini: Tokens (gemini-por-defecto): entrada=6583 salida=1457 razonamiento=0
+2026-08-21 20:53:51-03 INFO  src.main: === Pipeline termina 21/08 20:53:51 (UTC-3) — 25.1 s — utilización 2.8% del ciclo ===
+```
+
+Ese último número es con el que se calibra `INGEST_INTERVAL_MINUTES`: si una corrida normal usa una fracción chica, conviene acortar el ciclo para tener noticias más frescas; si se acerca al techo, alargarlo.
+
+Dos perillas, las dos opcionales:
+
+- `LOG_LEVEL` — `INFO` por defecto. `WARNING` deja solo los problemas. Un valor mal escrito no impide arrancar.
+- `LOG_SQL` — el SQL sentencia por sentencia, apagado. Va aparte de `LOG_LEVEL` porque son miles de líneas por ciclo.
+
+La persistencia y la rotación son de Docker, no del motor: el `docker-compose.yml` trae un techo de 10 MB × 5 archivos, que medido son más de tres meses de historia. Un handler de archivo adentro del contenedor sería peor — lo escondería de `docker logs` y, sin rotación, llenaría el disco.
+
 ### Qué proveedores entran
 
 **Cualquiera que hable el protocolo de OpenAI**, que es el estándar de hecho: OpenAI, Azure, Groq, OpenRouter, Together, DeepSeek, Mistral, xAI, vLLM, LM Studio, Ollama y el propio Gemini. Se dan de alta cambiando `base_url`, sin tocar código. Gemini además tiene adaptador nativo, que es el único camino a su palanca de razonamiento.

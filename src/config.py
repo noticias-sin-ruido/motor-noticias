@@ -15,6 +15,28 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
     ENVIRONMENT: str = "development"
 
+    # --- Logging (ver src/logging_config.py) ---
+
+    # Nivel del motor. En INFO se ve lo que hizo cada paso del pipeline, con qué
+    # modelo se sintetizó y **qué fracción del ciclo consumió la corrida** — el
+    # número con el que se calibra INGEST_INTERVAL_MINUTES. Bajarlo a WARNING
+    # deja solo los problemas.
+    #
+    # Un valor que no se entienda NO tumba el arranque: se cae a INFO y se
+    # avisa. Cambiar el detalle de los logs no puede dejar el motor sin levantar.
+    LOG_LEVEL: str = "INFO"
+
+    # El SQL que ejecuta SQLAlchemy, sentencia por sentencia. **Apagado por
+    # defecto y separado de `LOG_LEVEL` a propósito**: son miles de líneas por
+    # ciclo, así que si viniera dentro de `DEBUG` nadie podría poner el motor en
+    # DEBUG sin ahogarse.
+    #
+    # Antes esto era `echo=(ENVIRONMENT == "development")` en `database.py`, o
+    # sea que el modo de desarrollo decidía por su cuenta escupir todo el SQL.
+    # Ahora es una decisión aparte, y sale por el mismo handler y con el mismo
+    # formato que el resto.
+    LOG_SQL: bool = False
+
     # Token de operador para la API. **Opcional a propósito**: sin él la API
     # queda abierta y el motor lo avisa al arrancar. Ver `src/auth.py` para el
     # razonamiento completo — en dos líneas, este motor lo despliega gente

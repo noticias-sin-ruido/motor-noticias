@@ -48,6 +48,22 @@ services:
     # pero es una segunda definición de servicio para lo mismo; en un VPS
     # único no compra nada.
     command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
+    # **Acá se persisten los logs, y acá se los acota.** El motor escribe a
+    # stdout (ver `src/logging_config.py`) y Docker se encarga del resto — pero
+    # el driver `json-file` por defecto **no rota nunca**: el archivo crece hasta
+    # llenar el disco del VPS, y un disco lleno tira abajo también a Postgres.
+    # Deja de ser hipotético desde que el motor loguea en INFO.
+    #
+    # 10 MB x 5 archivos = 50 MB de techo. Medido sobre corridas reales en INFO:
+    # un ciclo con trabajo (11 síntesis) deja ~4,7 KB y uno sin nada que hacer
+    # ~1 KB, así que a 96 ciclos por día el techo son más de tres meses de
+    # historia. Sobra para diagnosticar algo que pasó el fin de semana, que es
+    # para lo que se lee un log viejo.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   sin_ruido_pgdata:

@@ -320,3 +320,32 @@ Tres cuidados que no se pueden saltear:
 3. **Cambiar la URL no debería re-entregar lo ya entregado.** `enviado_backend` marca la síntesis, no el destino, así que apuntar a otro back-end lo deja con la base vacía y sin forma de pedir el histórico — hay que decidir si eso es lo correcto o si el cambio de destino resetea las marcas.
 
 **Va después del punto 3**, que comparte el diseño de "el operador configura por API" y es el que más valor entrega.
+
+### 12. El motor tenía logging pero no salida ✅ COMPLETO (21/08/2026)
+
+**Cerrado el 21/08/2026, antes de pasar las mejoras post-1.0 a `main`.** Apareció verificando el pipeline, no buscándolo: los 16 módulos de `src/` llaman a `logging`, y **no había un solo `basicConfig` ni handler en todo el proyecto**. Estaba anotado como "persistir los logs" en notas viejas y nunca llegó a ser un punto del backlog.
+
+Sin handler en la raíz, la consecuencia no es "los logs salen feos". Es que **todo `logger.info` se descarta sin dejar rastro** y todo `WARNING` para arriba cae en `logging.lastResort` —el handler de emergencia de la stdlib— sin fecha, sin nivel y sin nombre de módulo. Uvicorn no lo tapa: configura solo sus propios loggers y deja la raíz intacta a propósito, para no pisarle la configuración a la app que hospeda.
+
+Lo que se perdía no era ruido:
+
+- el resultado de cada paso del pipeline,
+- con qué modelo se sintetizó y cuántos tokens costó,
+- **el porcentaje del ciclo que consumió la corrida** — que es, según este mismo roadmap, el número con el que se calibra `INGEST_INTERVAL_MINUTES`. El motor medía su propia utilización y tiraba la medición.
+
+**Qué se construyó.** `src/logging_config.py`, llamado como primera cosa del `lifespan`. `LOG_LEVEL` (INFO por defecto, y un valor inválido no tumba el arranque) y `LOG_SQL` aparte, porque el SQL de un ciclo son miles de líneas. Techo en WARNING para las librerías ruidosas —`httpx` sola emite una línea por request de artículo— dejando `apscheduler` afuera a propósito, que sus dos líneas por ciclo son la prueba de vida del scheduler. Las líneas de uvicorn pasan por el mismo handler, así que el log entero tiene un solo formato y todas las líneas llevan hora.
+
+**Dos hallazgos que no se buscaban:**
+
+- **`echo=(ENVIRONMENT == "development")` en el engine tenía que morir.** Con un echo verdadero SQLAlchemy le cuelga un handler propio al logger de la Engine y no le apaga la propagación: en cuanto la raíz tuvo handler, cada sentencia habría salido **dos veces con dos formatos**. El SQL ahora se enciende con `LOG_SQL`, subiendo el logger.
+- **En Windows se perdían líneas enteras.** `sys.stdout` sale en cp1252, y una línea con un carácter que ese codec no tiene —un titular con `北京`, un apellido en cirílico— hace que `emit` levante `UnicodeEncodeError`; `logging` no propaga la excepción, escribe un `--- Logging error ---` y **descarta el mensaje**. Verificado con una corrida real. La salida se fuerza a UTF-8.
+
+**Persistencia y rotación viven en el `docker-compose.yml`, no en el código**: el motor escribe a stdout y Docker lo persiste, pero el driver `json-file` **no rota por defecto** y un disco lleno también tumba a Postgres. Techo de 10 MB × 5 archivos ≈ más de tres meses medidos.
+
+### 13. Entidades HTML sin decodificar en el cuerpo de las noticias
+
+Lo destapó el punto 12 en su primera corrida con logs: una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*. Medido sobre la base real: **38 de 5.390 `contenido_limpio` (0,7%) contienen entidades HTML sin decodificar; `titulo` no tiene ninguna** — o sea que el problema está en una sola de las dos vías de limpieza del cuerpo, no en la ingesta en general.
+
+Es chico en volumen pero **sale publicado**: entra al prompt como evidencia, el modelo lo copia tal cual al título del ángulo, y de ahí va al back-end. Vale medir primero cuál de las dos vías (el `content:encoded` del feed o `trafilatura`) lo deja pasar, antes de agregar un `html.unescape` a ciegas en los dos lados.
+
+Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el lector final.

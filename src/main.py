@@ -18,6 +18,7 @@ from sqlmodel import Session, select
 from .auth import RUTAS_ABIERTAS, avisar_si_esta_abierta, exigir_token
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
+from .logging_config import configurar_logging
 from .models import Adaptador, ModeloIA
 from .services.alerts import enviar_alerta
 from .services.modelos import modelo_activo, sondear
@@ -247,6 +248,12 @@ def _job_ingesta_programada() -> None:
 async def lifespan(app: FastAPI):
     # Startup: habilita la extensión pgvector, crea las tablas si no existen,
     # y arranca el scheduler embebido (ver CLAUDE.md, Fase 2 -- "Scheduler").
+    #
+    # El logging va PRIMERO, antes que cualquier otra cosa del arranque: lo que
+    # se emita antes de esta línea no tiene handler donde salir. `init_db` puede
+    # fallar por una migración pendiente y el aviso de la API abierta es un
+    # WARNING que hay que ver sí o sí, así que los dos van después.
+    configurar_logging()
     init_db()
     avisar_si_esta_abierta()
     scheduler.add_job(

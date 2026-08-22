@@ -2193,3 +2193,59 @@ Tres decisiones menores que valen escribirse:
 Contra un servidor real: `/` y `/docs` responden 200 sin token, `/modelos` y `/clusters` dan 401, y con el token correcto pasan. Las 6 mutaciones sobre la puerta caen.
 
 Y una que salió de probar: **la puerta corre antes que la validación de FastAPI.** Un pedido mal formado y sin token da 401, no 422 — si fuera al revés, un anónimo podría sondear qué campos existen y qué rangos aceptan. Depende de un detalle del orden de resolución de dependencias, así que quedó con test propio.
+
+---
+
+## El motor tenía logging pero no salida (punto 12 del backlog, 21/08/2026)
+
+Apareció verificando el pipeline antes de pasar las mejoras post-1.0 a `main`, no buscándolo. Los 16 módulos de `src/` llaman a `logging`, y **no había un solo `basicConfig` ni handler en todo el proyecto**. Estaba anotado como *"persistir los logs"* en notas de planificación viejas y nunca llegó a ser un punto del backlog.
+
+### La consecuencia no era estética
+
+Sin handler en la raíz, `logging` no "usa el formato por defecto": descarta. Medido sobre el proceso real:
+
+```
+handlers en la raiz: NINGUNO
+nivel efectivo de src.main: WARNING
+-> un logger.info del motor SE PIERDE
+```
+
+Todo `logger.info` se tiraba, y todo `WARNING` para arriba caía en `logging.lastResort` —el handler de emergencia de la stdlib— sin fecha, sin nivel y sin nombre de módulo. Uvicorn no lo tapa: configura solo sus loggers `uvicorn*` y deja la raíz intacta **a propósito**, para no pisarle la configuración a la aplicación que hospeda. La aplicación es esta, y no la tenía.
+
+Lo que se perdía: el resultado de cada paso del pipeline, con qué modelo se sintetizó y cuántos tokens costó, el aviso de exclusividad al activar un modelo, y **el porcentaje del ciclo que consumió la corrida** — que es, según el propio roadmap, el número con el que se calibra `INGEST_INTERVAL_MINUTES`. El motor medía su utilización y tiraba la medición.
+
+**Un log que falta no se parece a un error**, y por eso esto sobrevivió a las cinco fases: nada fallaba.
+
+### Las decisiones
+
+**A stdout, no a un archivo.** El motor corre en un contenedor, y ahí un handler de archivo es la peor opción de las dos: lo esconde de `docker logs`, se lo lleva puesto cada recreación del contenedor, y sin rotación llena el disco del VPS —que también tumba a Postgres—. La persistencia y la rotación van al `docker-compose.yml`, donde el driver `json-file` las hace bien: 10 MB × 5 archivos. Medido en corridas reales, un ciclo con trabajo (11 síntesis) deja ~4,7 KB y uno sin nada que hacer ~1 KB, así que el techo son más de tres meses de historia a 96 ciclos por día.
+
+**`LOG_SQL` aparte de `LOG_LEVEL`.** El SQL de un ciclo son miles de líneas: si viniera incluido en `DEBUG`, nadie podría poner el motor en DEBUG sin ahogarse.
+
+**Techo en WARNING para las librerías ruidosas.** Sin él, subir la raíz a INFO —que es todo el punto— entierra al motor bajo el ruido de sus dependencias, y el resultado neto es peor que no tener logs: hay líneas, pero no se encuentra la que importa. `httpx` sola emite una por request, y un ciclo con extracción por URL pide decenas de artículos. **`apscheduler` queda deliberadamente afuera**: sus dos líneas por ciclo son la prueba de vida del scheduler, y hay un test que frena a quien lo agregue.
+
+**Un `LOG_LEVEL` mal escrito no puede tumbar el arranque.** `basicConfig(level="INFOO")` levanta `ValueError`, y esto corre dentro del `lifespan`: un typo en el `.env` dejaría el motor sin levantar. Se cae a INFO y se avisa.
+
+**No se le pisa la configuración a nadie.** Si la raíz ya tiene handlers, alguien más configuró el logging —uvicorn con `--log-config`, un gunicorn por delante— y ese handler manda. En ese caso tampoco se toca el encoding ni los loggers de uvicorn: si la salida es de otro, esas decisiones también.
+
+### Tres hallazgos que no se buscaban
+
+**1. `echo=(ENVIRONMENT == "development")` en el engine tenía que morir.** Con un echo verdadero, SQLAlchemy le cuelga un `StreamHandler` propio al logger de la Engine y **no le apaga la propagación** (verificado en `sqlalchemy/log.py`: `InstanceLogger.__init__` agrega el handler, nadie toca `propagate`). En cuanto la raíz tuviera handler, cada sentencia habría salido **dos veces, con dos formatos distintos**. Ahora `echo=False` siempre —que devuelve un `Logger` pelado— y el SQL se enciende subiendo el nivel del logger con `LOG_SQL`. Como no hay test de comportamiento que distinga las dos sin una base real conectada, quedó una guarda que mira el código, **descartando los comentarios**: el propio comentario que explica esto dice `echo=False`, y sin descartarlos la guarda daba positivo aunque el código dijera otra cosa.
+
+**2. En Windows se perdían líneas enteras.** `sys.stdout` sale en `cp1252`, y una línea con un carácter que ese codec no tiene —un titular con `北京`, un apellido en cirílico— hace que `StreamHandler.emit` levante `UnicodeEncodeError`. `logging` no propaga esa excepción: escribe un `--- Logging error ---` con traceback y **descarta el mensaje**. Verificado con una corrida real. O sea que la línea rara, la que más ganas hay de leer, es justo la que no está. La salida se fuerza a UTF-8.
+
+**3. La hora habría sido la del contenedor, o sea UTC.** `logging` usa `time.localtime`, mientras los mensajes que arma `tiempo.formatear` van en UTC-3 — el log habría tenido el prefijo en una zona y el contenido en otra, que es exactamente lo que `tiempo.py` existe para evitar y ya costó un bug real en la firma del webhook. La regla del proyecto es *"se guarda en UTC, se muestra en UTC-3"*, y un log es para mostrar.
+
+Se descartó la solución obvia —`TZ` en el `docker-compose.yml`— porque **`python:3.12-slim` no trae `tzdata`**: fallaría de vuelta a UTC en silencio, que es peor que no intentarlo. En su lugar, un `converter` propio sobre `ZONA_LOCAL`, que es un offset fijo y no necesita base de zonas. El `-03` va escrito en el formato y no calculado con `%z`, porque `%z` sobre el `struct_time` que consume `strftime` daría el offset de la máquina — justo el que no queremos.
+
+### Verificado, no supuesto
+
+Dos corridas completas contra el back-end real, con el token puesto. Ciclo con trabajo: 11 síntesis, 13 entregas, 0 fallidas. El log resultante decodifica como UTF-8, los acentos salen bien (`Fusión`, `Ángulo`, `Síntesis`) y cada línea lleva fecha, nivel y módulo. **19 mutaciones, 19 detectadas.**
+
+Dos de esas mutaciones no se detectaban al principio, y por el mismo motivo: **la máquina de desarrollo ya está en UTC-3**, así que `time.localtime` devuelve lo mismo que la hora argentina y el test no podía distinguir las dos implementaciones. Se arregló falseando el reloj del sistema dentro del test — parcheando los dos caminos, porque `logging.Formatter` guarda una *referencia* a `time.localtime` en un atributo de clase y pisar el módulo no la alcanza.
+
+### Lo que el log destapó en su primera corrida
+
+Una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*: **entidades HTML sin decodificar** llegando al producto. Medido sobre la base: 38 de 5.390 `contenido_limpio` (0,7%), y `titulo` ninguno. Quedó como punto 13 del backlog.
+
+Es el argumento entero de este punto en una línea: el defecto estaba ahí desde antes, y lo que faltaba para verlo era el log.
