@@ -2,9 +2,13 @@
 
 Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qué* de cada decisión está en `change_logs.md`.
 
-**Estado: versión 1.0.** Las 5 fases completas y **la entrega al back-end probada punta a punta**: primera corrida real contra el receptor (192 publicaciones entregadas de una, y después el pipeline completo ingesta → entrega sin fallos). Sobre el cierre de Fase 5 se sumaron el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) ya ajustado a los 280 de un tweet, y tres auditorías de llamadas del pipeline (RSS/DB/Gemini) que dejaron 8 fixes de N+1. **268/268 tests, 96% de cobertura, `alembic check` limpio.**
+**Estado: versión 1.1.0** (21/08/2026). Las 5 fases completas y **la entrega al back-end probada punta a punta**: primera corrida real contra el receptor (192 publicaciones entregadas de una, y después el pipeline completo ingesta → entrega sin fallos). **552/552 tests, 96% de cobertura, `alembic check` limpio.**
 
-**Siguiente:** el punto 2 del backlog priorizado de abajo (desacoplar el motor de IA). El punto 1 (segunda vía de ingesta) ya cerró: Perfil está de alta y en producción.
+La 1.1.0 cerró **los puntos 1, 2, 10 y 12** del backlog de abajo: segunda vía de ingesta por URL (con Perfil de alta), motor de IA desacoplado, token de operador y logging. El contrato del webhook **no se movió** —sigue en su versión `1`— así que el back-end no ve ninguna diferencia.
+
+**Es 1.1.0 y no 2.0.0 por decisión, no por descuido.** Para quien consume el motor no cambió nada; lo que rompe es la *configuración* de quien actualiza un despliegue existente (las variables `GEMINI_*` ya no se leen, y la migración deja la fila de `modelo_ia` apagada, así que la síntesis no corre hasta activarla). Eso va avisado en grande en el README, en vez de escondido en un número.
+
+**Siguiente:** el punto 3 (que el alta de medios la haga el operador), que el punto 10 acaba de desbloquear.
 
 **Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `MODELO_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
@@ -203,7 +207,7 @@ Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
 
 ### 3. El alta de medios la hace el operador, no el repo
 
-Hoy `scripts/seed_medios.py` trae seis medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos seis en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.
+Hoy `scripts/seed_medios.py` trae siete medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos siete en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.
 
 La revisión de términos del 19-20/08 lo dejó a la vista: varían muchísimo entre medios —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario bloquea crawlers de IA— y cuál es aceptable depende del uso que le dé cada operador. Ver `change_logs.md`.
 
@@ -221,14 +225,14 @@ Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí 
 **Tres cuidados:**
 
 1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
-2. **Migración**: la instancia que corre hoy tiene seis medios cargados. Sacar el seed no puede dejarla vacía.
+2. **Migración**: la instancia que corre hoy tiene siete medios cargados. Sacar el seed no puede dejarla vacía.
 3. **Seguridad**: hace que el motor **busque una URL arbitraria a pedido de quien llame**, o sea SSRF y uso del motor como proxy hacia terceros. **La autenticación ya está** (punto 10), así que lo que queda es la validación del destino, que se diseña con el endpoint y no después. El patrón está hecho en `proveedores/base.validar_base_url`, pero acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida: hay que revisarlo, no copiarlo.
 
 **Va después del punto 2**, por decisión del usuario.
 
 ### 4. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
 
-`tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 6 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
+`tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 7 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
 
 **No se implementa todavía.** Se vigila el tiempo de la corrida de agrupamiento (ya logueado) a medida que se sumen medios vía el punto 1, y se ataca cuando el número se acerque a los segundos que empiezan a competir con el ciclo de 15 minutos del scheduler — no antes.
 

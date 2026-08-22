@@ -8,6 +8,6 @@ Este archivo se carga automáticamente como contexto en cada sesión de Claude C
 - **[specs/tech_stack.md](specs/tech_stack.md)** — Stack tecnológico, estructura de directorios, y puntos de quiebre de arquitectura/escalabilidad a vigilar.
 - **[specs/webhook_contract.md](specs/webhook_contract.md)** — Contrato de entrega al back-end: payload, firma HMAC y semántica de reintentos. Es un documento compartido con otro equipo, no lo cambies sin avisar.
 
-**Estado: versión 1.0** — las 5 fases completas y la entrega al back-end probada punta a punta. Lo que sigue es el backlog priorizado post-1.0; detalle en `specs/roadmap.md`.
+**Estado: versión 1.1.0** — las 5 fases completas y la entrega al back-end probada punta a punta. La 1.1.0 cerró los puntos 1, 2, 10 y 12 del backlog (ingesta por URL, motor de IA desacoplado, token de operador y logging). Lo que sigue está en el backlog priorizado de `specs/roadmap.md`.
 
 Regla de oro: antes de tomar una decisión de diseño no trivial, debatila y dejala documentada en `specs/change_logs.md` — no la tomes en silencio dentro del código.

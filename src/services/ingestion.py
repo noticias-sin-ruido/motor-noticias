@@ -28,7 +28,7 @@ REQUEST_TIMEOUT_SECONDS = 15
 # User-Agent por defecto de httpx: es la práctica estándar para un lector de
 # feeds, y algunos medios (ej. Paparazzi) rechazan con 403 a los clientes que
 # no se identifican. A propósito NO imitamos un navegador -- ver specs/.
-USER_AGENT = "SinRuido/1.0 (+https://github.com/noticias-sin-ruido/motor-noticias) feed-reader"
+USER_AGENT = "SinRuido/1.1 (+https://github.com/noticias-sin-ruido/motor-noticias) feed-reader"
 
 # Heurístico genérico para detectar notas "en vivo" / minuto a minuto por el
 # título (case-insensitive). Confirmado empíricamente para La Nación ("en

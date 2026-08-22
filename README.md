@@ -2,13 +2,14 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
+![Tests](https://img.shields.io/badge/tests-552%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 
 **Lee las noticias de varios medios, detecta cuáles cubren el mismo hecho y escribe una síntesis neutral que compara cómo lo contó cada uno.**
 
-El problema no es la falta de información, es el ruido: seis medios publican la misma noticia y ninguno dice exactamente lo mismo. Este motor agrupa esa cobertura por similitud semántica, separa el hecho en sus distintos ángulos y produce, para cada uno, un resumen objetivo más una **comparativa explícita de qué destacó, qué omitió y qué citó cada medio**. La salida se entrega a un back-end por webhook firmado, con tópicos, subtópicos y copy listo para publicar en redes.
+El problema no es la falta de información, es el ruido: siete medios publican la misma noticia y ninguno dice exactamente lo mismo. Este motor agrupa esa cobertura por similitud semántica, separa el hecho en sus distintos ángulos y produce, para cada uno, un resumen objetivo más una **comparativa explícita de qué destacó, qué omitió y qué citó cada medio**. La salida se entrega a un back-end por webhook firmado, con tópicos, subtópicos y copy listo para publicar en redes.
 
 Proyecto propio, listo para desplegar, con la entrega al back-end verificada punta a punta contra un receptor real.
 
@@ -18,11 +19,11 @@ Proyecto propio, listo para desplegar, con la entrega al back-end verificada pun
 
 ```mermaid
 flowchart LR
-    A["📰 RSS<br/>6 medios"] --> B["Ingesta<br/>dedup · limpieza<br/>filtro en vivo"]
+    A["📰 RSS<br/>7 medios"] --> B["Ingesta<br/>dedup · limpieza<br/>cuerpo del feed<br/>o extraído por URL"]
     B --> C["Vectorización<br/>MiniLM · 384d"]
     C --> D["Clustering<br/>incremental<br/>por centroide"]
     D --> E["Fusión<br/>hasta punto fijo"]
-    E --> F["Síntesis IA<br/>Gemini<br/>1 llamada/cluster"]
+    E --> F["Síntesis IA<br/>el modelo lo elige<br/>el operador<br/>1 llamada/cluster"]
     F --> G["Entrega<br/>webhook<br/>HMAC-SHA256"]
     G --> H["🖥️ Back-end"]
 
@@ -126,7 +127,7 @@ cp .env.example .env                        # (Windows: copy .env.example .env)
                                             # coinciden con las del compose
 
 alembic upgrade head                        # crea el esquema (obligatorio)
-python scripts/seed_medios.py               # carga los 6 medios
+python scripts/seed_medios.py               # carga los 7 medios
 uvicorn src.main:app --reload
 ```
 
@@ -140,7 +141,7 @@ Casi todo el pipeline corre sin registrarse en nada:
 
 | Endpoint | ¿Anda sin credenciales? |
 |---|:---:|
-| `POST /ingest` — trae noticias reales de 6 medios por RSS | ✅ |
+| `POST /ingest` — trae noticias reales de 7 medios por RSS | ✅ |
 | `POST /vectorize` — genera los embeddings | ✅ |
 | `POST /cluster` — agrupa, cierra vencidos y fusiona duplicados | ✅ |
 | `GET /search` — búsqueda semántica (KNN de pgvector) | ✅ |
@@ -319,20 +320,28 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 
 **Medir antes de resolver.** Se descartó agregar feeds por sección después de comprobar que aportaban archivo y no cobertura: 151 noticias con antigüedad mediana de 25,5 h, de las cuales **ninguna formó un solo par**. Ocho veces más requests para nada.
 
-**Costo bajo control.** La síntesis es precálculo, no on-demand: una llamada a Gemini por cluster. Medido: **US$0,007–0,021 por corrida** sobre 21 clusters publicables.
+**Costo bajo control.** La síntesis es precálculo, no on-demand: una llamada al modelo por cluster. Medido: **US$0,007–0,021 por corrida** sobre 21 clusters publicables.
+
+**Un medio no entra por poder, entra por licencia.** Clarín quedó afuera tras revisar sus términos de uso: la licencia cubre *"títulos y/o links"*, y **retienen el cuerpo del feed a propósito** —0 de 438 ítems—. El extractor por URL existe y podría traerlo; no hacerlo es la decisión. Perfil entró porque su licencia cubre el contenido y pide enlaces de vuelta, que es lo que el motor hace igual.
+
+**El adaptador es código, la configuración es dato.** El enum `Adaptador` está cerrado a propósito: si la fila de la base pudiera nombrar una ruta de import, dar de alta un modelo sería ejecución remota de código. La fila dice *qué* modelo y contra *qué* `base_url`; **la credencial vive en el entorno y nunca en la base**, que se respalda, se dumpea y se lee desde endpoints.
+
+**El motor tenía logging pero no salida.** Los 16 módulos llaman a `logging` y no había un solo handler: todo `INFO` se descartaba, incluido **el porcentaje del ciclo que consumía cada corrida** — el número con el que se calibra el intervalo del scheduler. Un log que falta no se parece a un error, y por eso sobrevivió a las cinco fases.
 
 ---
 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 268 tests
+pytest                                            # 552 tests
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
 ```
 
-**268 tests, 95% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni clave de Gemini, ni red. Todo lo externo está mockeado en la frontera.
+**552 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+
+**Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 
 El CI tiene **dos jobs con objetivos distintos**: uno corre los tests con umbral de cobertura del 80%, y otro levanta un **Postgres + pgvector real** solo para aplicar las migraciones de Alembic. Están separados a propósito: sumar Postgres al job de tests no habría agregado cobertura real, pero que una migración rompa contra una base con datos ya pasó una vez.
 
@@ -345,8 +354,8 @@ El CI tiene **dos jobs con objetivos distintos**: uno corre los tests con umbral
 | API | FastAPI · Uvicorn · Pydantic v2 |
 | Datos | PostgreSQL 16 + **pgvector** · SQLModel / SQLAlchemy 2 · Alembic · psycopg 3 |
 | NLP | `paraphrase-multilingual-MiniLM-L12-v2` (384d) · spaCy (NER) · scikit-learn (TF-IDF) |
-| IA | Google Gemini con salida estructurada |
-| Ingesta | feedparser · BeautifulSoup · httpx · tenacity |
+| IA | **El proveedor lo elige el operador** — adaptador nativo de Gemini, o cualquiera que hable el protocolo de OpenAI |
+| Ingesta | feedparser · BeautifulSoup · httpx · tenacity · trafilatura (cuerpo por URL) |
 | Infra | Docker Compose · APScheduler · GitHub Actions |
 
 ```
@@ -354,14 +363,23 @@ src/
 ├── main.py              # API, scheduler y pipeline encadenado
 ├── config.py            # settings tipadas (pydantic-settings)
 ├── database.py          # engine, pool y healthcheck
-├── models/              # Medio · Noticia · Cluster · Sintesis · PublicacionRedes
+├── auth.py              # token de operador, opcional y con aviso al arrancar
+├── logging_config.py    # el único lugar donde se configura la salida de logs
+├── tiempo.py            # se guarda en UTC, se muestra en UTC-3
+├── models/              # Medio · Noticia · Cluster · Sintesis · PublicacionRedes · ModeloIA
 └── services/
     ├── ingestion.py     # RSS → limpieza → dedup
+    ├── extraccion.py    # cuerpo desde la URL, con robots.txt y piso de caracteres
     ├── vectorization.py # embeddings por lotes
     ├── clustering.py    # agrupamiento incremental + fusión
+    ├── categorias.py    # notas sin hecho (horóscopo, opinión): no se agrupan
     ├── preprocessing.py # evidencia para el prompt (TF-IDF + NER)
-    ├── synthesis.py     # Gemini, ángulos, tópicos y copy de redes
+    ├── synthesis.py     # ángulos, tópicos y copy de redes
+    ├── modelos.py       # alta, sondeo y exclusividad del modelo activo
+    ├── proveedores/     # adaptadores: gemini nativo · openai_compatible
+    ├── topicos.py       # taxonomía cerrada + sección declarada por el medio
     ├── webhook_delivery.py  # payload, firma HMAC y reintentos
+    ├── alerts.py        # avisos por mail ante fallo de cualquier paso
     └── search.py        # búsqueda semántica y listado
 ```
 
@@ -384,9 +402,38 @@ El *por qué* de cada decisión está escrito, no solo el *qué*:
 
 ## Estado
 
-**Versión 1.0.** Las 5 fases completas y la entrega al back-end verificada punta a punta contra un receptor real.
+**Versión 1.1.0.** Las 5 fases completas y la entrega al back-end verificada punta a punta contra un receptor real.
 
-En marcha: una segunda vía de ingesta que extrae el cuerpo desde la URL del artículo, para sumar los medios cuyo RSS no trae el texto completo. El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md).
+### Qué trajo la 1.1.0
+
+| | |
+|---|---|
+| **Segunda vía de ingesta** | El cuerpo se extrae desde la URL cuando el RSS solo trae un copete, respetando `robots.txt` y con un piso de caracteres que detecta un rediseño del medio. Entró **Perfil**; Clarín quedó afuera por sus términos de uso, no por falta de herramienta |
+| **El motor de IA se desacopló** | La síntesis ya no está atada a Gemini. El modelo, su temperatura y su nivel de razonamiento viven en la base y se administran por API, así que cambiarlos no exige redeployar. Entra cualquier proveedor que hable el protocolo de OpenAI, incluido uno local |
+| **Token de operador** | `API_TOKEN` opcional para cerrar los endpoints, y el `docker-compose.yml` ligando a `127.0.0.1` en vez de a `0.0.0.0` |
+| **Logs de verdad** | El motor emitía en `INFO` y nada llegaba a ningún lado. Ahora cada corrida deja qué hizo cada paso, cuántos tokens costó y qué porcentaje del ciclo consumió |
+
+**El contrato con el back-end no se movió**: el payload sigue en su versión `1` y ningún consumidor necesita cambiar nada.
+
+### ⚠️ Si venís de la 1.0, leé esto antes de actualizar
+
+La 1.1.0 es retrocompatible para quien *consume* el motor, pero **rompe la configuración de quien lo despliega**. Son dos pasos y los dos son manuales a propósito:
+
+**1. Renombrá la credencial.** `GEMINI_API_KEY` ya no se lee — pasó a `MODELO_API_KEY`, mismo valor. `GEMINI_MODEL`, `GEMINI_TEMPERATURA` y `GEMINI_THINKING_LEVEL` tampoco existen más: eso ahora vive en la tabla `modelo_ia`.
+
+**2. Prendé el modelo, o la síntesis no corre.** La migración crea sola la fila equivalente a lo que tenías en el `.env`, pero **la deja apagada**:
+
+```bash
+alembic upgrade head
+curl http://localhost:8000/modelos                      # mirá cuál creó
+curl -X PATCH "http://localhost:8000/modelos/1?activo=true"   # sondea al proveedor y la activa
+```
+
+Que ninguna migración elija proveedor por vos es la decisión, no un olvido: el motor le manda los cuerpos de los artículos a quien esté activo, y eso no lo puede decidir un `alembic upgrade`. Mientras no haya ninguno prendido la síntesis no corre y **el motor lo avisa en cada corrida** — con los logs de esta misma versión, que es donde se ve.
+
+### Qué sigue
+
+El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md). Lo próximo: que el alta de medios la haga el operador por API en vez del repo, y que la URL del webhook deje de estar en el `.env`.
 
 ---
 

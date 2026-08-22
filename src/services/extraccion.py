@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # `ingestion.USER_AGENT`), pero declarando lo que esto realmente hace: pedir
 # páginas de artículo, no feeds. A propósito NO imitamos un navegador.
 USER_AGENT = (
-    "SinRuido/1.0 (+https://github.com/noticias-sin-ruido/motor-noticias) article-fetcher"
+    "SinRuido/1.1 (+https://github.com/noticias-sin-ruido/motor-noticias) article-fetcher"
 )
 
 # `robots.txt` ya consultados en esta corrida, por dominio. Sin esto se pediría
