@@ -131,7 +131,7 @@ Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica
 2. ~~**Pool de conexiones sin configurar**~~ ✅ **RESUELTO en Fase 5**: `DB_POOL_SIZE=5` / `DB_MAX_OVERFLOW=10` / `DB_POOL_TIMEOUT=30` / `DB_POOL_RECYCLE=1800`, configurables por `.env`. Calibrados contra un solo proceso Uvicorn (el único que hay: Dockerfile sin `--workers`). El razonamiento completo, incluida la cuenta de qué pasa si se agregan réplicas, está en `config.py` (comentario largo, como el resto del archivo) y en `change_logs.md`.
 3. **Índice de pgvector** (revisar cuando crezca el volumen): sigue sin haber índice HNSW/IVFFlat sobre `Noticia.embedding`, **a propósito**. A la escala actual el scan secuencial se resuelve en milisegundos, y con un `WHERE` restrictivo el índice ANN pierde parte de su ventaja igual. Además el clustering ni siquiera usa el KNN de la base: compara centroides en memoria. El único consumidor real del KNN es `GET /search`. Crear el índice cuando la tabla `noticia` llegue al orden de las decenas de miles de filas.
 4. **Scheduler embebido, un solo proceso** (diferido tras Fase 5 — ver roadmap.md, "Diferido a propósito"): si en el futuro se escala la API a varias réplicas, cada una levantaría su propio scheduler y pollearía los feeds por separado (N veces el mismo trabajo). Fase 5 fijó el despliegue en una sola réplica a propósito, así que esto sigue sin resolverse. Separar en proceso propio si eso llega a pasar.
-5. **Costo y rate limit del LLM de síntesis** (Fase 4): ✅ **decidido** — la síntesis se precalcula al alcanzar 2 medios, nunca on-demand por request, así que un pico de tráfico no dispara costo. Queda vigente el **rate limit**: en una corrida se sintetizan todos los clusters publicables de una (medido: 21), y la capa gratuita de Gemini limita por minuto. Necesita backoff con `tenacity`, igual que la ingesta.
+5. **Costo y rate limit del LLM de síntesis** (Fase 4): ✅ **decidido** — la síntesis se precalcula al alcanzar 2 medios, nunca on-demand por request, así que un pico de tráfico no dispara costo. Queda vigente el **rate limit**: en una corrida se sintetizan todos los clusters publicables de una (medido: 21), y el proveedor limita por minuto. Necesita backoff con `tenacity`, igual que la ingesta.
 6. **Modelo de embeddings en memoria** (Fase 3/5): `sentence-transformers` carga el modelo en RAM por proceso; con varios workers de Uvicorn eso multiplica el consumo de memoria. Decidir si se comparte un único proceso de embeddings o se acepta el costo por worker.
 7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `mission.md`, "BD y migraciones".
 8. ~~**El pipeline se auto-repara pero es mudo**~~ ✅ **RESUELTO**: `services/alerts.py` avisa por mail ante el fallo de cualquier paso, con cooldown para no inundar la casilla, y en el scheduler cada paso corre aislado (la fusión es la única que corta la cadena, para no publicar duplicados). La contingencia de fondo sigue siendo la idempotencia de todos los pasos: un crash a mitad se recupera solo en la corrida siguiente. Queda pendiente el logging estructurado y las métricas, que cubre Monitoring en Fase 5.
@@ -141,6 +141,27 @@ Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica
 10. **Los eventos de varios días generan clusters sucesivos** (Fase 4): un cluster cierra a las 12 h de creado, así que la cobertura del día siguiente arma uno nuevo, y la fusión solo toca clusters abiertos. Una historia larga (la muerte de Jorge Messi cubrió varios días) produce un segundo conjunto de publicaciones. En parte es correcto —el velorio es otro hecho— pero puede haber solapamiento. Revisar con síntesis reales a la vista.
 
 11. ~~**3 consultas que no escalaban**~~ ✅ **RESUELTO en Fase 5**: `synthesis.clusters_pendientes` (cargaba `SintesisNoticia` entera sin filtrar + N+1 sobre `Noticia`), `search.listar_clusters` (N+1 con join manual, hasta 101 queries con `limite=100`) y `synthesis.descartar_vencidos_sin_sintetizar` (N+1 vía relationship lazy-loaded). Los tres resueltos con `selectinload` acotado por `IN`. Apareció un cuarto caso no anticipado: en `descartar_vencidos_sin_sintetizar`, `session.commit()` expira los atributos por defecto (`expire_on_commit=True`), y el código volvía a leer `c.id`/`c.noticias` después del commit — mismo N+1, corriendo después en vez de antes. Se resolvió capturando esos valores antes de commitear. Detalle y las queries antes/después en `change_logs.md`.
+
+12. **El costo de ingesta por medio — no se pueden sumar medios de forma ilimitada** (vigente; el disparador para actuar es **pasar los ~10 medios**). Es el límite que un operador necesita entender *antes* de dar de alta un medio, así que va con los números medidos y no como advertencia genérica.
+
+    **Costo fijo, por medio y por ciclo** (no depende de cuántas notas traiga):
+
+    | | Medido |
+    |---|---|
+    | Descarga del feed | ~1 s por feed (ingesta completa: 4-7 s con 6 feeds) |
+    | Lectura del `robots.txt`, solo si `extraer_por_url` | **~0,3 s** y ~1 KB (Perfil 0,326 s · La Nación 0,291 s · TN 0,652 s · El Cronista 0,293 s) |
+
+    **Costo variable, por artículo que hay que extraer**: **~1,37 s**, medido punta a punta en la primera corrida real de Perfil (47 artículos en 64,2 s). Se descompone en ~0,35 s de descarga de la página, **1 s de pausa de cortesía** y ~17 ms de `trafilatura`. La pausa es el 75,7% y es deliberada — ver `config.py`, `EXTRACCION_PAUSA_SEGUNDOS`.
+
+    **Dónde aprieta de verdad**: no en régimen sino **en el momento de sumar un medio**. Conviene no mezclar los dos escenarios, porque hacerlo ya llevó a conclusiones equivocadas una vez:
+
+    - *Régimen* — un feed es una ventana móvil de ~7 h, así que en un ciclo de 15 min entran ~2 notas nuevas por medio. Con 20 medios son ~40 artículos ≈ 55 s, más ~26 s de costos fijos: **cerca del 9% del ciclo**. Holgado.
+    - *Alta de un medio (o recuperación tras una caída)* — el feed entero es nuevo, ~50 artículos, **~68 s por medio**. Activar 20 medios de una vez son ~1.370 s contra un ciclo de 900: **se pasa**. De acá sale el techo de ~20 medios con el diseño secuencial de hoy.
+
+    La salida cuando se llegue es paralelizar **entre** medios manteniendo la serie dentro de cada uno: eso vuelve el costo independiente de la cantidad de medios sin tocar la pausa de cortesía, que es la que no queremos negociar. Mientras tanto el canario de duración (`SCHEDULER_UMBRAL_CORRIDA_LARGA`) avisa al pasar el 50% del ciclo, así que el aviso llega solo y no depende de que alguien se acuerde de mirar.
+
+    La lectura del `robots.txt` por ciclo **no mueve este techo**: con 20 medios son 6 s, el 0,67% del ciclo. Se paga a cambio de que un permiso leído no dure semanas — ver `change_logs.md`, "La vida útil de un permiso leído".
+
 
 ---
 
@@ -210,8 +231,11 @@ En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— si
 ### Variables de entorno críticas
 
 - `DATABASE_URL` — PostgreSQL con pgvector (obligatorio en producción)
-- `GEMINI_API_KEY` — Google Gemini (usada desde Fase 4)
-- `ENVIRONMENT` — `development` | `production`
+- `MODELO_API_KEY` — la credencial del proveedor de IA que el operador haya configurado en `modelo_ia` (desde el punto 2 del backlog). **Reemplazó a `GEMINI_API_KEY`**, que ya no se lee: al actualizar hay que renombrar la variable en el `.env`, con el mismo valor
+- `ENVIRONMENT` — `development` | `production`. **Ya no controla el eco de SQL**: eso pasó a `LOG_SQL` (ver el punto 12 del backlog)
+- `API_TOKEN` — token de operador. Definido, los endpoints exigen `Authorization: Bearer` (menos la salud y la documentación); sin definir, la API queda abierta y el motor lo avisa al arrancar. **Opcional a propósito** (ver `src/auth.py`)
+- `LOG_LEVEL` — detalle de los logs, `INFO` por defecto. En INFO se ve qué hizo cada paso del pipeline y **qué fracción del ciclo consumió la corrida**, que es el número con el que se calibra `INGEST_INTERVAL_MINUTES`. Un valor mal escrito no impide arrancar: se usa INFO y se avisa
+- `LOG_SQL` — el SQL sentencia por sentencia, apagado por defecto. Va aparte de `LOG_LEVEL` porque son miles de líneas por ciclo
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)
 - `WEBHOOK_URL` / `WEBHOOK_SECRET` — entrega de síntesis al back-end. **Sin ellas la entrega no corre**: las síntesis se acumulan en la base con `enviado_backend=False` y salen cuando se configuran (ver `webhook_contract.md`)
 - `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` / `DB_POOL_RECYCLE` — pool de conexiones (Fase 5), calibrados contra un solo proceso Uvicorn. Tienen default razonable en `config.py`, no son obligatorias para arrancar.

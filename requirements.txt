@@ -23,11 +23,18 @@ beautifulsoup4>=4.12.3
 httpx>=0.27.0
 tenacity>=8.2.3
 
-# Reservada para la segunda vía de ingesta (medios sin content:encoded, ver
-# specs/roadmap.md, backlog priorizado punto 1): la comparación real ya se
-# hizo y trafilatura fue la elegida frente a newspaper4k — ver
-# specs/change_logs.md, "Segunda vía de ingesta".
-trafilatura>=2.0.0
+# Segunda vía de ingesta (medios sin content:encoded, ver specs/roadmap.md,
+# backlog priorizado punto 1): la comparación real ya se hizo y trafilatura fue
+# la elegida frente a newspaper4k — ver specs/change_logs.md.
+#
+# **Con techo de versión mayor, y el motivo está medido.** `extract()` trae
+# `include_comments=True` por default, así que durante toda la etapa 2 los
+# comentarios de lectores podían entrar al cuerpo sin que nadie lo decidiera.
+# Los parámetros que nos importan ahora van explícitos en `extraccion.py`, pero
+# eso solo cubre los que ya conocemos: un major nuevo puede cambiar otro
+# default y volver a decidir por nosotros qué texto guardamos. Subir de 3.x es
+# una decisión que se toma leyendo el changelog, no un `pip install`.
+trafilatura>=2.0.0,<3.0.0
 
 # ==========================================
 # VECTORIZACIÓN, NLP & CLUSTERING

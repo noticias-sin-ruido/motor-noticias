@@ -1,10 +1,12 @@
 """
 Tests del servicio de síntesis.
 
-Se mockea `llamar_modelo`, que es la frontera con Gemini: pegarle de verdad
-costaría plata, necesitaría clave y daría respuestas distintas en cada corrida.
-Lo que sí se prueba es todo lo nuestro — cuándo se dispara, el filtro por
-ángulo, el congelamiento de la descomposición y el manejo de fallos.
+Se mockea `llamar_modelo`, que es la frontera con el proveedor: pegarle de
+verdad costaría plata, necesitaría clave y daría respuestas distintas en cada
+corrida. Lo que sí se prueba es todo lo nuestro — cuándo se dispara, el filtro
+por ángulo, el congelamiento de la descomposición y el manejo de fallos.
+
+Cómo habla cada proveedor y cómo se elige cuál se prueba en `test_modelos.py`.
 """
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -13,8 +15,22 @@ import pytest
 from sqlmodel import Session, select
 
 from src.config import settings
-from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
+from src.models import (
+    Adaptador,
+    Cluster,
+    Medio,
+    ModeloIA,
+    Noticia,
+    PublicacionRedes,
+    Sintesis,
+)
 from src.services import synthesis
+from src.services.proveedores import (
+    AdaptadorNoImplementado,
+    ErrorDeProveedor,
+    ProveedorNoConfigurado,
+    RespuestaBloqueada,
+)
 from src.services.synthesis import (
     TWEET_LIMITE,
     TWEET_MIN_HASHTAGS,
@@ -28,6 +44,42 @@ from src.services.synthesis import (
 )
 from src.services.topicos import Subtopico, Topico
 from tests.conftest import contar_queries
+
+# El modelo que resuelve `modelo_activo` en este archivo. **Desde la etapa 4 del
+# punto 2 siempre tiene que haber uno**: sin fila activa la síntesis no corre,
+# así que un test de persistencia que no lo provea estaría probando esa rama en
+# vez de la que le interesa. Se inyecta con la fixture de abajo.
+MODELO = ModeloIA(
+    id=1, nombre="modelo-de-prueba", adaptador=Adaptador.GEMINI, modelo="un-modelo"
+)
+
+
+@pytest.fixture(autouse=True)
+def modelo_configurado(session: Session):
+    """
+    Deja un modelo activo en la base, para todos los tests del archivo.
+
+    **Se inserta la fila de verdad en vez de devolver un objeto suelto.**
+    `sintetizar_pendientes` hace `session.expunge(modelo)` para evitar el N+1
+    que provoca `expire_on_commit`, y expulsar algo que nunca estuvo adjunto
+    levanta `InvalidRequestError`. Un doble que no está en la sesión obligaría a
+    poner una guarda en producción para sostener una situación que en
+    producción no existe.
+
+    No vuelve ciegos a los tests de la rama contraria: los dos que prueban qué
+    pasa **sin** modelo activo parchean `modelo_activo`, y ese parche gana
+    porque se aplica más adentro.
+    """
+    fila = ModeloIA(
+        nombre="modelo-de-prueba",
+        adaptador=Adaptador.GEMINI,
+        modelo="un-modelo",
+        activo=True,
+    )
+    session.add(fila)
+    session.commit()
+    session.refresh(fila)
+    yield fila
 
 
 @pytest.fixture
@@ -1061,7 +1113,7 @@ class TestManejoDeFallos:
         respuesta = RespuestaSintesis(angulos=[angulo(notas=(1, 2))])
         llamadas = {"n": 0}
 
-        def falla_la_primera(_prompt):
+        def falla_la_primera(_prompt, _modelo=None):
             llamadas["n"] += 1
             if llamadas["n"] == 1:
                 raise RuntimeError("timeout")
@@ -1074,6 +1126,7 @@ class TestManejoDeFallos:
             "vencidos_sin_publicar": 0,
             "pendientes": 2, "sintetizados": 1, "creados": 1,
             "actualizados": 0, "descartados": 0, "bloqueados": 0, "fallidos": 1,
+            "sin_modelo": False, "sin_credencial": False,
         }
 
     def test_el_cluster_que_fallo_se_reintenta(self, session: Session, medios):
@@ -1089,62 +1142,175 @@ class TestManejoDeFallos:
 
 
 class TestLlamarModelo:
-    """La frontera con Gemini: se mockea el cliente, no la función."""
+    """
+    La frontera con el proveedor, y **la política de reintentos**, que es lo
+    único que vive de este lado.
 
-    def _cliente_que_responde(self, texto: str, finish_reason: str = "STOP"):
-        cliente = MagicMock()
-        respuesta = MagicMock()
-        respuesta.text = texto
-        candidato = MagicMock()
-        candidato.finish_reason = finish_reason
-        respuesta.candidates = [candidato]
-        cliente.models.generate_content.return_value = respuesta
-        return cliente
+    Cómo habla cada proveedor se prueba en `test_modelos.py`, contra su
+    adaptador. Acá se mockea `construir` —o sea el adaptador entero— porque lo
+    que se mide es qué hace `llamar_modelo` con lo que el adaptador le levante:
+    qué traduce, qué reintenta y qué no.
+    """
 
-    def test_manda_esquema_y_acota_el_razonamiento(self):
+    def _proveedor(self, **kwargs) -> MagicMock:
+        proveedor = MagicMock()
+        proveedor.generar.configure_mock(**kwargs)
+        return proveedor
+
+    def test_devuelve_lo_que_da_el_adaptador(self):
+        esperada = RespuestaSintesis(angulos=[])
+        proveedor = self._proveedor(return_value=esperada)
+
+        with patch.object(synthesis, "construir", return_value=proveedor):
+            assert synthesis.llamar_modelo("un prompt", MODELO) is esperada
+
+        proveedor.generar.assert_called_once_with("un prompt", RespuestaSintesis)
+
+    def test_el_bloqueo_por_filtros_se_traduce_y_no_se_reintenta(self):
         """
-        Los tokens de razonamiento se facturan como salida, que es ~80% del
-        costo de esta fase. Se usa `thinking_level` y no `thinking_budget`:
-        gemini-3.5-flash-lite rechaza `thinking_budget=0` con un 400.
+        Los adaptadores hablan `RespuestaBloqueada` para no depender de este
+        módulo; acá se convierte al vocabulario que entiende
+        `sintetizar_pendientes`. Reintentar no sirve: la misma entrada da el
+        mismo bloqueo.
         """
-        cliente = self._cliente_que_responde('{"angulos": []}')
+        proveedor = self._proveedor(side_effect=RespuestaBloqueada("filtros"))
 
-        with patch.object(synthesis, "get_cliente", return_value=cliente):
-            synthesis.llamar_modelo("un prompt")
-
-        config = cliente.models.generate_content.call_args.kwargs["config"]
-        assert config["response_schema"] is RespuestaSintesis
-        assert config["response_mime_type"] == "application/json"
-        assert config["thinking_config"] == {
-            "thinking_level": settings.GEMINI_THINKING_LEVEL
-        }
-        assert "thinking_budget" not in config["thinking_config"]
-
-    def test_el_bloqueo_por_seguridad_no_se_reintenta(self):
-        """Reintentar no sirve: la misma entrada da el mismo bloqueo."""
-        cliente = self._cliente_que_responde("", finish_reason="SAFETY")
-
-        with patch.object(synthesis, "get_cliente", return_value=cliente):
+        with patch.object(synthesis, "construir", return_value=proveedor):
             with pytest.raises(SintesisBloqueada):
-                synthesis.llamar_modelo("un prompt")
+                synthesis.llamar_modelo("un prompt", MODELO)
 
-        assert cliente.models.generate_content.call_count == 1
+        assert proveedor.generar.call_count == 1
 
-    def test_una_respuesta_vacia_se_reintenta(self):
-        cliente = self._cliente_que_responde("")
+    def test_un_error_del_proveedor_se_reintenta(self):
+        """Un 429 o un JSON mal armado se arreglan solos en el intento siguiente."""
+        proveedor = self._proveedor(side_effect=ErrorDeProveedor("HTTP 429"))
 
-        with patch.object(synthesis, "get_cliente", return_value=cliente):
+        with patch.object(synthesis, "construir", return_value=proveedor):
             with pytest.raises(ValueError):
-                synthesis.llamar_modelo("un prompt")
+                synthesis.llamar_modelo("un prompt", MODELO)
 
-        assert cliente.models.generate_content.call_count == 3
+        assert proveedor.generar.call_count == 3
 
-    def test_sin_api_key_falla_sin_reintentar(self, monkeypatch):
-        monkeypatch.setattr(settings, "GEMINI_API_KEY", "tu_api_key_aca")
-        monkeypatch.setattr(synthesis, "_cliente", None)
+    @pytest.mark.parametrize(
+        "error", [ProveedorNoConfigurado("falta la key"), AdaptadorNoImplementado("no hay")]
+    )
+    def test_lo_que_no_se_arregla_solo_no_se_reintenta(self, error):
+        """
+        Sin esta rama eran tres intentos con espera creciente por cluster: con
+        37 clusters, entre 2 y 4 minutos de sleeps puros por corrida, y todo
+        contado como "fallido" en vez de "mal configurado".
+        """
+        proveedor = self._proveedor(side_effect=error)
 
-        with pytest.raises(synthesis.SintesisSinConfigurar):
-            synthesis.llamar_modelo("un prompt")
+        with patch.object(synthesis, "construir", return_value=proveedor):
+            with pytest.raises(synthesis.SintesisSinConfigurar):
+                synthesis.llamar_modelo("un prompt", MODELO)
+
+        assert proveedor.generar.call_count == 1
+
+    def test_sin_modelo_activo_no_se_sintetiza(self, session: Session, medios):
+        """
+        **El cambio de la etapa 4.** Antes, ningún modelo activo significaba
+        "usá el camino histórico de Gemini" y el motor sintetizaba igual. Ese
+        camino se borró: el motor no tiene proveedor de reserva escondido, así
+        que no elegir ninguno es configuración incompleta y se dice.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+
+        with patch.object(synthesis, "modelo_activo", return_value=None):
+            with pytest.raises(synthesis.SintesisSinConfigurar):
+                synthesis.sintetizar_cluster(session, cluster)
+
+    def test_la_corrida_entera_corta_una_sola_vez_sin_modelo(
+        self, session: Session, medios
+    ):
+        """
+        Se corta arriba y no cluster por cluster: dejar que cada uno lo
+        descubra daba 26 excepciones con 26 tracebacks para una sola causa,
+        todas contadas como "fallidas" — que sugiere un problema con los
+        clusters cuando el problema es que falta configurar el motor.
+        """
+        for i in range(3):
+            cluster = crear_cluster(session)
+            crear_noticia(session, medios[0], i * 2 + 1, cluster)
+            crear_noticia(session, medios[1], i * 2 + 2, cluster)
+
+        with patch.object(synthesis, "modelo_activo", return_value=None):
+            with patch.object(synthesis, "construir") as construir:
+                stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["sin_modelo"] is True
+        assert stats["fallidos"] == 0, "no son clusters fallidos, es falta de config"
+        assert stats["sintetizados"] == 0
+        construir.assert_not_called()
+
+    def test_sin_credencial_corta_la_corrida_en_vez_de_fallar_cluster_por_cluster(
+        self, session: Session, medios
+    ):
+        """
+        Una credencial que falta no se arregla entre un cluster y el siguiente.
+
+        Sin la rama que corta, esto caía en el `except Exception` genérico: un
+        traceback y un "fallido" **por cada cluster**, para una sola causa. Ese
+        conteo apunta a un problema con los clusters cuando el problema es la
+        configuración del motor — el mismo diagnóstico engañoso que ya se había
+        corregido para "no hay ninguna fila activa".
+        """
+        for i in range(4):
+            cluster = crear_cluster(session)
+            crear_noticia(session, medios[0], i * 2 + 1, cluster)
+            crear_noticia(session, medios[1], i * 2 + 2, cluster)
+
+        falla = synthesis.SintesisSinConfigurar("falta MODELO_API_KEY")
+        with patch.object(synthesis, "llamar_modelo", side_effect=falla) as llamar:
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["sin_credencial"] is True
+        assert stats["fallidos"] == 0, "no son clusters fallidos, es falta de credencial"
+        assert llamar.call_count == 1, (
+            f"se intentaron {llamar.call_count} clusters con la misma credencial "
+            f"que ya se sabe que falta"
+        )
+
+        # Y quedan en carrera: la marca solo se escribe cuando la síntesis se
+        # persiste, así que la corrida siguiente los retoma sola.
+        assert len(synthesis.clusters_pendientes(session)) == 4
+
+    def test_sin_modelo_no_caduca_clusters_ni_culpa_al_plazo(
+        self, session: Session, medios
+    ):
+        """
+        El barrido de caducados marca lo que pasó `HORAS_MAXIMAS_SIN_SINTETIZAR`
+        sin sintetizarse y avisa **recomendando subir ese plazo**. Sin modelo
+        configurado esa recomendación es falsa: no se sintetizó porque no había
+        con qué, y subirlo no cambia nada.
+
+        Peor: el cluster quedaría marcado como caducado por una causa que el
+        motor tiene identificada treinta líneas más abajo, en
+        `stats["sin_modelo"]`.
+        """
+        viejo = crear_cluster(session)
+        viejo.fecha_creacion = datetime.now() - timedelta(
+            hours=settings.HORAS_MAXIMAS_SIN_SINTETIZAR + 1
+        )
+        crear_noticia(session, medios[0], 1, viejo)
+        crear_noticia(session, medios[1], 2, viejo)
+        session.add(viejo)
+        session.commit()
+
+        with patch.object(synthesis, "modelo_activo", return_value=None):
+            with patch.object(synthesis, "enviar_alerta") as alerta:
+                stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["sin_modelo"] is True
+        assert stats["vencidos_sin_publicar"] == 0
+        alerta.assert_not_called()
+
+        # Y el cluster sigue intacto: entra en carrera solo en cuanto haya un
+        # modelo prendido, sin necesidad de tocar el plazo.
+        session.refresh(viejo)
+        assert viejo.noticias_al_sintetizar is None
 
 
 class TestConstruirPrompt:

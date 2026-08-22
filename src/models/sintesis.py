@@ -102,6 +102,34 @@ class Sintesis(SQLModel, table=True):
     )
     intentos_envio: int = Field(default=0)
 
+    # Qué modelo produjo el contenido que esta fila tiene AHORA.
+    #
+    # Es la única forma de comparar proveedores **con datos y no por impresión**.
+    # El prompt está calibrado contra Gemini, así que cualquier otro modelo puede
+    # degradar la calidad sin que nada avise: sin esta columna, notarlo depende
+    # de que alguien lea síntesis sueltas y sospeche.
+    #
+    # Va desde el día uno aunque todavía no se use para nada, porque el valor
+    # está en la **serie histórica**: el día que se quiera la respuesta tiene que
+    # ser una query y no un proyecto de medición.
+    #
+    # Guarda el **nombre que le puso el operador** al modelo, no el id del
+    # proveedor. El motivo está en `synthesis._etiqueta_del_modelo`.
+    #
+    # Desde la etapa 4 del punto 2 **siempre hay un nombre**: no existe más el
+    # camino histórico sin fila, que se etiquetaba con un prefijo `historico:`.
+    # Eso es lo que vuelve comparable la serie: dos modelos distintos sobre el
+    # mismo corpus se distinguen con un GROUP BY.
+    #
+    # Se **actualiza** en una re-síntesis, a diferencia del título y el tópico:
+    # aquéllos son identidad ya publicada, esto describe quién escribió el texto
+    # que se acaba de reescribir.
+    #
+    # `None` solo en las síntesis anteriores a esta columna. Es un "no se sabe"
+    # y no se rellena con nada, porque inventar el modelo actual sería afirmar
+    # algo que no consta.
+    modelo_usado: Optional[str] = Field(default=None, index=True)
+
     cluster: "Cluster" = Relationship(back_populates="sintesis")
     noticias: List["Noticia"] = Relationship(
         back_populates="sintesis", link_model=SintesisNoticia

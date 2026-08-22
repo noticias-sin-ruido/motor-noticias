@@ -1,5 +1,5 @@
 """
-Síntesis neutra por ángulo, con Gemini.
+Síntesis neutra por ángulo, con el modelo que el operador haya configurado.
 
 La unidad que se publica NO es el cluster sino el **ángulo**: el clustering
 junta el hecho y toda su cobertura buscando no perder nada, y separar ese
@@ -13,7 +13,6 @@ de la denunciante" de "omitió Instagram", y esa distinción es criterio.
 
 Ver specs/change_logs.md, Fase 4, para el detalle de las decisiones.
 """
-import json
 import logging
 import unicodedata
 from datetime import timedelta
@@ -31,10 +30,24 @@ from tenacity import (
 
 from ..config import settings
 from ..tiempo import ahora_utc
-from ..models import Cluster, Noticia, PublicacionRedes, Sintesis, SintesisNoticia
+from ..models import (
+    Cluster,
+    ModeloIA,
+    Noticia,
+    PublicacionRedes,
+    Sintesis,
+    SintesisNoticia,
+)
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO, ESTADO_PROCESADO
+from .modelos import construir, modelo_activo
 from .preprocessing import construir_evidencia
+from .proveedores import (
+    AdaptadorNoImplementado,
+    ErrorDeProveedor,
+    ProveedorNoConfigurado,
+    RespuestaBloqueada,
+)
 from .topicos import (
     Subtopico,
     Topico,
@@ -95,6 +108,12 @@ TWEET_MIN_HASHTAGS = 2
 ELIPSIS = "…"
 
 
+# Centinela para distinguir "no me pasaron modelo, resolvelo" de "me pasaron el
+# modelo ya resuelto". Con `None` como default no se podían separar, y resolver
+# de nuevo en cada cluster era una query por cluster. Ver `sintetizar_cluster`.
+_RESOLVER = object()
+
+
 class SintesisBloqueada(Exception):
     """
     El proveedor bloqueó la respuesta por sus filtros de contenido.
@@ -108,12 +127,19 @@ class SintesisBloqueada(Exception):
 
 
 class SintesisSinConfigurar(Exception):
-    """Falta la API key. Reintentar no sirve."""
+    """
+    Falta configuración para poder sintetizar. Reintentar no sirve.
+
+    Cubre dos casos que se arreglan igual —tocando configuración, no
+    esperando—: que no haya ningún modelo activo en `modelo_ia`, y que el que
+    está activo no tenga credencial o pida un adaptador que no existe.
+    """
 
 
 # --- Esquema de la respuesta del modelo -------------------------------------
-# Se le pasa a Gemini como `response_schema` para que devuelva JSON válido por
-# construcción, en vez de pedírselo en prosa y after parsear a la esperanza.
+# Se le pasa al proveedor como esquema estructurado para que devuelva JSON
+# válido por construcción, en vez de pedírselo en prosa y parsear a la
+# esperanza. Cada adaptador lo envuelve como su protocolo lo pida.
 
 
 class EnfoqueMedio(BaseModel):
@@ -271,25 +297,6 @@ def ajustar_a_tweet(resumen: str, hashtags: Sequence[str]) -> Tuple[str, List[st
     # Hashtags desproporcionados: se van todos antes que devolver un texto
     # mutilado para hacerles lugar.
     return _recortar(resumen, TWEET_PRESUPUESTO), []
-
-
-_cliente = None
-
-
-def get_cliente():
-    """Cliente de Gemini, creado la primera vez que se usa."""
-    global _cliente
-
-    if _cliente is None:
-        if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY.startswith("tu_"):
-            raise SintesisSinConfigurar(
-                "GEMINI_API_KEY no está configurada en el .env"
-            )
-        from google import genai
-
-        _cliente = genai.Client(api_key=settings.GEMINI_API_KEY)
-
-    return _cliente
 
 
 def clusters_pendientes(session: Session) -> List[Cluster]:
@@ -577,50 +584,39 @@ Para cada ángulo:
     wait=wait_exponential(multiplier=2, min=2, max=30),
     reraise=True,
 )
-def llamar_modelo(prompt: str) -> RespuestaSintesis:
+def llamar_modelo(prompt: str, modelo: ModeloIA) -> RespuestaSintesis:
     """
-    Le pide la síntesis al modelo y valida la respuesta contra el esquema.
+    Le pide la síntesis al proveedor configurado.
 
-    Con `response_schema` la salida es JSON válido por construcción, así que casi
-    toda la familia de fallos de formato desaparece de raíz. Los reintentos con
-    espera creciente cubren el rate limit, que es esperable: en una corrida se
-    sintetizan todos los clusters publicables de una (medido: 21) y la capa
-    gratuita limita por minuto.
+    **`modelo` es obligatorio desde la etapa 4 del punto 2.** Antes, `None`
+    significaba "usá el camino histórico de Gemini", una rama que hablaba con el
+    proveedor directo leyendo `settings.GEMINI_*`. Esa rama se borró: el motor ya
+    no tiene un proveedor preferido escondido en el código, que era justamente lo
+    que este punto del backlog venía a sacar.
 
-    El bloqueo por filtros de contenido no se reintenta: la misma entrada da el
-    mismo bloqueo.
+    Quien resuelve qué modelo es, y avisa si no hay ninguno, es
+    `sintetizar_pendientes`. Acá llega decidido.
+
+    La única traducción que hace falta en la frontera es la excepción: los
+    adaptadores hablan `RespuestaBloqueada` para no depender de este módulo, y de
+    este lado se convierte a `SintesisBloqueada`, que es lo que ya entienden el
+    `retry` de acá arriba y `sintetizar_pendientes`.
     """
-    respuesta = get_cliente().models.generate_content(
-        model=settings.GEMINI_MODEL,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": RespuestaSintesis,
-            "temperature": settings.GEMINI_TEMPERATURA,
-            # Los tokens de razonamiento se facturan como salida, que es la
-            # parte cara de esta fase. Ver GEMINI_THINKING_LEVEL.
-            "thinking_config": {"thinking_level": settings.GEMINI_THINKING_LEVEL},
-        },
-    )
-
-    candidatos = getattr(respuesta, "candidates", None) or []
-    if candidatos:
-        motivo = str(getattr(candidatos[0], "finish_reason", "") or "")
-        if "SAFETY" in motivo.upper() or "BLOCK" in motivo.upper():
-            raise SintesisBloqueada(f"El proveedor bloqueó la respuesta ({motivo})")
-
-    if not respuesta.text:
-        raise ValueError("El modelo devolvió una respuesta vacía")
-
-    uso = getattr(respuesta, "usage_metadata", None)
-    if uso is not None:
-        logger.info(
-            f"Tokens: entrada={uso.prompt_token_count} "
-            f"salida={uso.candidates_token_count} "
-            f"razonamiento={getattr(uso, 'thoughts_token_count', None) or 0}"
-        )
-
-    return RespuestaSintesis.model_validate(json.loads(respuesta.text))
+    try:
+        return construir(modelo).generar(prompt, RespuestaSintesis)
+    except RespuestaBloqueada as error:
+        raise SintesisBloqueada(str(error)) from error
+    except (ProveedorNoConfigurado, AdaptadorNoImplementado) as error:
+        # **No se reintenta.** Una credencial que falta o un adaptador que no
+        # existe no se arreglan solos en el intento siguiente. Sin esta rama
+        # eran tres intentos con espera creciente por cluster — con 37 clusters,
+        # entre 2 y 4 minutos de sleeps puros por corrida, más un traceback por
+        # cada uno, y todo contado como "fallido" en vez de "mal configurado".
+        raise SintesisSinConfigurar(f"{modelo.nombre}: {error}") from error
+    except ErrorDeProveedor as error:
+        # Este sí se deja subir como error común para que `tenacity` reintente:
+        # un 429 o un JSON mal armado se arreglan solos.
+        raise ValueError(f"{modelo.nombre}: {error}") from error
 
 
 def _sin_acentos(texto: str) -> str:
@@ -668,6 +664,7 @@ def _persistir(
     respuesta: RespuestaSintesis,
     enviadas: Sequence[Noticia],
     medios: Dict[int, str],
+    modelo_usado: Optional[str] = None,
 ) -> dict:
     """
     Guarda los ángulos válidos. Los inválidos se descartan sin tocar el cluster.
@@ -728,7 +725,11 @@ def _persistir(
                     f"{len(comparativa)} en la comparativa): {angulo.titulo_angulo}"
                 )
                 continue
-            sintesis = Sintesis(cluster_id=cluster.id, titulo_angulo=angulo.titulo_angulo)
+            sintesis = Sintesis(
+                cluster_id=cluster.id,
+                titulo_angulo=angulo.titulo_angulo,
+                modelo_usado=modelo_usado,
+            )
             sintesis.noticias = notas
             topicos_completos = con_padres_completos(angulo.topicos, angulo.subtopicos)
             sintesis.topicos = [t.value for t in topicos_completos]
@@ -746,6 +747,15 @@ def _persistir(
                 topicos_completos = con_padres_completos(angulo.topicos, angulo.subtopicos)
                 sintesis.topicos = [t.value for t in topicos_completos]
                 sintesis.subtopicos = [s.value for s in angulo.subtopicos]
+
+            # La atribución **sí** se actualiza, a diferencia del título y el
+            # tópico. Es la diferencia entre los dos tipos de campo que hay acá:
+            # aquéllos son identidad que el backend ya publicó, y éste describe
+            # quién produjo el contenido que se está reescribiendo justo abajo.
+            # Si se cambió de modelo entre una corrida y otra, dejar la etiqueta
+            # vieja haría que la serie histórica afirme que un texto lo produjo
+            # un modelo que no lo produjo.
+            sintesis.modelo_usado = modelo_usado
 
             faltantes = [n for n in notas if n not in sintesis.noticias]
             sintesis.noticias = list(sintesis.noticias) + faltantes
@@ -813,8 +823,46 @@ def _persistir(
     return stats
 
 
-def sintetizar_cluster(session: Session, cluster: Cluster) -> dict:
-    """Genera (o actualiza) los ángulos de un cluster y deja la marca puesta."""
+def _etiqueta_del_modelo(modelo: ModeloIA) -> str:
+    """
+    Con qué nombre queda registrada una síntesis en `Sintesis.modelo_usado`.
+
+    Se guarda **el nombre que le puso el operador y no el id del modelo**. Es la
+    diferencia entre poder comparar y no: `ModeloIA` permite dos filas del mismo
+    modelo con distinta temperatura o distinta cuenta, y guardando `gpt-4o` en
+    las dos quedan indistinguibles en la serie histórica — justo la comparación
+    que esta columna existe para habilitar.
+
+    Desde la etapa 4 **siempre hay fila**, así que toda síntesis nueva queda
+    atribuida. `None` sigue significando lo que significaba: las síntesis
+    anteriores a que existiera la columna, cuya procedencia no se infiere ni se
+    rellena hacia atrás.
+    """
+    return modelo.nombre
+
+
+def sintetizar_cluster(session: Session, cluster: Cluster, modelo=_RESOLVER) -> dict:
+    """
+    Genera (o actualiza) los ángulos de un cluster y deja la marca puesta.
+
+    `modelo` acepta un `ModeloIA` ya resuelto o el centinela, que significa
+    "resolvelo vos". El centinela existe para que `sintetizar_pendientes` pueda
+    resolverlo **una sola vez** y pasarlo: sin él, cada cluster volvería a
+    consultarlo, que es el patrón de N+1 que este repo viene sacando.
+
+    Sin ningún modelo activo levanta `SintesisSinConfigurar`. Antes ese caso
+    significaba "usá Gemini" y no era un error; desde la etapa 4 del punto 2 el
+    motor no tiene proveedor preferido, así que no elegir ninguno es un estado
+    de configuración incompleta y se dice.
+    """
+    if modelo is _RESOLVER:
+        modelo = modelo_activo(session)
+    if modelo is None:
+        raise SintesisSinConfigurar(
+            "No hay ningún modelo activo en `modelo_ia`. Dale de alta uno con "
+            "POST /modelos o prendé alguno con PATCH /modelos/{id}?activo=true."
+        )
+
     evidencia = construir_evidencia(session, cluster)
     enviadas = evidencia["noticias"]
     if not enviadas:
@@ -826,8 +874,11 @@ def sintetizar_cluster(session: Session, cluster: Cluster) -> dict:
     medios = evidencia["medios_por_id"]
     prompt = construir_prompt(evidencia, enviadas, medios, cluster.sintesis)
 
-    respuesta = llamar_modelo(prompt)
-    stats = _persistir(session, cluster, respuesta, enviadas, medios)
+    respuesta = llamar_modelo(prompt, modelo)
+    stats = _persistir(
+        session, cluster, respuesta, enviadas, medios,
+        modelo_usado=_etiqueta_del_modelo(modelo),
+    )
 
     # La marca se pone aunque no se haya publicado nada: es lo que evita que un
     # cluster sin ángulos válidos se reintente en cada corrida para siempre.
@@ -846,30 +897,111 @@ def sintetizar_pendientes(session: Session) -> dict:
     corrida siguiente lo reintenta sola, porque la marca solo se escribe cuando
     la síntesis llegó a persistirse.
     """
-    # Antes de buscar candidatos, cerrar la cuenta de lo que caducó: si no, lo
-    # que quedó fuera de plazo desaparece sin que nadie se entere.
-    vencidos = descartar_vencidos_sin_sintetizar(session)
+    # **El modelo se resuelve ANTES de barrer los caducados**, y el orden
+    # importa. El barrido marca como vencido lo que pasó
+    # `HORAS_MAXIMAS_SIN_SINTETIZAR` sin sintetizarse y avisa recomendando subir
+    # ese plazo. Con el motor sin modelo configurado —una instalación recién
+    # migrada, o alguien que apagó el último—, esa recomendación es falsa: no se
+    # sintetizó porque no había con qué, y subir el plazo no cambia nada.
+    #
+    # Se corta antes de barrer, así que nada caduca por una causa que el motor
+    # ya sabe cuál es. Los clusters quedan intactos y entran en carrera solos en
+    # cuanto haya un modelo prendido.
+    modelo = modelo_activo(session)
 
-    pendientes = clusters_pendientes(session)
     stats = {
-        "vencidos_sin_publicar": vencidos,
-        "pendientes": len(pendientes),
+        "vencidos_sin_publicar": 0,
+        "pendientes": 0,
         "sintetizados": 0,
         "creados": 0,
         "actualizados": 0,
         "descartados": 0,
         "bloqueados": 0,
         "fallidos": 0,
+        # Las dos formas de "el motor no está configurado para sintetizar", que
+        # se distinguen porque se arreglan distinto: `sin_modelo` es que nadie
+        # eligió proveedor, `sin_credencial` es que el elegido no tiene con qué
+        # autenticarse. Ninguna de las dos cuenta como cluster fallido.
+        "sin_modelo": False,
+        "sin_credencial": False,
     }
+
+    # **Se corta acá y no cluster por cluster.** Sin modelo no hay síntesis
+    # posible, y dejar que cada cluster lo descubra por su cuenta daba 26
+    # excepciones con 26 tracebacks para una sola causa, todas contadas como
+    # "fallidas" — que sugiere un problema con los clusters cuando el problema
+    # es que falta configurar el motor.
+    #
+    # Antes esta rama no existía porque `None` significaba "usá Gemini". Ahora
+    # significa "nadie eligió proveedor", que es un estado de configuración y
+    # tiene que decirse como tal.
+    if modelo is None:
+        stats["sin_modelo"] = True
+        logger.error(
+            "No hay ningún modelo activo en `modelo_ia`, así que no se sintetiza "
+            "nada. Dale de alta uno con POST /modelos o prendé alguno de los que "
+            "ya están con PATCH /modelos/{id}?activo=true."
+        )
+        return stats
+
+    # `expunge` una sola vez para toda la corrida, no una por cluster.
+    #
+    # **No sobra**: `expire_on_commit` está en `True` (el default) y
+    # `sintetizar_cluster` commitea al final de cada cluster, lo que expira el
+    # `ModeloIA`; el primer acceso a un atributo suyo en el cluster siguiente
+    # dispara un SELECT de recarga. Medido: **una query por cluster**, o sea
+    # exactamente el N+1 que se quería evitar. Desprendido de la sesión, el
+    # objeto conserva sus valores y ningún commit lo toca.
+    #
+    # **Y va acá, antes de cualquier cosa que commitee.** Expulsar un objeto ya
+    # expirado lo deja desprendido *y sin valores*, así que el primer acceso
+    # tira `DetachedInstanceError` en vez de recargar. El barrido de caducados
+    # de abajo commitea, así que ponerlo antes rompía la corrida entera.
+    #
+    # Es la misma trampa que ya está documentada más arriba, en
+    # `descartar_vencidos_sin_sintetizar`.
+    session.expunge(modelo)
+    logger.info(f"Sintetizando con {modelo.nombre} ({modelo.modelo})")
+
+    # Recién con un modelo prendido se cierra la cuenta de lo que caducó: si no,
+    # lo que quedó fuera de plazo desaparece sin que nadie se entere.
+    stats["vencidos_sin_publicar"] = descartar_vencidos_sin_sintetizar(session)
+
+    pendientes = clusters_pendientes(session)
+    stats["pendientes"] = len(pendientes)
 
     for cluster in pendientes:
         try:
-            resultado = sintetizar_cluster(session, cluster)
+            resultado = sintetizar_cluster(session, cluster, modelo)
         except SintesisBloqueada as error:
             session.rollback()
             stats["bloqueados"] += 1
             logger.warning(f"Cluster {cluster.id} bloqueado por el proveedor: {error}")
             continue
+        except SintesisSinConfigurar as error:
+            # **Corta la corrida entera, no solo este cluster**, por el mismo
+            # motivo que el chequeo de modelo activo de más arriba: una
+            # credencial que falta o un adaptador que no existe no se arreglan
+            # entre un cluster y el siguiente.
+            #
+            # Sin esta rama caía en el `except` genérico de abajo: 17 clusters,
+            # 17 tracebacks y 17 "fallidos" para una sola causa — que apunta a
+            # un problema con los clusters cuando el problema es la
+            # configuración del motor. Es el mismo diagnóstico engañoso que ya
+            # se había corregido para el caso "no hay ninguna fila activa", y
+            # que se le escapaba al caso "la fila está pero no tiene con qué
+            # autenticarse".
+            #
+            # Los clusters quedan sin marca, así que entran en carrera solos en
+            # la corrida siguiente.
+            session.rollback()
+            stats["sin_credencial"] = True
+            logger.error(
+                f"Se corta la síntesis: {error}. Los {len(pendientes)} clusters "
+                f"pendientes quedan intactos y se reintentan solos cuando la "
+                f"configuración esté."
+            )
+            break
         except Exception as error:
             session.rollback()
             stats["fallidos"] += 1

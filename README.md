@@ -146,18 +146,22 @@ Casi todo el pipeline corre sin registrarse en nada:
 | `GET /search` — búsqueda semántica (KNN de pgvector) | ✅ |
 | `GET /clusters` — qué se agrupó con qué | ✅ |
 | `GET /` — healthcheck con verificación real de la base | ✅ |
-| `POST /synthesize` — síntesis con IA | ❌ pide `GEMINI_API_KEY` |
+| `POST /synthesize` — síntesis con IA | ❌ pide un modelo dado de alta |
 | `POST /deliver` — entrega firmada al back-end | ❌ pide `WEBHOOK_URL` y `WEBHOOK_SECRET` |
 
 O sea: **se puede ver el motor traer noticias de verdad, agruparlas por hecho y responder una búsqueda semántica en unos minutos y sin dar de alta ninguna cuenta.**
 
-Para la síntesis hace falta una `GEMINI_API_KEY` propia (se obtiene gratis en Google AI Studio) en el `.env`. Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
+Para la síntesis hace falta **un modelo de IA, el que vos elijas**: el que pagás, aquel donde tenés créditos, o uno corriendo en tu propia máquina —en cuyo caso los cuerpos de los artículos no salen de ahí—. Se pone su credencial en `MODELO_API_KEY` y se lo da de alta con `POST /modelos`, que **sondea al proveedor antes de aceptarlo** en vez de registrar lo que le manden — y de paso descubre solo cómo pedirle JSON estructurado.
+
+Sin ningún modelo prendido la síntesis no corre, y el motor lo avisa en cada corrida: **no hay proveedor de reserva**, justamente para que nadie termine mandándole los textos a un tercero que no eligió.
+
+Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
 
 ---
 
 ## API
 
-Ocho endpoints. Los `POST` son disparo manual de cada paso del pipeline, que además corre solo cada 15 minutos.
+Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -169,8 +173,53 @@ Ocho endpoints. Los `POST` son disparo manual de cada paso del pipeline, que ade
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
+| `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
+| `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
+| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** |
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
+
+### Token de operador
+
+**Todos los endpoints son del operador.** El back-end recibe las síntesis por *push* y no consulta nada, así que nada externo consume esta API.
+
+Definí `API_TOKEN` en el entorno y los endpoints piden `Authorization: Bearer <token>` — todos menos la salud (`GET /`, que usa el healthcheck de Docker) y la documentación. **Sin la variable, la API queda abierta y el motor te lo avisa en cada arranque.**
+
+Es opcional a propósito: quien lo corre en su notebook no debería pelearse con una credencial, y cómo se expone el servicio es decisión de quien lo despliega. Pero si lo exponés, ponelo — hay endpoints que **gastan plata por invocación** (`POST /synthesize`), que hacen al motor **golpear todos los feeds con tu identidad** (`POST /ingest`), y que **le entregan tu credencial de IA** a la URL que le indiquen (`POST /modelos`).
+
+```bash
+# Generá uno
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+curl -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/modelos
+```
+
+El `docker-compose.yml` liga el puerto a `127.0.0.1` y no a `0.0.0.0`, así que por defecto no sale de la máquina. Para exponerlo de verdad: token **y** un proxy con TLS adelante.
+
+### Los logs
+
+El motor escribe a stdout, así que `docker compose logs -f app` alcanza. En `INFO` —el default— cada corrida deja qué hizo cada paso, con qué modelo sintetizó, cuántos tokens costó y **qué porcentaje del ciclo consumió**:
+
+```
+2026-08-21 20:53:26-03 INFO  src.main: === Pipeline arranca 21/08 20:53:26 (UTC-3) ===
+2026-08-21 20:53:44-03 INFO  src.services.proveedores.gemini: Tokens (gemini-por-defecto): entrada=6583 salida=1457 razonamiento=0
+2026-08-21 20:53:51-03 INFO  src.main: === Pipeline termina 21/08 20:53:51 (UTC-3) — 25.1 s — utilización 2.8% del ciclo ===
+```
+
+Ese último número es con el que se calibra `INGEST_INTERVAL_MINUTES`: si una corrida normal usa una fracción chica, conviene acortar el ciclo para tener noticias más frescas; si se acerca al techo, alargarlo.
+
+Dos perillas, las dos opcionales:
+
+- `LOG_LEVEL` — `INFO` por defecto. `WARNING` deja solo los problemas. Un valor mal escrito no impide arrancar.
+- `LOG_SQL` — el SQL sentencia por sentencia, apagado. Va aparte de `LOG_LEVEL` porque son miles de líneas por ciclo.
+
+La persistencia y la rotación son de Docker, no del motor: el `docker-compose.yml` trae un techo de 10 MB × 5 archivos, que medido son más de tres meses de historia. Un handler de archivo adentro del contenedor sería peor — lo escondería de `docker logs` y, sin rotación, llenaría el disco.
+
+### Qué proveedores entran
+
+**Cualquiera que hable el protocolo de OpenAI**, que es el estándar de hecho: OpenAI, Azure, Groq, OpenRouter, Together, DeepSeek, Mistral, xAI, vLLM, LM Studio, Ollama y el propio Gemini. Se dan de alta cambiando `base_url`, sin tocar código. Gemini además tiene adaptador nativo, que es el único camino a su palanca de razonamiento.
+
+**Limitación conocida — Anthropic.** Se usa con el adaptador `openai_compatible` y `base_url=https://api.anthropic.com/v1`. No hay adaptador nativo, así que no se accede a su salida estructurada (`output_config.format`) ni a `output_config.effort`. Además: está verificado que su capa de compatibilidad **ignora `response_format`**, con lo cual el alta va a caer al modo `tools` — y **eso no está comprobado contra el proveedor real**, porque el proyecto no tuvo una credencial con crédito para probarlo. Si el alta falla, ése es el motivo, y la salida es poner adelante un gateway (LiteLLM, OpenRouter). Ver `specs/roadmap.md`, punto 2.
 
 <details>
 <summary><b>Respuestas reales de ejemplo</b></summary>

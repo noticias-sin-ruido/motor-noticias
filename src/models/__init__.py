@@ -10,6 +10,7 @@ from .noticia import Noticia
 from .cluster import Cluster
 from .sintesis import Sintesis, SintesisNoticia
 from .publicacion_redes import PublicacionRedes
+from .modelo_ia import Adaptador, ModeloIA, ModoEstructura
 
 __all__ = [
     "Medio",
@@ -18,4 +19,7 @@ __all__ = [
     "Sintesis",
     "SintesisNoticia",
     "PublicacionRedes",
+    "ModeloIA",
+    "Adaptador",
+    "ModoEstructura",
 ]

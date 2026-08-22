@@ -4,9 +4,9 @@ Estado de las 5 fases del proyecto. El *qué* y *cuándo* vive acá; el *por qu�
 
 **Estado: versión 1.0.** Las 5 fases completas y **la entrega al back-end probada punta a punta**: primera corrida real contra el receptor (192 publicaciones entregadas de una, y después el pipeline completo ingesta → entrega sin fallos). Sobre el cierre de Fase 5 se sumaron el rediseño de tópicos (tópicos + subtópicos), el copy para redes sociales (`publicacion_redes`) ya ajustado a los 280 de un tweet, y tres auditorías de llamadas del pipeline (RSS/DB/Gemini) que dejaron 8 fixes de N+1. **268/268 tests, 96% de cobertura, `alembic check` limpio.**
 
-**Siguiente:** el punto 1 del backlog priorizado de abajo (segunda vía de ingesta), que es el que de verdad mueve la aguja para sumar medios. Su precondición —avisarle al equipo de back-end de los cambios de forma del contrato y operar contra el receptor real— ya está cumplida: `webhook_contract.md` está actualizado y la comunicación verificada.
+**Siguiente:** el punto 2 del backlog priorizado de abajo (desacoplar el motor de IA). El punto 1 (segunda vía de ingesta) ya cerró: Perfil está de alta y en producción.
 
-**Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `GEMINI_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
+**Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `MODELO_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
 ---
 
@@ -136,26 +136,216 @@ Con Fase 5 cerrada, esta es la lista accionable de próximos pasos, priorizada. 
 
 Regla que ordena toda la lista, la misma de siempre (`mission.md`): **medir antes de resolver**. Ningún punto de acá se ataca preventivamente — se retoma cuando el síntoma aparece con datos reales, no antes.
 
-### 1. Segunda vía de ingesta: extracción por URL (Clarín, Perfil) — el lever directo para sumar medios
+### 1. Segunda vía de ingesta: extracción por URL (Perfil) — el lever directo para sumar medios
 
-Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded` — hoy el motivo concreto por el que Clarín quedó afuera del roster. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
+Vía `trafilatura` (ya reservado en `requirements.txt` desde Fase 2), para los medios cuyo RSS no trae `content:encoded`. Medido y viable, plan de implementación completo en `change_logs.md`, sección "Segunda vía de ingesta: extracción por URL". Es el ítem de mayor prioridad de la lista porque es literalmente el mecanismo para sumar medios, que es el eje de todo lo demás acá.
 
-**Precondición que sigue sin cumplirse**: se dijo "se retoma con el back-end integrado y probado" — y esa integración real (URL + secreto del webhook configurados, primera entrega punta a punta) todavía no pasó (ver la línea "Siguiente" al principio de este documento). No se empieza esta vía mientras compita por atención con cerrar esa comunicación.
+**✅ COMPLETO** (18-20/08/2026, branch `mejoras-post-1.0`). Las dos precondiciones quedaron cumplidas:
 
-### 2. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
+- *"Se retoma con el back-end integrado y probado"* — la corrida del 18/08 entregó 15/15 síntesis, 221/221 acumulado, cero rechazos.
+- *"No entra en la app hasta validar que suma pares reales"* — medido: **14 pares reales por día** (contra un piso de 3 para justificar el trabajo), 30-35% de sus artículos parean con nuestro corpus, y **0 fallos de extracción sobre 120 artículos**. Detalle completo, incluida la auditoría manual de los pares, en `change_logs.md`, "Etapa 0: la medición que levanta el candado".
+
+Etapas: **0 ✅** medición · **1 ✅** esquema (`Medio.extraer_por_url` + migración `b4f1a9d27c30`) · **2 ✅** `services/extraccion.py` con piso de caracteres y política de reintentos propia · **3 ✅** la costura, con la extracción **fuera de la transacción** · **4 ✅** márgenes del scheduler y alerta ante corridas perdidas · **5 ✅** alta de Perfil.
+
+**Clarín quedó afuera, no solo pospuesto.** La revisión de términos de uso del 19-20/08 (ver punto 3 y `change_logs.md`) mostró que retiene el cuerpo del feed a propósito —su licencia cubre solo "títulos y/o links"—, así que extraerlo por URL cruzaría una línea que el medio trazó. Perfil sí licencia "el contenido" y entró: seed con un feed general y `extraer_por_url=True`, verificado en producción (47 nuevas, 0 fallos de extracción, `robots.txt` pedido una vez).
+
+- *Medido en la etapa 4*: una corrida usa el **1,2% del ciclo** sin síntesis pendiente y el **23%** con un backlog de 24 ángulos. **La síntesis es el 91% del costo**; el resto del pipeline es plano en ~10 s. Como el trabajo de síntesis por día lo fija la cantidad de noticias y no el intervalo, **`INGEST_INTERVAL_MINUTES` hay que decidirlo por frescura, no por capacidad**: ya es variable de entorno y cada corrida loguea su utilización.
+
+- *Medido al planificar la etapa 3*: `trafilatura` es el **1,3%** del costo por artículo (16,9 ms) — no es el punto de inflexión al sumar medios. El 75,7% es la pausa de cortesía propia, y ahí está el techo: **~20 medios** con el diseño secuencial de hoy. Paralelizar entre medios (serie dentro de cada uno) lo vuelve independiente de N; disparador para hacerlo: **pasar los ~10 medios**. Detalle en `change_logs.md`.
+
+**Hallazgo que abre un ítem nuevo**: la medición destapó dos clusters mal armados de El Cronista ("el blob de economía" de Fase 3) que hoy no se publican solo porque les falta un segundo medio. No los causa esta vía, pero esta vía los volvería publicables. Ver el hallazgo del centroide en `change_logs.md`.
+
+### 2. Desacoplar el motor de IA — que cada operador elija su modelo
+
+Hoy `synthesis.py` habla Gemini directo. La idea es que quien despliegue el motor elija su proveedor **conociendo sus pros y contras**, incluido correr un modelo local — con lo que los cuerpos de los artículos no salen de la máquina.
+
+**El acoplamiento es chico y está medido**: de las 884 líneas de `synthesis.py`, lo específico de Gemini son `get_cliente()` y `llamar_modelo()`, unas 50 líneas. El contrato ya es prácticamente una interfaz de proveedor: `(prompt: str) -> RespuestaSintesis`. Todo lo demás —prompt, esquema, validaciones anti-alucinación, lógica de clusters— es agnóstico.
+
+Lo difícil no es la estructura sino cuatro detalles: la **salida estructurada** se pide distinto en cada proveedor (`response_schema` en Gemini, `json_schema` en OpenAI, tool-use en Anthropic, `format` en Ollama; `model_json_schema()` sirve de denominador común); el **bloqueo por filtros** llega en campos distintos y cada adaptador tiene que normalizarlo a `SintesisBloqueada`; **`thinking_config` no tiene equivalente** fuera de Gemini; y sobre todo **el prompt está calibrado contra Gemini**, así que cada proveedor necesita su propia corrida de validación de calidad. Eso último es medición, no programación, y es el grueso del trabajo.
+
+**✅ COMPLETO.** Etapas: **1 ✅** la rebanada vertical completa con el adaptador `openai_compatible`, la tabla `modelo_ia`, el alta con sondeo y `Sintesis.modelo_usado` · **2 ✅** Gemini nativo, la credencial única y las opciones por adaptador · **3 ❌ no se implementa** (ver abajo) · **4 ✅** retirado el camino histórico.
+
+Con la etapa 4, **el motor ya no tiene proveedor preferido**: sin fila activa en `modelo_ia` la síntesis no corre y lo dice.
+
+**Al actualizar hay un paso manual, y es a propósito.** La migración `5f80e67d5404` convierte la configuración de entorno del despliegue en una fila, pero **la deja apagada**: la regla es que ninguna migración elige proveedor. Hay que prenderla con `PATCH /modelos/{id}?activo=true`, y **renombrar la credencial en el `.env`**: `GEMINI_API_KEY` pasa a `MODELO_API_KEY`, mismo valor. Si falta, el motor no sintetiza y lo dice — no adivina.
+
+**Prender un modelo apaga a los demás.** Con una sola credencial, dos proveedores prendidos es un estado que no se puede usar; y sin exclusividad dos filas empataban en `prioridad` y desempataba el `id`, o sea ganaba la más vieja en silencio.
+
+### La etapa 3 (Anthropic nativo) no se implementa — decidido el 21/08/2026
+
+**Anthropic se usa con el adaptador `openai_compatible`** y `base_url=https://api.anthropic.com/v1`. El valor `Adaptador.ANTHROPIC` queda reservado en el enum y `construir` lo rechaza con un mensaje que explica esto mismo.
+
+**⚠️ El supuesto que sostiene esto no está verificado.** Está comprobado que la capa de compatibilidad de Anthropic **ignora `response_format` en silencio**, así que el sondeo tiene que caer a `tools`. Que `tools` funcione ahí **nunca se probó**: el proyecto no tiene una credencial de Anthropic con crédito. Si alguien la consigue, esa medición cuesta menos de un centavo y es lo primero que hay que hacer — si `tools` no sirve, Anthropic no entra por ningún lado y la etapa 3 pasa de opcional a necesaria.
+
+**Lo que se pierde**, y es más de lo que decía la versión anterior de este documento:
+
+- **Salida estructurada nativa** vía `output_config.format`, que da JSON válido por construcción igual que `response_schema` en Gemini. Por `tools` el esquema es una guía, no una garantía.
+- **`output_config.effort`** (`low` a `max`) como palanca de costo.
+
+> Corrección: este roadmap decía que el nativo aportaría `thinking.budget_tokens`. **Eso ya no existe** — está removido en los modelos actuales de Anthropic y devuelve 400. Lo reemplazaron `thinking: {type: "adaptive"}` y `output_config.effort`.
+
+**Por qué no se construye igual.** No es solo que no haya key para testear: **no hay presupuesto para correrlo.** Con el prompt real medido (18.447 tokens de entrada, ~2.200 de salida) y unas 20 síntesis por día, Anthropic sale entre **US$18 y US$88 por mes** según el modelo, contra **US$0** del tier gratuito de Gemini que corre hoy. Construir un adaptador que el proyecto no puede pagar es agregar una dependencia y ~250 líneas que nadie va a ejecutar.
+
+**Cuándo se revisa**: si el proyecto consigue una credencial de Anthropic, o si alguien que despliega el motor la tiene y reporta que el compatible no le alcanza. Hasta entonces es una limitación documentada, no una tarea pendiente.
+
+La etapa 2 midió lo que estaba pendiente: **los tres caminos a Gemini son equivalentes** —8,05 s el nativo, 8,55 s el compatible, 8,98 s el histórico sobre el mismo prompt de 18.447 tokens, mismos 4 ángulos en las doce corridas— y la palanca de razonamiento del nativo **funciona y se paga**: de 0 tokens con `LOW` a 6.267 con `HIGH`, con el triple de latencia.
+
+**El hallazgo que reencuadró la etapa 4**: en seis rondas, el camino histórico tardó **486 segundos** en una y no falló, porque `_llamar_gemini` **no tenía timeout** — era la única llamada sin límite de tiempo del pipeline, y `llamar_modelo` la reintentaba tres veces sobre un ciclo de 15 minutos. Retirarlo dejó de ser higiene: ahora toda llamada pasa por un adaptador, y todo adaptador tiene techo.
+
+Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
+
+- **La credencial es una sola variable, `MODELO_API_KEY`.** Cambiar de proveedor es cambiar su valor, no agregar otra. Tener dos proveedores vivos a la vez es el punto 6-bis. Como el nombre ya no distingue proveedores, **activar un modelo sondea contra él** en vez de mirar el entorno.
+- **`POST /modelos` no es un CRUD**: sondea antes de aceptar y descubre solo cómo pedirle estructura al proveedor. Medido: la capa de compatibilidad de Anthropic responde 200 e **ignora `response_format` en silencio**.
+
+> ⚠️ **Los tres endpoints de `/modelos` son los primeros que aceptan una URL arbitraria para que el motor la llame.** Además de la autenticación del punto 10, hay puesto: enum cerrado de adaptadores, prefijo obligatorio para `api_key_env`, validación de `base_url` (solo http/https, sin credenciales embebidas, sin link-local), respuestas que no publican `api_key_env` ni `base_url`, y errores que no reflejan el cuerpo del proveedor.
+>
+> **Nada de eso reemplaza la autenticación**, que llegó en el punto 10: con `API_TOKEN` definido, estos endpoints la exigen. **Sin token la API queda abierta a propósito** —es la elección de quien despliega— y ahí sigue valiendo que quien pueda hacer POST puede apuntar `base_url` a su propio servidor y quedarse con la key de IA del operador.
+
+### 3. El alta de medios la hace el operador, no el repo
+
+Hoy `scripts/seed_medios.py` trae seis medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos seis en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.
+
+La revisión de términos del 19-20/08 lo dejó a la vista: varían muchísimo entre medios —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario bloquea crawlers de IA— y cuál es aceptable depende del uso que le dé cada operador. Ver `change_logs.md`.
+
+**Qué se construye**: endpoints de alta, baja y listado de medios con su lógica de persistencia. El roster deja de venir en el repo.
+
+**La decisión de diseño que importa**: el endpoint **no puede ser un CRUD que registra lo que le mandan**. Todo lo aprendido en la etapa 5 dice que tiene que sondear e informar antes de aceptar:
+
+- ¿El feed responde? (`/feed/internacionales` de Perfil da 404, y está publicado en su propia página de RSS)
+- ¿Trae `content:encoded`? Determina si hace falta `extraer_por_url` — la bandera que marca los medios donde vamos a buscar el cuerpo que ellos eligieron no publicar
+- ¿Qué dice su `robots.txt`? `crawl-delay`, bloqueos de crawlers de IA, reservas de TDM
+- ¿Cuántos ítems trae y qué ventana temporal cubren? Distingue una ventana móvil de un archivo
+
+Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí vos"*, que es la delegación informada. Un CRUD pelado dejaría dar de alta un medio con extracción sin que el operador se entere de que ese medio licencia solo títulos y links.
+
+**Tres cuidados:**
+
+1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
+2. **Migración**: la instancia que corre hoy tiene seis medios cargados. Sacar el seed no puede dejarla vacía.
+3. **Seguridad**: hace que el motor **busque una URL arbitraria a pedido de quien llame**, o sea SSRF y uso del motor como proxy hacia terceros. **La autenticación ya está** (punto 10), así que lo que queda es la validación del destino, que se diseña con el endpoint y no después. El patrón está hecho en `proveedores/base.validar_base_url`, pero acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida: hay que revisarlo, no copiarlo.
+
+**Va después del punto 2**, por decisión del usuario.
+
+### 4. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
 
 `tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 6 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
 
 **No se implementa todavía.** Se vigila el tiempo de la corrida de agrupamiento (ya logueado) a medida que se sumen medios vía el punto 1, y se ataca cuando el número se acerque a los segundos que empiezan a competir con el ciclo de 15 minutos del scheduler — no antes.
 
-### 3. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
+### 5. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
 
 `tech_stack.md`, punto 10. Un cluster cierra a las 12 h; una historia larga (la muerte de Jorge Messi cubrió varios días) produce publicaciones sucesivas que pueden solaparse. Con más medios hay más cobertura y más eventos largos, así que el riesgo crece con el volumen — pero la solución no es técnica (¿son hechos distintos de verdad, o el mismo hecho que el producto debería seguir mostrando junto?), es una conversación con el equipo de producto/back-end sobre qué comportamiento quieren. Revisar con síntesis reales a la vista antes de proponer un diseño.
 
-### 4. Rate limit de Gemini al sumar medios
+### 6. Rate limit del proveedor al sumar medios
 
-`tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y la capa gratuita de Gemini limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier pago.
+`tech_stack.md`, punto 5 (el costo ya está resuelto — precálculo, no on-demand — pero el rate limit sigue vigente). Hoy una corrida sintetiza todos los clusters publicables de una vez (medido: hasta 26) y el proveedor limita por minuto; ya hay backoff con `tenacity`. Con más medios, más clusters publicables por corrida, más chance de pegarle al límite seguido en vez de ocasionalmente. Vigilar la tasa de reintentos por rate limit en los logs a medida que se sumen medios; si se vuelve frecuente, ahí se decide entre escalonar la síntesis o pasar a un tier con más cupo.
 
-### 5. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
+**Se cruza con el punto 6-bis**: la cadena de fallback es una de las salidas posibles a este problema, y la otra mitad de la respuesta.
+
+### 6-bis. Multimodelo: varios proveedores vivos a la vez, y a cuál mandarle qué
+
+**Abierto el 21/08/2026, al decidir la credencial única de la etapa 2 del punto 2.** Ver `change_logs.md`.
+
+El motor puede tener varias filas en `modelo_ia`, pero **una sola credencial configurada por vez**: `MODELO_API_KEY` tiene un solo valor, y una key de Groq no sirve en Gemini. Cambiar de proveedor es cambiar ese valor. Alcanza de sobra mientras cambiar de modelo sea algo raro, que es el caso.
+
+Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el mismo instante**, que es lo que necesita la cadena de fallback: si el de `prioridad` 1 pega contra su rate limit, caer al 2 sin perder el trabajo de la corrida.
+
+**Por qué no se hizo ahora, y el argumento es del usuario**: la cadena no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden — cuántos clusters van a uno y cuántos al otro—, y eso es lógica nueva de peso que no corresponde arrastrar dentro del desacoplamiento.
+
+**Lo que ya está puesto y no hay que rehacer**: la columna `prioridad` (hoy solo desempata), la columna `api_key_env` con su default, y `leer_api_key` aceptando la forma con sufijo (`MODELO_API_KEY_GROQ`). El día que se implemente, es **exponer un campo en el alta**, no migrar la tabla ni rehacer la validación. Las instancias que hoy tengan filas con nombres sufijados siguen funcionando sin tocar nada.
+
+**Lo que sí habría que revisar**: `PATCH ?activo=true` sondea contra el proveedor justamente porque con credencial única la variable no dice de quién es la key. Con nombres por proveedor esa comprobación vuelve a poder ser barata — pero conviene medir antes de aflojarla.
+
+### 7. Solo si se suma más de una réplica — no lo dispara sumar medios por sí solo
 
 Tres puntos de `tech_stack.md` (1, 4 y 6: engine de BD síncrono, scheduler embebido, modelo de embeddings en memoria por worker) comparten la misma condición: importan si el despliegue pasa de una réplica a varias, no por la cantidad de medios que se ingieran con la réplica única actual. Fase 5 fijó a propósito un solo proceso Uvicorn sin `--workers`; mientras eso no cambie, estos tres quedan correctamente diferidos.
+
+### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función
+
+**Último en la lista a propósito: hoy no genera inconvenientes.** No son tantas noticias y el espacio que ocupan tampoco aprieta. Se hace cuando alguna de las dos cosas cambie.
+
+Borrar **solo `contenido_limpio`** —no la noticia— cuando su cluster ya cerró, se sintetizó y se entregó, más un margen. Medido al 20/08/2026: **17,5 MB de texto ajeno**, del cual el **71% (3.186 de 4.485) es de artículos que nunca formaron cluster y ya no pueden formarlo**, porque quedaron fuera de la ventana.
+
+Sobrevive todo lo demás —título, URL, fecha, categoría y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
+
+**Rompe un solo consumidor**: el corpus de TF-IDF ajusta sobre `select(Noticia)` sin filtro ([preprocessing.py:105](src/services/preprocessing.py#L105)). Hay que decidir entre incluir las purgadas solo con título o excluirlas con una ventana móvil.
+
+**El costo real de purgar** no es perder el texto para el producto —ya cumplió— sino **no poder revectorizar si algún día se cambia `EMBEDDING_MODEL`**: habría que re-ingerir, y lo que salió de la ventana del feed no vuelve.
+
+Vale anotar el otro motivo por el que existe este punto, que no es técnico: reduce cuánto texto de terceros conservamos y por cuánto tiempo. Ver la revisión de términos de uso en `change_logs.md`.
+
+### 9. El mail de alertas lo elige el operador, no el `.env` del repo
+
+Hoy `ALERT_EMAIL_TO` es una variable de entorno única: quien despliegue el motor recibe las alertas en la casilla que quedó configurada al armar el contenedor, y cambiarla exige tocar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2 y 3 —cada operador con su modelo y con su roster de medios— no, porque **las alertas son suyas: hablan de sus medios, sus feeds y sus corridas**.
+
+**Qué se construye**: que la casilla de destino se pueda leer y cambiar en caliente, sin redeploy.
+
+**Los cuidados, que acá pesan más que en otros puntos**:
+
+- **La autenticación existe desde el punto 10, pero es opcional.** Un endpoint que cambie el destino de las alertas deja que cualquiera **desvíe los avisos** —y quien los desvía, los apaga— o **los apunte a un tercero**, convirtiendo al motor en un emisor de mails no solicitados con nuestras credenciales SMTP. En un despliegue sin `API_TOKEN` eso queda abierto, así que este endpoint es candidato a exigir token **siempre**, y no solo cuando el operador lo activó.
+- **Verificar la dirección antes de usarla**, o un typo silencia las alertas sin que nadie se entere hasta que algo se rompa y no llegue el aviso.
+- Conviene decidir a la vez si el destino es **uno o varios**, y si `SMTP_*` sigue siendo del repo o también pasa al operador: hoy las credenciales de envío y la casilla de destino están en el mismo lugar, y esto las separa.
+
+### 10. Token de operador para la API ✅ COMPLETO (21/08/2026)
+
+**Cerrado el 21/08/2026.** Estaba en tres lugares como prerrequisito y en ninguno como tarea: el punto 3 lo pedía "desde el diseño", el punto 9 decía que se resolvería junto con el 3, y los comentarios del código apuntaban a "el punto 9" — que es el mail de alertas. Una deuda sin acreedor.
+
+La confusión era de vocabulario. Lo que este roadmap difirió (arriba, en Fase 5) es **autenticación pública**: usuarios, roles, rate limiting — y eso sigue diferido, porque es un problema de tráfico que el proyecto no tiene. Lo que hacía falta es otra cosa y mucho más chica: **un token de operador**.
+
+**Qué se construyó.** `API_TOKEN` en el entorno; con la variable definida los once endpoints piden `Authorization: Bearer`, menos `GET /` (el healthcheck de Docker) y la documentación. Sin la variable la API queda abierta y el motor lo avisa en cada arranque.
+
+**Que sea opcional es la decisión de diseño**, no una concesión: el motor es software libre que otros despliegan, y cómo lo exponen es asunto suyo. Un solo interruptor, del lado del operador, sin comportamiento que dependa del entorno.
+
+**Lo que el inventario destapó**, y que ninguna nota anterior decía:
+
+- **`POST /synthesize` es un ataque financiero.** Cuesta plata por invocación, y el gasto en APIs es el límite duro del proyecto.
+- **`POST /ingest` es reputacional.** Hace que el motor golpee todos los feeds **con la IP y el User-Agent del operador**, contra medios cuyos términos de uso revisamos con cuidado.
+- **El `docker-compose.yml` contradecía la mitigación documentada**: ligaba `8000:8000`, o sea `0.0.0.0`. La nota decía "desplegala donde solo llegue el operador" mientras el archivo publicaba la API entera. Ahora liga a `127.0.0.1`.
+- **Nada externo consume esta API.** El back-end recibe por push y no hace polling, así que proteger todo no rompió ninguna integración — eso hizo la decisión barata.
+
+**Lo que NO cubre**: no es TLS ni firewall. El token viaja en claro si la API se expone por HTTP sin proxy adelante.
+
+### 11. La URL del webhook la configura el operador, no el `.env`
+
+Hoy el destino de las síntesis vive en `settings.WEBHOOK_URL` ([webhook_delivery.py:239](../src/services/webhook_delivery.py#L239)), así que cambiarlo exige editar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2, 3 y 9 —cada operador con su modelo, su roster de medios y sus alertas— no, porque **el back-end también es suyo**.
+
+Es la misma forma que `modelo_ia`: una fila con la configuración, endpoints para verla y cambiarla, y la credencial —el `WEBHOOK_SECRET`— **quedándose en el entorno**, nunca en la base.
+
+**Pero es el más delicado de la familia, y por un motivo que no tienen los otros.** `POST /modelos` deja que alguien redirija una *credencial*; esto dejaría redirigir **el producto**: los cuerpos sintetizados, las comparativas por medio, todo lo que el motor genera. Y peor, **firmado**: el payload viaja con una firma HMAC válida, así que quien reciba una entrega desviada obtiene contenido que *parece legítimo* porque lo es.
+
+Tres cuidados que no se pueden saltear:
+
+1. **Exige token siempre**, no solo cuando el operador activó `API_TOKEN`. Es el mismo caso que el punto 9: un despliegue abierto no puede tener un endpoint que redirija su propia salida.
+2. **Validación del destino**, con el patrón de `proveedores/base.validar_base_url` pero más estricto: acá no hay caso de uso legítimo para un destino en la red interna.
+3. **Cambiar la URL no debería re-entregar lo ya entregado.** `enviado_backend` marca la síntesis, no el destino, así que apuntar a otro back-end lo deja con la base vacía y sin forma de pedir el histórico — hay que decidir si eso es lo correcto o si el cambio de destino resetea las marcas.
+
+**Va después del punto 3**, que comparte el diseño de "el operador configura por API" y es el que más valor entrega.
+
+### 12. El motor tenía logging pero no salida ✅ COMPLETO (21/08/2026)
+
+**Cerrado el 21/08/2026, antes de pasar las mejoras post-1.0 a `main`.** Apareció verificando el pipeline, no buscándolo: los 16 módulos de `src/` llaman a `logging`, y **no había un solo `basicConfig` ni handler en todo el proyecto**. Estaba anotado como "persistir los logs" en notas viejas y nunca llegó a ser un punto del backlog.
+
+Sin handler en la raíz, la consecuencia no es "los logs salen feos". Es que **todo `logger.info` se descarta sin dejar rastro** y todo `WARNING` para arriba cae en `logging.lastResort` —el handler de emergencia de la stdlib— sin fecha, sin nivel y sin nombre de módulo. Uvicorn no lo tapa: configura solo sus propios loggers y deja la raíz intacta a propósito, para no pisarle la configuración a la app que hospeda.
+
+Lo que se perdía no era ruido:
+
+- el resultado de cada paso del pipeline,
+- con qué modelo se sintetizó y cuántos tokens costó,
+- **el porcentaje del ciclo que consumió la corrida** — que es, según este mismo roadmap, el número con el que se calibra `INGEST_INTERVAL_MINUTES`. El motor medía su propia utilización y tiraba la medición.
+
+**Qué se construyó.** `src/logging_config.py`, llamado como primera cosa del `lifespan`. `LOG_LEVEL` (INFO por defecto, y un valor inválido no tumba el arranque) y `LOG_SQL` aparte, porque el SQL de un ciclo son miles de líneas. Techo en WARNING para las librerías ruidosas —`httpx` sola emite una línea por request de artículo— dejando `apscheduler` afuera a propósito, que sus dos líneas por ciclo son la prueba de vida del scheduler. Las líneas de uvicorn pasan por el mismo handler, así que el log entero tiene un solo formato y todas las líneas llevan hora.
+
+**Dos hallazgos que no se buscaban:**
+
+- **`echo=(ENVIRONMENT == "development")` en el engine tenía que morir.** Con un echo verdadero SQLAlchemy le cuelga un handler propio al logger de la Engine y no le apaga la propagación: en cuanto la raíz tuvo handler, cada sentencia habría salido **dos veces con dos formatos**. El SQL ahora se enciende con `LOG_SQL`, subiendo el logger.
+- **En Windows se perdían líneas enteras.** `sys.stdout` sale en cp1252, y una línea con un carácter que ese codec no tiene —un titular con `北京`, un apellido en cirílico— hace que `emit` levante `UnicodeEncodeError`; `logging` no propaga la excepción, escribe un `--- Logging error ---` y **descarta el mensaje**. Verificado con una corrida real. La salida se fuerza a UTF-8.
+
+**Persistencia y rotación viven en el `docker-compose.yml`, no en el código**: el motor escribe a stdout y Docker lo persiste, pero el driver `json-file` **no rota por defecto** y un disco lleno también tumba a Postgres. Techo de 10 MB × 5 archivos ≈ más de tres meses medidos.
+
+### 13. Entidades HTML sin decodificar en el cuerpo de las noticias
+
+Lo destapó el punto 12 en su primera corrida con logs: una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*. Medido sobre la base real: **38 de 5.390 `contenido_limpio` (0,7%) contienen entidades HTML sin decodificar; `titulo` no tiene ninguna** — o sea que el problema está en una sola de las dos vías de limpieza del cuerpo, no en la ingesta en general.
+
+Es chico en volumen pero **sale publicado**: entra al prompt como evidencia, el modelo lo copia tal cual al título del ángulo, y de ahí va al back-end. Vale medir primero cuál de las dos vías (el `content:encoded` del feed o `trafilatura`) lo deja pasar, antes de agregar un `html.unescape` a ciegas en los dos lados.
+
+Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el lector final.

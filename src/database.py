@@ -31,9 +31,20 @@ def get_engine() -> Engine:
 
         # El driver psycopg (v3) debe indicarse explícitamente en la URL de conexión, ej.:
         #   postgresql+psycopg://usuario:password@localhost:5432/sin_ruido
+        # **`echo` va en False siempre, y no es un descuido.** El SQL se
+        # enciende con `LOG_SQL`, que sube el logger `sqlalchemy.engine` a INFO
+        # (ver `logging_config.py`). Da exactamente el mismo detalle, pero con
+        # el formato y el destino del resto del motor.
+        #
+        # Volver a poner `echo=True` acá rompe el log: con un echo verdadero
+        # SQLAlchemy le cuelga un StreamHandler propio al logger de la Engine y
+        # **no le apaga la propagación**, así que cada sentencia saldría dos
+        # veces — una con su formato y otra con el nuestro. Con `echo=False`
+        # devuelve un Logger pelado y el nivel lo decide la jerarquía, que es lo
+        # que `LOG_SQL` maneja.
         _engine = create_engine(
             settings.DATABASE_URL,
-            echo=settings.ENVIRONMENT == "development",
+            echo=False,
             pool_pre_ping=True,
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,

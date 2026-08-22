@@ -1151,6 +1151,76 @@ Las 91 publicaciones que ya tenían copy **conservan el texto largo**: `publicac
 
 ---
 
+# Post-1.0
+
+## Backlog punto 1 — segunda vía de ingesta por URL: la medición que levanta el candado (18/08/2026)
+
+La sección "Segunda vía de ingesta: extracción por URL" (más arriba) dejó dos candados. El primero —*"se retoma con el back-end integrado y probado"*— quedó cumplido: la corrida del 18/08 entregó 15/15 síntesis al back-end, 221/221 acumulado, cero rechazos de firma. El segundo era explícito y es el que se ataca acá:
+
+> **No entra en la app hasta validar que suma pares reales.** […] falta extraer un día completo de los dos, vectorizar contra el corpus real y contar pares por encima del umbral **antes de escribir una sola línea de producción**.
+
+Se hizo exactamente eso, con un script de medición fuera de `src/` (`scratchpad/validar_extraccion_url.py`): recolectar URLs de 8 feeds de sección de Clarín y 5 de Perfil, filtrarlas con los **mismos** filtros del pipeline real (ventana de `HORAS_CLUSTER_ABIERTO`, `es_en_vivo`, `categoria_no_evento`), extraer con `trafilatura`, vectorizar con `vectorizar_textos` y **replicar el loop de `agrupar_pendientes` en memoria** reusando `_mejor_match` y `_ClusterEnMemoria`, sin escribir en la base. Se corrió una simulación de control sin los medios nuevos para confirmar que el delta es atribuible a ellos.
+
+### Resultado
+
+| Métrica | Resultado |
+|---|---|
+| **A — clusters publicables nuevos** (decide) | **16**: 4 desbloqueados (tenían 1 solo medio) + 12 nacidos de una suelta + un artículo |
+| A — control sin Clarín/Perfil | **0 + 0** — el delta es atribuible a los medios nuevos |
+| **B — pareo con el corpus** (diagnóstico) | Clarín 18/60 (30%), Perfil 21/60 (35%) |
+| **C — salud de la extracción** | 120/120 extraídos, **0 fallos** |
+
+Salud en detalle, con *n*=60 por medio (la medición anterior era de 6 y el propio change_log la declaraba no concluyente):
+
+| Medio | mediana | p10 | mínimo | s/artículo |
+|---|---:|---:|---:|---:|
+| Clarín | 3.982 | 2.162 | 1.914 | 0,31 |
+| Perfil | 3.099 | 1.615 | **701** | 0,38 |
+
+Referencia con la que se leyó A: una corrida produce hoy ~15 síntesis, así que **≥3 clusters/día justifica el trabajo y <1 reproduce el caso Diario Crónica**. Dio 16. Y B confirma que la agenda se cruza de verdad: no es Crónica.
+
+**El mínimo de 701 caracteres es el dato que faltaba para la etapa 2**: un piso de ~500 atrapa menús y avisos de cookies sin tocar nunca un artículo legítimo.
+
+### La auditoría manual: 14 de 16, y por qué los 2 restantes no son culpa de esta vía
+
+Los pares se auditaron a mano, leyendo los cuerpos y no los títulos —la historia del proyecto dice que los números de clustering engañan cuando no se miran los casos—. **Los 12 nacidos dieron 12/12 correctos** (Albon–Williams 0,913; YPF 0,911; Simeone–Álvarez 0,910; Metalfor 0,895; la fábrica textil 0,803; Mathilde Favier 0,783). **De los 4 desbloqueados, 2 son falsos positivos**:
+
+| Cluster | Artículo entrante | Sim. |
+|---|---|---:|
+| 431 — ciberseguridad en pagos (Deloitte) + tres medios de pago (Payway) | El Gobierno flexibilizó los créditos en dólares | 0,8008 |
+| 439 — informe Idesa sobre el FGS + informe de Trabajo sobre paritarias | 254 mil niños en hogares con piso de tierra | 0,7975 |
+
+La primera lectura fue "Clarín y Perfil traen ruido". **Leídos los cuerpos, es al revés.** Los dos clusters ya están mal armados hoy: cada uno junta dos notas de El Cronista sobre hechos distintos, agrupadas porque la escritura económica de ese medio es semánticamente homogénea. Son el "blob de economía" documentado más arriba, en la Fase 3. Los medios nuevos **no crean el defecto: lo destapan**, dándole a un blob preexistente su segundo medio y volviéndolo publicable. Hoy esos clusters existen igual y lo único que los salva de publicarse es que les falta una voz. Es un punto propio del backlog, no un costo de esta vía.
+
+### Hallazgo lateral: el centroide de un blob atrae más que sus miembros
+
+Al medir la similitud del artículo entrante contra cada miembro por separado:
+
+| | vs. miembro A | vs. miembro B | vs. **centroide** |
+|---|---:|---:|---:|
+| Par 1 | 0,7118 | 0,7938 | **0,8008** |
+| Par 2 | 0,7798 | 0,7300 | **0,7975** |
+
+En los dos casos el centroide atrae más que cualquier miembro individual. Promediar dos notas poco relacionadas da un vector en el "medio genérico" del dominio, y ese punto está más cerca de cualquier nota económica que las notas específicas entre sí.
+
+Sugiere un guardarraíl —exigir que la entrante supere el umbral contra **todos** los miembros y no solo contra el centroide—, que con estos dos casos alcanzaría. **No se verificó contra los 14 pares buenos, así que no se sabe cuántos legítimos rompería: es una hipótesis para medir, no una recomendación.**
+
+### Un falso negativo propio, que vale la pena no repetir
+
+La primera corrida abortó con "20/20 rutas rechazadas" en **ambos** medios. Era mentira. `urllib.robotparser.RobotFileParser.read()` descarga el `robots.txt` con `urllib`, que manda `Python-urllib/3.x`, y Clarín y Perfil devuelven **403 a ese User-Agent incluso para el `robots.txt`**. Por spec un 403 sobre `robots.txt` significa "disallow all", así que el parser hizo lo correcto y rechazó todo — sin haber leído una sola regla.
+
+Lo delató que el resultado fuera demasiado redondo: un diario que bloquea todo tampoco sale en Google, y vive de eso.
+
+**La forma correcta es bajar el `robots.txt` con nuestro cliente y nuestro User-Agent y recién ahí parsear el texto** (`parser.parse(respuesta.text.splitlines())`, no `parser.read()`). Hecho así, los dos dan 200: Perfil es `Allow: /` a secas y Clarín solo bloquea `/api/`, `/_next/`, `/videos/*?`, `/cdn-cgi/` y similares — ninguna ruta de artículo, y ninguno declara `crawl-delay`. Se confirma lo que la medición original había registrado.
+
+Para la etapa 2 esto deja una decisión pendiente: hoy el script **falla cerrado** (si no puede leer `robots.txt`, no extrae), que es lo correcto para una medición, pero en producción significaría perder un medio en silencio.
+
+### Conclusión
+
+**El candado queda levantado**: la vía suma 14 pares reales por día contra un piso de 3, con 0% de fallos de extracción sobre 120 artículos. Se avanza a la implementación.
+
+---
+
 ## El CI estaba rojo desde el 12/08 — y no era la cobertura (19/08/2026)
 
 Se revisó el CI a raíz de una sospecha de que no se alcanzaba el 80% de cobertura. **La cobertura nunca fue el problema**: GitHub reportó **87,71%, por encima del gate**. Lo que fallaba eran **31 tests**, y venía fallando en las **cuatro corridas desde el 12/08 — incluida la de la 1.0**, sin que nadie lo mirara.
@@ -1185,3 +1255,997 @@ Dio **31 failed, 237 passed** — exactamente los números de GitHub. Sin esa re
 Se arregló **en los tests y no en el workflow**. Poner un `DATABASE_URL` de mentira o un `spacy download` en el YAML habría puesto el CI en verde igual, pero dejando los tests dependiendo de su entorno — y `es_core_news_md` son cientos de MB descargados en cada corrida, que es justo lo que Fase 5 quiso evitar.
 
 Verificado: **268/268 con las condiciones del CI simuladas**, cobertura 95,30%.
+
+---
+
+## Backlog punto 1, etapa 2 — el extractor: `services/extraccion.py` (19/08/2026)
+
+Se construye **solo el módulo**, sin llamadores. Es deliberado: concentra todas las decisiones de red y de formato, se testea aislado, y deja la costura en `_procesar_items` —el cambio riesgoso— para un diff propio y revisable. `Medio.extraer_por_url` sigue sin leerse en ningún lado de `src/`.
+
+Antes de escribir una línea se mapeó el radio de impacto de la vía completa, porque **el contrato de salida del extractor es lo que determina si las etapas siguientes son seguras**. De ese mapa salieron las decisiones de abajo.
+
+### La decisión que ordena todo: normalizar en el origen
+
+El extractor devuelve el texto **colapsando todo espacio en blanco a un solo espacio**, con exactamente el mismo formato que produce `ingestion.limpiar_html`. No es cosmético: apaga cuatro riesgos de una sola vez y evita tocar tres módulos.
+
+El hallazgo que lo motivó no estaba en el diseño original. `synthesis.py` arma el prompt con bloques `--- NOTA n | medio` unidos por saltos de línea. **Ese delimitador es inequívoco hoy solo porque ningún cuerpo contiene `\n`** — y eso no es una decisión explícita de nadie, es una consecuencia de que `limpiar_html` use `separator=" ", strip=True`. `trafilatura.extract()` devuelve el artículo en párrafos separados por saltos. Metido tal cual, el delimitador deja de ser único y un cuerpo que traiga una línea `--- NOTA` **inyecta estructura en el prompt**.
+
+Se evaluó arreglarlo en `synthesis.py` (delimitador más robusto, o escapado al armar el bloque) y se descartó: el problema no es del prompt, es de que dos vías de ingesta produzcan formatos distintos. Normalizando en el origen las dos quedan **indistinguibles río abajo** y no se toca `synthesis.py`, `vectorization.py` ni `preprocessing.py`.
+
+Queda cubierto por `test_coincide_con_limpiar_html`, que compara las dos vías sobre la misma entrada.
+
+### Fallar cerrado y ruidoso ante un `robots.txt` ilegible
+
+La etapa 0 había dejado esto como decisión pendiente: el script de medición fallaba cerrado en silencio, correcto para medir y malo para producción.
+
+Se resuelve **cerrado y ruidoso**. Cerrado porque no sabemos qué permite el medio y suponer que permite todo no es nuestra decisión. Ruidoso —`alerts.enviar_alerta`— porque el silencio acá significa **perder la cobertura de un medio entero sin que nadie se entere hasta mirar los números**, que es el patrón que el proyecto ya corrigió dos veces. La clave de alerta es por dominio (`robots:{base}`) para que el cooldown agrupe y un medio caído no inunde el mail.
+
+El `robots.txt` se baja con `httpx` y nuestro User-Agent y recién después se parsea con `parser.parse(...)` — **nunca `parser.read()`**, por el falso negativo documentado más arriba. Se cachea por dominio: sin eso se pediría una vez por artículo, que con el feed de Clarín son 10 requests extra por ciclo para releer siempre lo mismo.
+
+### Las otras dos reglas del contrato
+
+- **Nunca propaga excepciones.** Es requisito, no comodidad. Quien va a llamarlo es `_procesar_items`, que corre dentro del `try` de `ingerir_feed`: una excepción que se escape dispara `session.rollback()` —perdiendo el feed entero—, un mail de alerta y un `feeds_fallados += 1`. **Un artículo caído se contabilizaría y se alertaría como un feed entero caído.**
+- **No devuelve la URL final tras los redirects.** Extraer implica seguirlos, pero la que se persiste tiene que seguir siendo la del feed: de ella dependen la deduplicación con su índice único sobre `Noticia.url`, `categoria_no_evento`, `topico_declarado` y el payload al back-end. Guardar la final duplicaría el artículo o reventaría contra el índice y tiraría la ingesta del medio.
+
+### Verificación contra artículos reales, y un riesgo que se midió en vez de suponerse
+
+Además de la suite (que no sale a la red), se corrió el extractor contra artículos reales:
+
+| | Clarín | Perfil |
+|---|---:|---:|
+| Extraídos | 5/5 | 5/5 |
+| Con saltos de línea | 0 | 0 |
+| Por debajo del piso de 500 | 0 | 0 |
+| `robots.txt` pedido | 1 vez | 1 vez |
+
+La prueba que importaba era otra: **el mismo artículo por las dos vías**. La Nación es el único medio donde se puede hacer, porque trae `content:encoded` (vía vieja) y su página es extraíble (vía nueva). Sobre 12 artículos, la similitud textual entre ambas dio 77-95%, y `trafilatura` resultó anteponer **título y bajada** al cuerpo.
+
+Eso toca directamente el riesgo del embedding, que se calcula sobre los primeros `EMBEDDING_CHARS_CUERPO` (500) caracteres. Se midió el efecto real vectorizando las dos versiones de cada artículo con `construir_texto`:
+
+- **El lead real nunca quedó fuera de la ventana**: 12 de 12, con offsets entre 185 y 427 sobre 500. La formulación fuerte del riesgo no se materializó.
+- Similitud coseno entre las dos versiones: **mediana 0,9019**, máximo 0,9262, **mínimo 0,7426**. Un caso quedó por debajo de `UMBRAL_SIMILITUD=0,75`.
+
+Del peor caso salió una hipótesis —que el título se duplica, porque `construir_texto` ya hace `f"{titulo}. {cuerpo}"`— que **al verificarla resultó ser un artefacto de La Nación y no de la vía**: el cuerpo arranca con el título en 0 de 6 artículos de Clarín y 1 de 6 de Perfil. Y La Nación no va a usar esta vía. Generalizar desde el medio-proxy habría metido en el extractor una heurística de recorte que ninguno de los dos medios reales necesita.
+
+**No se corrige nada, entonces.** Lo que queda por delante del lead en Clarín y Perfil es la bajada, que no es basura: es un resumen escrito por el propio medio, señal legítima para agrupar. La respuesta empírica ya la había dado la etapa 0, que midió **14 pares reales por día con exactamente este texto**.
+
+Queda registrado como **riesgo residual medido, no como defecto**: la bajada consume entre el 37% y el 85% de la ventana del embedding. Si alguna vez el clustering de estos medios rinde por debajo de lo medido, el primer lugar donde mirar es acá.
+
+### Verificado
+
+**295 tests en verde** (268 + 27 nuevos) con las condiciones del CI simuladas, cobertura **95,37%**, `ruff` limpio. Las 3 líneas sin cubrir de `extraccion.py` son `_descargar_pagina`, la frontera con la red, mockeada en toda la suite a propósito.
+
+---
+
+## Backlog punto 1, etapa 3 — la costura, y por qué la extracción va fuera de la transacción (19/08/2026)
+
+El extractor ya existía pero **no tenía llamadores**: `Medio.extraer_por_url` no se leía en ningún lado de `src/`. Esta etapa lo conecta a la ingesta.
+
+El plan original decía "invertir el orden de filtrado dentro de `_procesar_items`". **Se cambió**, y el motivo fue una pregunta de escalabilidad que llevó a medir en vez de suponer.
+
+### La medición que cambió el diseño
+
+La pregunta era si `trafilatura` sería el punto de inflexión al sumar medios — porque los dos que entran ahora son Clarín y Perfil, pero hay varios más sin `content:encoded` que podrían seguirlos.
+
+Se midió el reparto del costo por artículo, bajando el HTML una sola vez y cronometrando la librería sobre HTML ya en RAM (si no, se estaría midiendo la conexión a Clarín y llamándola "costo de trafilatura"):
+
+| Componente | Tiempo | Share |
+|---|---:|---:|
+| `trafilatura` (CPU) | 16,9 ms mediana (máx. 67 ms) | **1,3%** |
+| Red | 304 ms mediana | 23,0% |
+| **Pausa de cortesía propia** | 1000 ms fijos | **75,7%** |
+
+**`trafilatura` no es el cuello de botella a ninguna escala realista**: 1200 artículos son ~20 s de CPU contra un ciclo de 15 minutos, y el pico de memoria de una extracción es 5,4 MB. El 98,7% del costo es esperar.
+
+Lo que la medición sí expuso es **dónde queda la extracción respecto de la transacción**. El `SELECT` de `_existentes` abre una transacción y `ingerir_feed` recién commitea al final. Meter la extracción en el medio —que es lo que decía el plan viejo— la dejaría abierta durante toda la descarga de los artículos: ~40 s en la primera corrida de un medio, reteniendo una conexión del pool de 5 y frenando el vacuum de Postgres sobre ese snapshot. A 2 medios se tolera; a 15 es un problema real.
+
+**De ahí la forma final: decidir qué es nuevo (transacción corta) → extraer (sin transacción) → persistir (transacción corta).** `_procesar_items` se partió en `_seleccionar_nuevas` y `_completar_cuerpos`, con un `commit` de solo lectura en el medio.
+
+### Las decisiones de la costura
+
+- **`extraer_por_url` significa "si el feed no trae cuerpo, buscalo en la URL"**, no "extraé siempre". Un item con `content:encoded` usa ese: es gratis y no sale a la red. Importa para el feed de respaldo de Clarín, que sí lo trae.
+- **La extracción va después de deduplicar, nunca antes.** Extraer antes significaría bajar las decenas de artículos del feed entero cada 15 minutos para siempre, en vez de los pocos realmente nuevos. Tiene test propio.
+- **Los medios sin la bandera no cambian en nada.** El `commit` intermedio y la extracción están detrás de `if usa_extraccion`: mismo camino, mismas queries, mismas transacciones que antes. Es lo que acota el riesgo del diff.
+- **Una nota que no se pudo extraer se descarta**, porque `contenido_limpio` es `NOT NULL`. El feed la vuelve a ofrecer el ciclo siguiente mientras siga en su ventana, así que se reintenta sola. Para un artículo permanentemente inextraíble eso es un request cada 15 minutos mientras dure la ventana: acotado y chico, y no justifica una tabla de lápidas.
+- **El warning de "ningún item tenía contenido completo" se condiciona a `not usa_extraccion`**: para Clarín y Perfil ese es el estado normal y permanente, y dejarlo sería ruido cada 15 minutos para siempre — el patrón que el proyecto ya corrigió dos veces. Su equivalente allá es que **fallen todas** las extracciones de un feed, que ahora avisa por mail: es la firma de un rediseño del maquetado, y sin aviso es perder un medio entero en silencio.
+
+`sin_contenido` deja de contar los items sin cuerpo en los medios con extracción —ahí son candidatos, no descartes, y contarlos haría que el número sea siempre igual al tamaño del feed— y su señal pasa a `extraidas` y `extraccion_fallida`.
+
+### Dos tests que se verificaron por mutación
+
+El invariante de la transacción tiene un test que lo afirma directamente: el mock de `extraer_varios` registra `session.in_transaction()` al ser llamado. Como es **el test que justifica todo el rediseño**, se comprobó que puede fallar: quitando el `commit` intermedio, da `[True] == [False]`. Un test que no puede fallar no prueba nada.
+
+El otro cierra un hueco que apareció al auditar la etapa: **el guardia de N+1 de Fase 5 cubre solo la vía vieja**, porque `TestDeduplicacionNoEscala` usa la fixture `medio`, que no tiene la bandera. La propiedad se cumplía en la vía nueva —medido a mano— pero nada la protegía en CI.
+
+Al escribirlo apareció una trampa que vale la pena dejar anotada: **replicar el test existente no alcanza.** Aquel aísla precargando duplicados, y con todo duplicado `_procesar_items` sale por el `return` temprano **antes** del commit intermedio, así que el camino nuevo ni se ejercita. Hacen falta los dos casos, y se comprobó reintroduciendo el `_ya_esta` de antes de Fase 5 —un `SELECT` por artículo— en el loop de inserción: el test de notas nuevas lo detecta (74 contra 37 esperadas) y **el de duplicadas pasa igual**. Solo él habría sido un guardia falso.
+
+Un detalle de la medición: las dos corridas hay que arrancarlas del mismo estado (`session.expire`). Si no, la primera encuentra el `Medio` recién cargado y la segunda lo encuentra expirado por los commits de la primera, y la diferencia de un `SELECT` de refresco —costo fijo, O(1) por corrida— se lee como si fuera crecimiento por artículo.
+
+### Verificado
+
+**304 tests en verde** (295 + 9 nuevos) con condiciones de CI simuladas, cobertura **95,23%**, `ruff` limpio, `alembic check` sin drift.
+
+Y punta a punta contra **Clarín real y Postgres real**, con un medio temporal `activo=False` que se borra al terminar:
+
+| | Resultado |
+|---|---|
+| Artículos extraídos y persistidos | **10/10**, entre 2.745 y 7.432 caracteres |
+| Con saltos de línea o bajo el piso | **0** |
+| Segunda corrida | **0 extracciones**, 10 duplicadas |
+| `in_transaction()` al extraer | **False** |
+
+La segunda corrida es la que importa: confirma contra un feed real que la deduplicación corre antes que la extracción, que es lo que evita bajar el feed entero cada ciclo.
+
+### Lo que queda pendiente a propósito
+
+Correr el **pipeline completo** con noticias extraídas —vectorización, agrupamiento y síntesis— se difiere a la etapa 5, cuando los medios estén dados de alta de verdad. Hacerlo ahora exigiría o bien agrupar noticias temporales contra los clusters reales (mutando estado compartido que después hay que deshacer), o bien gastar presupuesto de Gemini en una síntesis de prueba. La promesa de que río abajo nada distingue las dos vías ya está respaldada por la etapa 0 (14 pares reales por día con este mismo texto) y por `test_coincide_con_limpiar_html`.
+
+**Concurrencia entre medios**: la pausa de 1 s se aplica hoy entre *todos* los artículos, aunque sean de dominios distintos — pero la cortesía se le debe a un medio, no al proceso. Paralelizando entre medios el costo deja de ser la suma y pasa a ser el máximo por medio (~40 s), sea N=2 o N=40. **Disparador: pasar los ~10 medios**, donde la primera corrida ya llega al 44% del ciclo. No hace falta para dos.
+
+---
+
+## Backlog punto 1, etapa 4 — los márgenes del scheduler, y volver audibles sus fallos (19/08/2026)
+
+`add_job` nunca declaró `max_instances`, `coalesce` ni `misfire_grace_time`, así que corría con los defaults de APScheduler 3.11.3 — verificados leyendo `BaseScheduler._configure`, no supuestos: `max_instances=1`, `coalesce=True`, `misfire_grace_time=` **1 segundo**.
+
+Pero el problema de fondo no eran los tres parámetros, que son cinco líneas. **Era que todas las formas en que el scheduler puede perder una corrida son silenciosas**: terminan en un `WARNING` de la librería sobre un stdout que además no se persiste (no hay `basicConfig` ni handler de archivo en todo `src/`).
+
+### Las tres formas de perder una corrida son distintas
+
+Vale precisarlo porque es fácil mezclarlas —y se mezclaron al discutir la etapa—:
+
+| Evento | Cuándo | Lo gobierna |
+|---|---|---|
+| `EVENT_JOB_MAX_INSTANCES` | Una corrida se pasa del intervalo y la siguiente la encuentra viva | `max_instances` |
+| `EVENT_JOB_MISSED` | El scheduler llega tarde a **lanzar** la corrida | `misfire_grace_time` |
+| `EVENT_JOB_ERROR` | El job levanta una excepción antes de que `_correr_paso` pueda atraparla | — |
+
+La tercera no estaba en el diagnóstico original y es igual de real: `_correr_paso` protege cada paso del pipeline, pero **no la apertura de la sesión que los envuelve**. Con la base caída, `Session(get_engine())` falla y el error se escapa por ahí.
+
+Dato que acota el alcance: el scheduler usa `MemoryJobStore` y el job se re-agrega en cada `lifespan`, así que **no hay recuperación de corridas perdidas tras una caída**. Los misfires solo pueden venir de demoras dentro del proceso.
+
+### El detalle que ordenó el diseño del listener
+
+`AsyncIOScheduler.wakeup` está decorado con `@run_in_event_loop`, y `BaseScheduler._dispatch_event` invoca los listeners **sincrónicamente**. O sea que el listener corre **dentro del event loop** — y `enviar_alerta` abre una conexión `smtplib.SMTP` bloqueante, sin timeout explícito. Llamarla derecho congelaría la API entera mientras dure el intercambio, y un servidor SMTP colgado la dejaría sin responder.
+
+Por eso el aviso se delega a un hilo daemon. **No** se usa el executor del loop: es el mismo que corre el pipeline, así que con una corrida larga en curso el aviso de que la corrida es larga quedaría encolado detrás de ella.
+
+Hay una asimetría que conviene tener presente porque es contraintuitiva: la **misma** `enviar_alerta` se llama directo y sin problema desde `_correr_paso` y desde el canario de duración, porque el job corre en el threadpool (`AsyncIOExecutor` manda las funciones sync a `run_in_executor`), no en el loop. Lo que cambia no es la función sino desde qué hilo se la llama.
+
+### El canario, y por qué es una fracción
+
+Cada corrida loguea ahora su **utilización** (`duración / intervalo`), y si pasa el **50% del intervalo** avisa. El umbral es una fracción y no un número de segundos a propósito: si el intervalo cambia —y es justo lo próximo a calibrar— el canario lo sigue solo en vez de quedar desincronizado en silencio.
+
+Es además el instrumento que cierra la conversación de escalabilidad: la concurrencia entre medios se difirió hasta pasar los ~10, y esto avisa cuando llegamos en vez de depender de que alguien se acuerde de mirar.
+
+### `INGEST_INTERVAL_MINUTES` pasa a `config.py`
+
+Era una constante de módulo. Se mueve porque **es el parámetro que hay que calibrar con datos**, y que calibrarlo exija editar código y redeployar convierte una prueba de una tarde en un cambio de versión. Es la excepción deliberada a los otros tres, que quedan como constantes en `main.py` por estructurales.
+
+### El baseline, que era la incógnita
+
+No había logs persistidos, así que no se sabía cuánto tarda una corrida. Medido contra la base real, con el pipeline completo:
+
+| Corrida | Total | Síntesis | Utilización del ciclo |
+|---|---:|---:|---:|
+| Con backlog (24 ángulos) | 206,58 s | 188,38 s | **23,0%** |
+| Sin síntesis pendiente | 10,55 s | 0,03 s | **1,2%** |
+
+**La síntesis es el 91% del costo cuando hay material**, y prácticamente cero cuando no. Todo lo demás es plano: ingesta ~4-7 s (6 feeds), vectorización ~6 s, agrupamiento ~0,6 s, fusión y entrega por debajo de 0,1 s. Los 24 ángulos —20 nuevos y 4 actualizados— salieron a ~8 s cada uno.
+
+Vale anotar por qué la entrega reportó 24 y solo se crearon 20: `sintetizar_pendientes` **reentrega** una síntesis existente cuando su cluster recibió material nuevo, poniendo `enviado_backend = False` porque el payload cambió. No es un doble envío del mismo contenido.
+
+**El umbral de 450 s queda 43 veces por encima de una corrida normal y 2 veces por encima de una con backlog de 24 ángulos.** Dispara alrededor de los **55 ángulos en una sola corrida**, que es el tamaño de backlog que deja una caída de varias horas — exactamente el evento del que uno quiere enterarse. Calibrado.
+
+### Sobre el intervalo, con los números a la vista
+
+La predicción que se había hecho antes de medir la síntesis —"si no cambia el orden de magnitud, la conclusión será acortar el intervalo"— **era incorrecta en su premisa**: la síntesis sí cambia el orden de magnitud, del 1,2% al 23%.
+
+Pero la conclusión sobrevive, por un motivo distinto: **el trabajo de síntesis por día lo fija la cantidad de noticias, no el intervalo.** Acortar el ciclo no genera más ángulos, los reparte en más corridas; alargarlo los concentra en menos. Con ~100 ángulos diarios la utilización queda cerca del 2% en cualquiera de los tres escenarios (10, 15 o 20 minutos), así que **el intervalo hay que decidirlo por frescura y no por capacidad**.
+
+Y alargarlo tampoco ayuda contra el caso que sí aprieta —el backlog tras una caída—, porque el backlog tiene el mismo tamaño en cualquier intervalo.
+
+### Verificado
+
+**314 tests en verde** (306 + 8 nuevos) con condiciones de CI simuladas, cobertura **95,69%**, `ruff` limpio.
+
+Las cinco piezas se verificaron por mutación, que a esta altura es la costumbre de la casa: sacar el `add_listener`, sacar `misfire_grace_time`, subir `max_instances` a 2, mandar el mail en el hilo del listener y sacar el canario. **Las cinco las detectan los tests.**
+
+---
+
+## Backlog punto 1, etapa 5 — el alta de Perfil, y por qué Clarín queda afuera (20/08/2026)
+
+El plan original era dar de alta Clarín y Perfil juntos. Antes de tocar código se hizo algo que nunca se había hecho ni para ellos ni para los seis medios que ya corrían: **leer los términos de uso del RSS**.
+
+### La revisión
+
+| Medio | Cuerpo en el feed | Términos | Veredicto |
+|---|---|---|---|
+| Clarín | 0/438 | Licencia limitada a "títulos y/o links"; prohíbe usar el Servicio de otro modo | ❌ Descartado |
+| Perfil | 0/438 | Licencia sobre "el contenido"; pide links de vuelta (los damos) | ✅ Elegido |
+| Ámbito | 0/137 | Sin contrato de reuso; su aviso legal solo cubre datos personales (Ley 25.326) | Alternativa viable, postergada |
+| La Izquierda Diario | 48/48 | Sin términos propios, pero `robots.txt` bloquea crawlers de IA y reserva TDM (Directiva UE 2019/790 art. 4) | Postergado |
+
+Lo que decidió lo de Clarín no es que falte la herramienta —la etapa 2 construyó justo el extractor que iría a buscar lo que el feed no trae—, es que **retienen el cuerpo a propósito**: 0 de 438 ítems es coherente con una licencia que cubre solo títulos y links. Ir a buscarlo por URL igual sería cruzar una línea que el medio trazó, no una carencia técnica que resolver.
+
+**Replanteo que salió de ahí:** `extraer_por_url` no es una bandera técnica, es la marca de los medios donde el motor cruza esa línea. Los que traen `content:encoded` publicaron el cuerpo; los que no, lo retuvieron.
+
+### La medición de Perfil
+
+48 artículos extraídos de 4 secciones, contra el corpus real dentro de la ventana de 12 h: política 5/12, economía 5/12, sociedad 3/12, policía 2/12. 14 pareos colapsaron en 12 hechos distintos (1,2 notas por hecho) — con ~116 artículos únicos/día, proyecta ~25 hechos/día contra un piso de 3. Perfil pasa con holgura.
+
+**Un solo feed, no cuatro** — igual que el resto del roster, y por el mismo motivo, ahora comprobado también para Perfil: el general es una ventana móvil de 7,1 h que cubre el 94% de lo fresco; las 4 secciones juntas aportan solo 2 ítems que el general no traiga. `/feed/internacionales` da 404 pese a estar publicado en la propia página de RSS de Perfil — no se siembra.
+
+### El filtro de opinión (`CATEGORIAS_NO_EVENTO["opinion"]`)
+
+El feed general trae columnas junto con las noticias. Una columna no reporta un hecho —es género, no tema—, así que entra al mismo mecanismo que ya filtraba horóscopos y recetas (`services/categorias.py`).
+
+Patrón: `/opinion[/-]|/columnistas/|/modo-fontevecchia/`. El anclaje a segmento de URL se verificó contra la base real antes de aplicarlo: `opinion` suelto capturaba 30 URLs, de las cuales una es un falso positivo genuino (`paparazzi.com.ar/.../la-letal-opinion-de-yanina-latorre-...`, no es una columna) y el resto son columnas reales, incluyendo el caso donde el ancla sí tiene que dejar pasar `/economia/opinion-...` de La Nación. `/opinion[/-]` anclado captura las 29 legítimas y excluye la única falsa.
+
+El patrón completo (opinion + columnistas + fontevecchia) alcanza 85 notas sobre las 4.485 de la base, de las cuales **7 ya estaban en un cluster** —todas columnas de El Cronista bajo `/columnistas/`—, así que no hay daño retroactivo nuevo que reparar.
+
+Verificado en producción tras la ingesta real de Perfil: el patrón capturó exactamente 2 de las 47 notas nuevas (`/noticias/opinion/...` y `/noticias/modo-fontevecchia/...`), ambas columnas reales, cero falsos positivos.
+
+### Verificado
+
+- 314 tests en verde, `ruff` limpio, `alembic check` sin operaciones pendientes.
+- Seed real: Perfil alta (id=11), un feed, `extraer_por_url=True`.
+- Ingesta real: 47 nuevas, 0 duplicadas, 3 en vivo filtradas, **0 fallos de extracción sobre 47**, `robots.txt` pedido una sola vez, 64,2 s (≈ lo proyectado para el pico de la primera corrida).
+- Vectorización + agrupamiento reales: Perfil formó 2 clusters propios en esta corrida puntual (no cruzó con otro medio en esta ventana particular); la tasa de pareo contra el corpus ya estaba medida aparte.
+
+### Cabos sueltos que quedaron reformulados
+
+`synthesis.py`, `roadmap.md` y `tech_stack.md` nombraban la "capa gratuita" de Gemini al hablar del rate limit. Se reformuló como "el proveedor limita por minuto" — la afirmación de rate limit sigue siendo cierta para cualquier proveedor y deja de exponer que la instancia corre sobre un tier gratuito. `README.md` se deja igual a propósito: bajarle la barrera a quien evalúa el repo pesa más ahí que en código de producción.
+
+### Decisiones que quedaron abiertas, sin resolver en esta etapa
+
+- **`bloomberg` en el feed de Perfil** (5 de 50 ≈ 10%): contenido sindicado, no es la voz editorial de Perfil que la comparativa quiere medir, y agrega derechos de un tercero. Sin filtrar todavía.
+- **Los seis medios ya activos nunca se revisaron por términos de uso.** La Nación y TN son los que más volumen aportan; quedan pendientes de la misma revisión que sí se les hizo a Clarín, Perfil, Ámbito y La Izquierda Diario.
+
+---
+
+## La vida útil de un permiso leído — el `robots.txt` deja de durar semanas (20/08/2026)
+
+Sale de la revisión con subagente del punto 1 completo, que encontró que la caché de `robots.txt` no expiraba nunca. Es el hallazgo B1 de esa revisión.
+
+### El bug, que era peor de lo reportado
+
+`_robots` es un diccionario de módulo y `_parser_robots` abre con `if base in _robots: return _robots[base]`. Ante cualquier fallo se guarda `None` y **ese `None` decide para siempre**: el `except` que loguea y manda el mail queda del otro lado del cortocircuito, así que **no se vuelve a ejecutar nunca**.
+
+De ahí dos cosas que no se habían visto:
+
+1. **El cooldown de 60 minutos de la alerta era código muerto.** `clave=f"robots:{base}"` se diseñó para no inundar la casilla ante fallos repetidos, pero la caché hacía imposible que el fallo se repitiera. Salía un mail, uno solo, para siempre.
+2. **El docstring afirmaba algo que el código no hacía.** Decía "ya consultados *en esta corrida*", que es la semántica correcta; pero `limpiar_cache_robots()` solo se llamaba desde `tests/test_extraccion.py`. En producción la caché vivía lo que viviera el proceso — con el scheduler embebido, semanas.
+
+El costo real: un blip de red de un segundo dejaba a Perfil sin extraer hasta el próximo reinicio, en silencio. Y del lado del permiso, si el medio agregaba un `Disallow` no nos enterábamos nunca — seguíamos extrayendo con una autorización leída semanas atrás. Para una vía que existe justamente para ir a buscar lo que el medio no publicó en su feed, eso no es aceptable.
+
+### Los tres caminos que se evaluaron
+
+| | Cómo | Por qué no / por qué sí |
+|---|---|---|
+| **A. TTL por reloj** | Dos settings nuevos: 24 h de éxito (RFC 9309 dice que un crawler *SHOULD NOT* cachear más que eso) y ~300 s de fallo | ❌ El TTL de fallo tiene que quedar **por debajo de `INGEST_INTERVAL_MINUTES`** para garantizar el reintento. Eso pone una trampa silenciosa justo en la perilla que el roadmap dice que hay que calibrar con datos. Además depende del reloj de pared, que ya nos dio un problema (ver M5 de la misma revisión) |
+| **B. Caché por corrida** ✅ | `ingerir_todos_los_medios` llama `limpiar_cache_robots()` al arrancar | Elegido |
+| **C. Persistir el `robots.txt` con `fetched_at`** | Tabla propia | Tiene un valor que los otros no: **deja rastro auditable** de qué permiso leímos y cuándo. Pero es esquema + migración para lo que B resuelve en una línea. Queda anotado para el punto 3 del backlog (alta de medios por el operador), donde encaja natural |
+
+**Por qué B.** No inventa configuración, no depende del reloj, no introduce ningún acoplamiento —la vida de la caché *es* la corrida, cambie el intervalo lo que cambie— y **hace verdadero el docstring en vez de reescribirlo**. Además convierte en código de producción una función pública que hasta ahora solo usaban los tests, que era el olor de fondo. Efecto lateral: como el `except` se vuelve a entrar cada ciclo, el cooldown de 60 minutos pasa a estar vivo y a hacer lo que se diseñó que hiciera.
+
+`ingerir_todos_los_medios` es el punto de inserción correcto porque es el **único** punto de entrada en producción: lo llaman el scheduler y `POST /ingest`.
+
+### El costo, medido y asentado
+
+Releer el `robots.txt` una vez por medio y por ciclo cuesta **~0,3 s y ~1 KB** (medido: Perfil 0,326 s · La Nación 0,291 s · TN 0,652 s · El Cronista 0,293 s). Con 20 medios son 6 s por ciclo, el **0,67%** — **no mueve el techo de ~20 medios**, que lo fija la pausa de cortesía de 1 s por artículo.
+
+Quedó documentado en `tech_stack.md` como **punto de quiebre 12**, que además llenó un hueco: el costo de ingesta por medio no estaba en la lista de puntos de quiebre, que es donde un operador lo buscaría antes de dar de alta un medio. Ahí está la distinción que importa y que ya se prestó a confusión una vez: en **régimen** 20 medios usan ~9% del ciclo, pero **dar de alta** 20 medios de una vez son ~1.370 s contra un ciclo de 900 y se pasa. El límite aprieta en el momento del alta, no en la operación normal.
+
+### Verificado
+
+Dos tests nuevos en `TestVidaUtilDelRobotsTxt`, **de comportamiento y no de `assert mock.called`**: envenenan la caché como lo haría una corrida anterior y verifican el resultado observable.
+
+- `test_una_corrida_no_hereda_el_robots_cacheado_por_la_anterior` — cachea `None` y verifica que el artículo se extrae igual (el lado de la cobertura).
+- `test_un_disallow_nuevo_se_respeta_en_la_corrida_siguiente` — cachea un parser permisivo, sirve un `Disallow: /` nuevo y verifica que **no** se extrae (el lado del permiso).
+
+Verificados por mutación: sacando la llamada a `limpiar_cache_robots()`, **fallan los dos**.
+
+---
+
+## URLs malformadas — validar en el borde en vez de defender cada consumidor (20/08/2026)
+
+Hallazgo B2 de la revisión con subagente. Arrancó como "`urlparse` está fuera del `try` en `extraccion.permitido`" y terminó siendo una decisión sobre **dónde se valida un dato que entra**.
+
+### El problema tenía tres capas, no una
+
+1. **La reportada**: `permitido` llamaba `urlparse(url)` sin protección. `urlparse("http://[::1/nota")` levanta `ValueError`. Como `permitido` corre dentro del `try` de `ingerir_feed`, esa excepción costaba **rollback del feed entero, mail de alerta y un `feeds_fallados`**: un artículo con la URL rota se contabilizaba y se alertaba como el medio entero caído.
+
+2. **La que no se había visto**: `can_fetch` hace `urlparse(unquote(url))` puertas adentro. Una URL percent-encoded **sobrevive al primer parseo y revienta en el segundo** — verificado: `https://x.com%5B/nota` pasa `urlparse` con `netloc='x.com%5B'` y hace levantar a `can_fetch` cuando el `%5B` vuelve a ser `[`. Un arreglo que solo envolviera `urlparse` dejaba abierta la vía **más probable** de las dos, porque el percent-encoding en una URL de feed es corriente.
+
+3. **La que estaba fuera del alcance del ticket**: `topicos._primeros_segmentos` también hace `urlparse(url)` sin `try`, y lo llama `synthesis` al armar el prompt. Ese camino **no pasa por la extracción**: una URL malformada de un medio *sin* `extraer_por_url` entra a la base igual, porque el cuerpo viene del `content:encoded` y nadie valida el link. O sea que **la exposición es anterior a toda la segunda vía**; no la introdujo este trabajo. Ahí el radio está contenido por el `except` por cluster de `sintetizar_pendientes`, pero el cluster falla su síntesis **cada ciclo hasta cerrarse**: una píldora envenenada.
+
+### La decisión: una validación en el borde, no tres parches
+
+Defender consumidor por consumidor es **exactamente la vigilancia que produjo B2**: `extraer_articulo` promete no propagar excepciones y esa promesa se sostenía con un `try` por operación riesgosa, hasta que a una se le pasó.
+
+Dato que ordenó la elección: **`Noticia(...)` se instancia en un solo punto de todo `src/`** (`ingestion.py`). Hay un único borde por donde una URL entra al motor. Validar ahí cubre de una a `extraccion.permitido`, `topicos.topico_declarado`, `categorias.categoria_no_evento` **y el payload que va al back-end** — porque una URL rota es salida rota se extraiga o no.
+
+Se implementaron las tres, en profundidad y no como alternativas:
+
+| | Qué hace |
+|---|---|
+| `ingestion.url_utilizable` | Valida en el borde, con contador propio en `stats` |
+| `extraccion.permitido` | Envuelto entero: es una guarda, y una guarda que no puede responder tiene que decir que no |
+| `extraccion.extraer_varios` | `try` por artículo: uno podrido no se lleva el lote, con el mismo criterio con que `ingerir_feed` aísla los feeds |
+
+**El criterio de validación es el mínimo** para que la URL sirva de algo: que `urlparse` no reviente, que sobreviva a `unquote`, y que haya esquema y dominio. Medido contra las **4.532 URLs reales de la base: cero rechazos**, así que no descarta nada de lo que hoy funciona.
+
+### Decisiones menores que importan
+
+- **Contador propio (`url_invalida`) y no `sin_contenido`.** Son descartes por motivos distintos, y mezclarlos además falsearía el aviso de "ningún item traía contenido", que compara ese contador contra el total de items del feed.
+- **El log de `permitido` no afirma la causa.** Dice "no se pudo evaluar el permiso" con el tipo de excepción, y no "URL malformada", aunque sea la causa conocida: si mañana un refactor mete un `TypeError` ahí, un log que declare la causa equivocada manda a quien depure por el camino de al lado.
+- **La red del batch usa `logger.exception`.** El riesgo de una red así es tapar un bug propio; el traceback completo es lo que evita que sea silenciosa. El test lo verifica explícitamente.
+- **Las URLs relativas se descartan** (`/nota/123`, que emiten algunos feeds descuidados). Es lo correcto —no se pueden pedir ni entregar— pero es un cambio de comportamiento consciente. Resolverlas contra `Medio.url_base` sería una funcionalidad aparte, no un arreglo.
+
+### Por qué ahora, si nunca pasó
+
+**0 de 4.532.** El bug es enteramente latente: ningún CMS real nos mandó nunca una URL así. La justificación no es la evidencia presente sino el **punto 3 del backlog**, que abre la puerta a feeds arbitrarios cargados por cada operador. Sin ese plan, esto sería sobreingeniería y con arreglar `permitido` alcanzaba.
+
+### Verificado
+
+**330 tests** (+14), `ruff` limpio, `alembic check` sin pendientes. Mutación **independiente por cambio**: cada guarda falla solo la suya, ninguna se cubre por accidente con otra. La de `permitido` falla en **las dos** parametrizaciones, o sea que cubre tanto el `urlparse` directo como la vía de `can_fetch` al decodificar.
+
+Un test preexistente (`TestDeduplicacionNoEscala`) comparaba el dict de `stats` completo y hubo que agregarle la clave nueva. Se había afirmado que ningún test lo hacía; la verificación que lo descartó buscaba `assert stats ==` y este usa `assert stats_pocos ==`. Anotado como recordatorio de que un `grep` que no encuentra nada no prueba que no haya nada.
+
+---
+
+## Los parámetros de `trafilatura` van explícitos — y el hallazgo que no era lo que parecía (20/08/2026)
+
+Hallazgo B3 de la revisión. Se reportó —y se repitió como hecho— que `trafilatura.extract(html)` corría con `include_comments=True`, así que **los comentarios de lectores estaban entrando al cuerpo** y contaminando embeddings, TF-IDF, NER y el prompt de síntesis.
+
+### Lo que se verificó y lo que no
+
+El default **sí** es `include_comments=True` (comprobado sobre la versión instalada, 2.2.0). Lo que no se había verificado es **la consecuencia**: que los comentarios entraran de verdad.
+
+A/B sobre 10 artículos reales de Perfil, con spread de largos, bajando cada página una sola vez:
+
+| Configuración | Total extraído |
+|---|---:|
+| Actual (defaults) | 56.055 |
+| `include_comments=False` | **56.055** |
+| `include_comments=False, include_tables=False` | 56.055 |
+| `include_comments=False, favor_precision=True` | 54.792 (−2,3%) |
+
+**0 de 10 artículos difieren.** Byte por byte idénticos. Perfil no sirve los comentarios en el HTML —los carga por JS, como muchos medios— así que el parámetro nunca tuvo nada que capturar. **Las 47 notas ya ingeridas están limpias y no hubo nada que remediar.**
+
+Antes de eso se había buscado la contaminación por otra vía: el largo. Hay un outlier de 20.735 caracteres, 2,5× el siguiente. Auditado contra la fuente, es **legítimo** — un ensayo largo de Fontevecchia con firma de producción al final. Sirvió para descartar una idea que parecía buena: un **techo** de caracteres simétrico al piso de `EXTRACCION_MIN_CARACTERES`. Un techo que descarte habría tirado una nota real. Queda anotado que la única versión defendible sería un techo que **avise y no descarte**, como el canario de duración del scheduler.
+
+Y sirvió para entender por qué la señal de largo no alcanzaba de todos modos: si los comentarios entraran, entrarían en *todas* las notas proporcionalmente y no habría outlier que mirar.
+
+### La decisión
+
+El arreglo se hizo igual, pero cambia lo que es: **de "limpiar una contaminación" a "cerrar un riesgo latente"**, igual que B1 y B2.
+
+**Los parámetros van explícitos, incluso los que coinciden con el default.** La lección de B3 no es el valor de uno sino que **un default decidiera qué guardamos sin que nadie lo eligiera**. `include_tables=True` se conserva a propósito: en una nota de economía o de elecciones la tabla es contenido, no maquetado. `favor_precision` queda apagado — recorta 2,3% y, sin comentarios que sacar, lo que saca es contenido o boilerplate indistinguible: riesgo sin beneficio medido.
+
+**Y se le puso techo de versión mayor a la dependencia**: `trafilatura>=2.0.0,<3.0.0`. Los parámetros explícitos cubren los que hoy conocemos; un major nuevo puede cambiar otro y volver a decidir por nosotros. Subir de 3.x pasa a ser una decisión que se toma leyendo el changelog, no un `pip install`.
+
+### Verificado
+
+El test **no mockea `trafilatura`**: lleva HTML con un bloque de comentarios de verdad y la biblioteca corre en serio, así que también avisa si una versión nueva cambia el comportamiento — que es el modo de falla que produjo esto. Se comprobó **antes** de escribirlo que ese HTML distingue las dos configuraciones (801 vs 738 caracteres), para que no fuera una guarda vacía. Mutación: volviendo al default, falla.
+
+Dato menor pero anotable: un artículo dio 1.405 caracteres en la base contra 1.316 al re-bajarlo. El medio lo editó después de que lo ingerimos. No es un bug, pero confirma que los cuerpos que guardamos son una foto y no la nota viva.
+
+---
+
+## El filtro de opinión, ahora con guardas — y `/editoriales/` (20/08/2026)
+
+Hallazgo B4. El patrón de opinión de la etapa 5 era **el único entregable sin ninguna guarda en CI**: la revisión lo probó por mutación desanclándolo a `opinion|columnistas|fontevecchia`, y los 331 tests pasaban igual. Todo el razonamiento de la medición —"29 legítimas y excluye la única falsa"— no estaba sostenido por nada.
+
+### Lo que apareció al medir rama por rama
+
+| Rama | Notas |
+|---|---:|
+| `/opinion/` | 29 |
+| `/columnistas/` (El Cronista) | 56 |
+| `/editorial(es)?/` (La Nación) | **4 — no estaban en el patrón** |
+| `/modo-fontevecchia/` | 1 |
+| `/opinion-` | 1 |
+
+**`/editoriales/` era un hueco real, y no teórico**: uno de esos 4 —"Colombia, ante grandes desafíos", cluster 345— **ya estaba agrupado con cobertura de un hecho**, que es exactamente la contaminación que este filtro existe para evitar. Se agregó. La sobre-captura del otro sentido de la palabra la cubre el anclaje a segmento: `/cultura/editorial-planeta-lanza-...` no matchea, porque después de "editorial" el patrón exige `/` o `es/`, no `-`.
+
+### La rama `-` se mantiene, y por qué
+
+Aporta **una sola** nota: `/economia/opinion-los-municipios-socios-...` de La Nación, cuyo título arranca con "Opinión.". Es la rama más floja del patrón y **no hay regex que la distinga** de un titular de noticia que empiece con "opinión dividida sobre...".
+
+Se conserva por la **asimetría de los errores**:
+
+- *Falso positivo* — la nota no agrupa, pero sigue **guardada y buscable**. Recuperable, daño bajo.
+- *Falso negativo* — una columna entra al agrupamiento y la síntesis termina comparando una opinión contra crónicas. Eso ensucia el producto, que es la razón de ser del filtro.
+
+Quedó un test que fija ese trade-off **con el comentario que lo explica**, para que nadie lo "arregle" después y pierda el caso de La Nación.
+
+### Lo que quedó afuera a propósito
+
+`/opiniones/`, `/analisis/`, `/columnistas-invitados/`, `/tribuna/`, `/firmas/` y `/opinión/` con tilde: **cero coincidencias todas**. Mismo criterio que en su momento sacó `signos` de este diccionario, aplicado al revés: no se agrega lo que no tiene beneficio medido, aunque parezca inofensivo.
+
+### Un bug que encontró el propio test
+
+El patrón se escribió primero como `/editoriales?/`, pensando "editorial + `es` opcional". En realidad el `?` cae **sobre la `s` sola**, así que exige "editoriale" y `/editorial/` en singular no matchea. Los 4 casos reales son plurales, por eso la medición dio bien y el error quedaba invisible. Lo agarró el caso que se había agregado por si algún medio usa el singular. Corregido a `/editorial(?:es)?/`, con el comentario en el código para que nadie lo "simplifique" de vuelta.
+
+### Verificado
+
+Cinco mutaciones, cada una con su guarda propia: desanclar (falla 2 tests), sacar `/editorial(?:es)?/`, sacar `/columnistas/`, sacar la rama `-`, y el `editoriales?` mal escrito. **La primera es el punto de todo B4**: la mutación que antes pasaba desapercibida ahora falla.
+
+Efecto en los datos: de 85 a **91** notas clasificadas como opinión, 8 de ellas ya en un cluster. Las otras tres categorías intactas (horóscopo 42, recetas 67, juegos 1).
+
+**Cabo suelto anotado**: el agrupamiento ya hecho **no se recalcula**. Esos 8 clusters siguen conteniendo columnas y el filtro lo aplica la ingesta, no una pasada retroactiva. Como los clusters cierran a las 12 h, se limpia solo con el tiempo.
+
+---
+
+## El avisador podía trabar el pipeline — timeout de SMTP y el cooldown que contaba intentos (20/08/2026)
+
+Hallazgos I1 y M8. **De los cinco de la revisión, el único que no era latente.**
+
+### Por qué este sí estaba vivo
+
+`smtplib.SMTP(host, port)` sin `timeout` usa `socket._GLOBAL_DEFAULT_TIMEOUT`, y `socket.getdefaulttimeout()` es `None`: **bloquea indefinidamente**. Verificado que en este entorno el SMTP está configurado y en uso (`smtp.gmail.com:587`), así que cada alerta que manda el motor sale por un socket que puede colgarse para siempre. B1, B2 y B3 necesitaban una entrada rara para dispararse; a este le alcanza una condición de red.
+
+El radio es grande porque `enviar_alerta` se llama **desde el hilo del job** en cinco lugares (`_correr_paso`, el canario de duración, el fallo de feed, el `robots.txt` ilegible y la extracción fallida):
+
+1. El hilo del job queda bloqueado para siempre.
+2. Con `max_instances=1`, el scheduler **saltea todos los ciclos siguientes**.
+3. Cada salteo dispara `_avisar_corrida_perdida`, que abre un hilo daemon que también se cuelga.
+4. Sin más recuperación que reiniciar el proceso.
+
+La etapa 4 había identificado el riesgo ("sin timeout explícito") pero mitigó solo el event loop, moviendo el aviso del listener a un hilo daemon. **La vía que quedó sin cubrir era peor que la cubierta**: una API congelada se nota; un pipeline trabado, no. El avisador, cuyo trabajo es que los fallos se vean, pasaba a ser lo que mata la corrida en silencio.
+
+`SMTP_TIMEOUT_SEGUNDOS = 10.0`. Un `timeout` en el constructor cubre toda la sesión porque `starttls`, `login` y `send_message` heredan el del socket. **Acota cada operación y no la sesión entera**, así que el peor caso son ~4× esos segundos; queda escrito en el comentario para no dejar creer que son 10. Contra un ciclo de 900 s sigue siendo chico, y Gmail responde en 1-3 s.
+
+### M8: el cooldown gastaba intentos en vez de entregas
+
+`_corresponde_avisar` estampaba el timestamp **antes** de intentar el envío. Un envío fallido se comía la ventana igual: los siguientes 60 minutos quedaban mudos **sin haber entregado nada**. Con el timeout puesto los fallos pasan a ser rápidos y frecuentes, así que el problema se vuelve más visible.
+
+El cooldown existe **para no inundar la casilla de mails** —lo dice su propio comentario en `config.py`— y un envío que falla no manda ningún mail, así que no tiene por qué gastar ese presupuesto. La función pasó a llamarse `_en_cooldown` y **solo consulta**; quien estampa es `enviar_alerta`, y únicamente cuando el mail salió.
+
+Su costo, asumido: contra un SMTP roto se reintenta cada ciclo en vez de cada hora. Acotado por el timeout, son ~40 s en el peor caso sobre 900, y el canario de duración avisaría si se pusiera feo.
+
+**Efecto secundario que vale más de lo esperado**: cuando no hay SMTP configurado, el `logger.error` lleva el cuerpo entero de la alerta — **ese log *es* la entrega**. Antes el cooldown lo silenciaba una hora, o sea que se perdía la alerta en vez de ahorrarse un mail. Ahora no, y hay un test que lo fija.
+
+### Verificado, con una limitación que conviene saber
+
+Mutación: sacar el timeout falla `test_se_le_pasa_un_timeout_acotado`; volver a estampar antes del envío falla dos tests.
+
+**El test de I1 es una aserción de contrato, no de comportamiento**: no se puede colgar un socket real en un unit test, así que verifica que se pase un `timeout` acotado, no que un cuelgue se corte. Es más débil que las guardas de B1-B4 y queda dicho en su propio docstring para que nadie lo lea como equivalente.
+
+---
+
+## Corrida de validación con los cinco arreglos puestos — el pipeline paso por paso (20/08/2026)
+
+Corrida completa contra la base real y **contra el receptor real del back-end**, en el mismo orden que `main._ciclo`, midiendo cada paso por separado. Medido con `time.monotonic()` y no con el reloj de pared, que es el instrumento correcto para duraciones (ver M5 de la revisión, todavía pendiente en `main.py`).
+
+### Los tiempos
+
+| Paso | Segundos | % de la corrida | % del ciclo |
+|---|---:|---:|---:|
+| Ingesta | 71,18 | 17,2% | 7,91% |
+| Vectorización | 10,28 | 2,5% | 1,14% |
+| Cierre de clusters | 0,08 | 0,0% | 0,01% |
+| Agrupamiento | 2,60 | 0,6% | 0,29% |
+| Fusión de clusters | 0,08 | 0,0% | 0,01% |
+| **Síntesis** | **320,95** | **77,6%** | **35,66%** |
+| Entrega al back-end | 8,36 | 2,0% | 0,93% |
+| **TOTAL** | **413,60** | 100% | **45,96%** |
+
+**Es una corrida de acumulación, no de régimen** — la distinción importa porque confundirlas ya llevó a una conclusión equivocada antes. Entraron **310 noticias nuevas** de golpe porque el motor llevaba horas sin correr; en un ciclo normal de 15 minutos entran unas pocas por medio.
+
+### Lo que confirma y lo que cambia respecto del baseline de la etapa 4
+
+La etapa 4 midió 206,58 s con un backlog de 24 ángulos (23,0% del ciclo). Esta dio **413,60 s (46,0%)**, el doble, y las dos razones son claras:
+
+- **La síntesis sigue siendo el grueso**: 77,6% de la corrida, 37 clusters sintetizados a **8,7 s cada uno** — consistente con los ~8 s por ángulo de la etapa 4. El costo lo fija la cantidad de material, no el intervalo.
+- **La ingesta pasó de 4-7 s a 71,18 s, y el 90% de eso es Perfil.** Sus 47 artículos por extracción tardaron ~64 s; los otros seis medios juntos, ~7 s. Es la confirmación en producción de que **el costo variable por artículo extraído domina la ingesta**, tal como quedó documentado en `tech_stack.md`, punto 12.
+
+### El dato que conviene mirar
+
+**La corrida usó el 46% del ciclo y el canario dispara al 50%.** No sonó, pero por poco. Proyección directa: sumar **un solo medio más con extracción** del tamaño de Perfil agrega ~64 s y lleva la corrida a ~478 s, o sea **53%: el canario suena**.
+
+Eso no es una falla, es el instrumento haciendo su trabajo — y es exactamente el aviso que la etapa 4 construyó para no depender de que alguien se acuerde de mirar. Confirma también que el disparador documentado para paralelizar la extracción (**pasar los ~10 medios**) está bien puesto, quizá incluso holgado.
+
+### Que los cinco arreglos no rompieron nada
+
+| | |
+|---|---|
+| Warnings en toda la corrida | **2**, ninguno un problema: uno es la validación anti-alucinación descartando el enfoque de un medio ajeno, el otro es un aviso cosmético de HuggingFace |
+| Alertas SMTP disparadas | **0** |
+| `url_invalida` (B2) | **0** en los 7 medios — la validación nueva no rechazó nada, igual que sobre las 4.532 históricas |
+| Extracción de Perfil (B1/B3) | **47 de 47**, cero fallos; `robots.txt` releído una vez por corrida |
+| Entrega al back-end | **40 de 40 aceptadas**, 0 rechazadas, 0 fallidas |
+
+### El filtro de opinión en producción (B4)
+
+Sobre las 4.842 noticias que quedaron en la base: **99 clasificadas como opinión** (El Cronista 59, La Nación 21, TN 12, Perfil 7), más recetas 70, horóscopo 44 y juegos 1.
+
+**91 de esas 99 (92%) quedaron fuera del agrupamiento**, que es el filtro haciendo su trabajo. Las 8 restantes son las que ya estaban en un cluster desde antes de que el patrón existiera: el filtro lo aplica la ingesta y no hay pasada retroactiva, así que se limpian solas cuando esos clusters cierren a las 12 h.
+
+---
+
+## Backlog punto 2, etapa 1 — desacoplar el motor de IA (20/08/2026)
+
+Hasta acá `synthesis.py` hablaba Gemini directo, y eso obligaba a **todo el que despliegue el motor a usar Gemini**, con su cuenta y sus términos. El objetivo es que cada operador use el modelo que paga, aquel donde tiene créditos, o uno local que no manda nada afuera.
+
+### Los dos caminos que se evaluaron, y por qué el vertical
+
+Con la arquitectura ya acordada, quedaba **en qué orden construirla**:
+
+| | Cómo | Veredicto |
+|---|---|---|
+| **Por capas** | Refactor primero (extraer el contrato), configuración y endpoints al final | ❌ El objetivo —que un operador sume su modelo sin tocar archivos— llegaba recién en la etapa 3 o 4, y lo más incierto se validaba último |
+| **Vertical** ✅ | Una rebanada completa de punta a punta para **un** adaptador, con Gemini intacto como red de seguridad | Elegido |
+
+**Lo que decidió**: el adaptador genérico se puede probar contra el **endpoint compatible de Gemini con la key que ya tenemos** (verificado el 20/08: existe y acepta nuestro esquema con `$ref` y `anyOf` sin aplanar). O sea que lo más incierto del diseño se valida el primer día, sin cuenta nueva y sin gasto. El camino por capas hacía primero lo fácil.
+
+### Las decisiones de diseño
+
+**Adaptadores por protocolo, no por proveedor.** `openai_compatible` no es un proveedor: es el estándar de hecho, y cubre OpenAI, Azure, OpenRouter, Groq, Together, DeepSeek, Mistral, xAI, vLLM, LM Studio, Ollama y Gemini. **Agregar un modelo es insertar una fila**, no escribir un `.py`. Los otros dos adaptadores del enum (`gemini`, `anthropic`) no agregan cobertura sino **fidelidad**: acceso a lo nativo de cada uno.
+
+**El enum es cerrado.** La tentación al leer "que cada uno use el modelo que quiera" es guardar en la base la ruta de import del adaptador. Eso es ejecución remota de código, y la API no tiene autenticación. Un proveedor que no hable ninguno de los tres protocolos se resuelve con un **gateway** adelante (LiteLLM, OpenRouter), no con código nuestro.
+
+**Anthropic se ganó su adaptador nativo, y no por preferencia.** Su capa de compatibilidad existe (`/v1/chat/completions` responde 401, no 404) pero **`response_format` está documentado como "Ignored"**, y `strict` en tools también. Su propia página dice que la capa "is not considered a long-term or production-ready solution". Como toda la síntesis se apoya en la salida estructurada, un operador con créditos de Anthropic no puede usarlos por ahí.
+
+**El alta sondea, no registra.** `POST /modelos` manda un pedido mínimo y verifica que **vuelva la forma pedida**, no que el endpoint conteste. El caso Anthropic es la prueba de por qué: responde 200, devuelve texto correcto y descarta el esquema en silencio. Un alta que solo probara conectividad habría aceptado ese modelo y el fallo habría aparecido en la síntesis, cada 15 minutos, en el paso más caro del pipeline.
+
+**El modo de estructura lo descubre el sondeo.** El operador no declara si su proveedor acepta `response_format` o solo tool-calling: se prueba uno, y si no da la forma se prueba el otro. Nadie tiene por qué saber ese detalle, y la documentación del proveedor puede mentirle.
+
+**La red de seguridad es el camino por defecto.** Sin filas activas en `modelo_ia`, la síntesis va por `_llamar_gemini`, que quedó **idéntico** —verificado por comparación de AST contra `HEAD`, no de palabra—. Una base que no configuró nada se comporta exactamente como antes de que la tabla existiera. Y conservarlo no es nostalgia: es el único acceso a `thinking_config`, que es la palanca de costo sobre el 77% de la corrida, y **borrarlo sería tirar la forma barata de medir cuánto vale esa palanca**.
+
+**`Sintesis.modelo_usado` desde el día uno.** Guarda el nombre que le puso el operador —no el id del modelo, porque puede haber dos filas del mismo modelo con distinta cuenta— y se actualiza en la re-síntesis, porque describe quién escribió el texto que está ahí ahora. El valor está en la **serie histórica**: el día que se quiera comparar proveedores tiene que ser una query, no un proyecto de medición.
+
+### La revisión, y lo que cambió por ella
+
+Una revisión con subagente encontró **cuatro bloqueantes reales**, dos de ellos de seguridad. Vale dejarlos escritos porque el aprendizaje no es el bug sino el patrón:
+
+- **La cadena de exfiltración seguía abierta.** El prefijo de `api_key_env` impedía nombrar variables ajenas, pero `GET /modelos` **publicaba el nombre de la variable y el `base_url`**: con eso, cualquiera daba de alta un modelo apuntando a su servidor y el motor le entregaba la key del operador en el sondeo mismo. El comentario del código afirmaba que el prefijo "tapa una vía de exfiltración" — le atribuía más de lo que hace. Ahora ninguna respuesta publica esos dos campos, y el comentario dice **exactamente** qué protege y qué no.
+- **El SSRF no era ciego.** El error del proveedor se reflejaba crudo en el 422, así que apuntando a un servicio interno la respuesta traía su cuerpo. Ahora solo viaja `error.message` cuando la respuesta tiene la forma de error de OpenAI; lo demás va al log.
+- **El `_RESOLVER` no evitaba el N+1 que decía evitar.** `expire_on_commit` está en `True` y `sintetizar_cluster` commitea por cluster, así que el `ModeloIA` se expiraba y se recargaba: **una query por cluster**, medido. Es la **misma trampa que este repo ya tenía documentada** quince líneas más arriba, en `descartar_vencidos_sin_sintetizar`. Se cierra con `session.expunge`.
+- **`ProveedorNoConfigurado` se escapaba del manejo de errores**: no se traducía ni estaba excluido del retry, así que una key faltante costaba 3 intentos con espera creciente por cluster — entre 2 y 4 minutos de sleeps por corrida. Ahora se traduce a `SintesisSinConfigurar`, igual que el camino histórico, y se sumó `AdaptadorNoImplementado` por el mismo motivo: no se arreglan reintentando.
+
+### Sobre los tests, que es lo más incómodo
+
+De 24 tests, **cinco mutaciones sobrevivieron**. Una en particular: `test_un_adaptador_inexistente_no_se_reporta_como_falta_de_esquema`, escrito con un docstring de cinco líneas para guardar un bug encontrado ese mismo día, **no lo guardaba** — el mensaje genérico incluía el detalle de cada intento, así que el `match` pasaba igual.
+
+El patrón vale más que el caso: **un test que afirma con `match=` sobre un mensaje compuesto puede pasar por la parte equivocada del mensaje**. Ahora afirma además que el mensaje genérico *no* aparece y que no se salió a la red.
+
+La segunda lección es del mismo tipo. El test del N+1 hacía su propio `expunge` y contaba queries: probaba que `expunge` funciona —cosa de SQLAlchemy— y no que `sintetizar_pendientes` lo llame. Sacando el `expunge` del código, pasaba igual. Ahora corre `sintetizar_pendientes` de verdad y cuenta lecturas de `modelo_ia`: 1 con el arreglo, 3 sin él.
+
+### Verificado
+
+**419 tests** (369 → 419), `ruff` limpio, `alembic check` sin drift, round-trip `upgrade → downgrade → upgrade` de la migración (que incluye el borrado manual de los tipos ENUM, que Alembic no autogenera y sin el cual un re-upgrade falla).
+
+Las siete mutaciones que sobrevivían ahora fallan, cada una en su propia guarda. Punta a punta contra el endpoint compatible de Gemini: alta real en 1,6 s con el modo detectado solo, y rechazo correcto de adaptador inexistente, variable prohibida, modelo inexistente y duplicado.
+
+---
+
+## La primera prueba con un proveedor de verdad — Groq / qwen3.6-27b (20/08/2026)
+
+Primer modelo de un tercero dado de alta con el sistema de la etapa 1. Se eligió `qwen/qwen3.6-27b` en Groq, que expone API compatible con OpenAI.
+
+### Lo que funcionó, que era lo que se estaba probando
+
+- **El alta no necesitó una línea de código.** Una fila con `base_url`, el id del modelo y el nombre de la variable de entorno.
+- **El sondeo detectó solo el mecanismo correcto.** La documentación de Groq declara *"JSON Object Mode"*, que **no es JSON Schema**: `response_format` no devolvió la forma, el sondeo cayó a `tools` y ahí sí. El operador no declaró nada. Tardó 7,4 s porque hizo los dos intentos, y ese costo se paga una sola vez.
+  Ese mecanismo se había construido por el caso Anthropic, **sin ningún proveedor real donde probarlo**. Groq fue su primera comprobación.
+- **El saneado de errores conservó lo accionable.** Groq devuelve errores con forma de OpenAI, así que llegó *"Limit 8000, Requested 23005"* y no un `HTTP 413` pelado. Sin eso el diagnóstico habría sido a ciegas.
+
+### Por qué el modelo no sirve igual
+
+El tier gratuito de Groq limita a **8.000 tokens por minuto**, y los prompts de síntesis miden entre 4.500 y 23.000 tokens. Medido sobre tres clusters reales:
+
+| Cluster | Notas | Prompt | Gemini | Groq |
+|---|---:|---:|---|---|
+| 190 | 20 | ~23.000 tok | 6,8 s · 2 ángulos | ❌ 413 |
+| 458 | 9 | ~16.000 tok | 3,3 s · 1 ángulo | ❌ 413 |
+| 464 | 3 | ~4.500 tok | 3,2 s · 2 ángulos | ❌ 400 en el tool call |
+
+Gemini: 3 de 3, 4,4 s promedio. Groq: 0 de 3. **No es un límite de nuestro código sino de capacidad del tier**: con `max_tokens=4000` el pedido más chico igual dio 413, porque el límite cuenta prompt + esquema + salida reservada (10.063 tokens).
+
+El 400 del cluster 464 —el único que entraba en el límite— quedó **sin explicar**. Puede ser complejidad del esquema con ese modelo, pero no se verificó y cada intento cuesta un minuto de espera por el TPM. No se atribuye sin comprobarlo.
+
+### El hallazgo sobre nuestro propio diseño
+
+**El sondeo aprueba con un prompt de juguete, y eso no garantiza que el trabajo real entre.** Pide "un solo elemento, textos de una o dos palabras" —unos cientos de tokens— y pasó sin problema; el prompt real es cincuenta veces más grande y no entra en el límite del proveedor.
+
+O sea que **el sondeo valida el mecanismo, no la capacidad**. Es una distinción que hoy no está dicha en ningún lado, y se descubrió de la peor forma posible: dando de alta un modelo que parecía servir.
+
+Queda anotado como mejora: que el sondeo estime el tamaño de un prompt real y avise cuando los límites declarados por el proveedor no lo admitan. Mientras tanto, la garantía que da el alta es más chica de lo que parece y conviene decirlo.
+
+---
+
+## Etapa 2 del punto 2: la credencial única y el adaptador nativo de Gemini (21/08/2026)
+
+Dos decisiones grandes, y la primera **contradice lo que la etapa 1 había construido una semana antes**. Vale dejar escrito el razonamiento completo porque el cambio se ve como un retroceso si solo se mira el diff.
+
+### Decisión 1 — Una sola variable de entorno para la credencial
+
+La etapa 1 diseñó `api_key_env`: cada fila guardaba el **nombre** de su variable (`MODELO_API_KEY_GEMINI`, `MODELO_API_KEY_GROQ`), lo que permitía tener varios proveedores configurados a la vez.
+
+**Se cambió a una sola variable de nombre fijo, `MODELO_API_KEY`**, y el alta ya no acepta el campo.
+
+Lo que hizo caer el diseño anterior fue notar en qué se apoyaba. El argumento para varias variables era la **cadena de fallback** —si un proveedor pega contra su rate limit, caer al siguiente—, que necesita las dos credenciales vivas en el mismo instante. Pero esa cadena es el punto 6 del backlog: **no está construida**, y `prioridad` hoy solo desempata. Se estaba pagando complejidad permanente por una función que no existe.
+
+Y el costo era real: el `.env` crecía una línea por cada proveedor que alguien probara, para siempre.
+
+**El usuario aportó el argumento que cerró la discusión**: la cadena de fallback no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden, y eso es lógica nueva de peso. Con eso, multimodelo pasó a ser un punto propio del backlog en vez de un requisito implícito de éste.
+
+**Lo que se conservó, y por qué.** La columna `api_key_env` sigue existiendo con default `VARIABLE_UNICA`, y `leer_api_key` sigue aceptando la forma con sufijo. Diferir multimodelo así sale gratis: el día que se implemente es exponer un campo, no rehacer la validación ni migrar la tabla. Y las instancias que ya tengan filas con nombres sufijados **siguen funcionando sin tocar nada**.
+
+#### La consecuencia que hubo que atacar
+
+Con nombres por proveedor, que la variable existiera era evidencia útil: si activabas un modelo de Groq sin haber definido su variable, la ausencia lo delataba. `PATCH ?activo=true` se apoyaba en eso y **solo miraba el entorno**, con el argumento explícito de que no valía gastar una llamada al proveedor para prender un interruptor.
+
+**Con una credencial única ese razonamiento se da vuelta.** `MODELO_API_KEY` existe siempre, tenga adentro la key del proveedor que tenga. El chequeo pasaba igual cuando el operador cambiaba de modelo y se olvidaba de cambiar el valor, y el 401 aparecía quince minutos después, en el paso más caro del pipeline y sin nadie mirando.
+
+Así que **activar pasó a sondear de verdad** contra el proveedor, con el timeout corto del sondeo. Cuesta una llamada y a cambio el error sale con el botón todavía apretado. **Apagar no sondea**, y eso es deliberado: apagar es la marcha atrás y tiene que funcionar justamente cuando el proveedor está caído.
+
+#### Un cambio menor con el mismo criterio
+
+`AltaModelo` pasó a `extra="forbid"`. Sin eso, mandar `api_key_env` en el alta se descartaba **en silencio** y quien lo mandó se quedaba creyendo que el motor iba a leer la variable que él eligió. En un endpoint donde el campo de más es justamente el que alguien usaría para desviar la credencial, el silencio es la peor respuesta. Por el mismo motivo, el adaptador nativo **rechaza** `base_url` en vez de ignorarlo.
+
+### Decisión 2 — Dónde viven las palancas específicas de un proveedor
+
+El adaptador nativo existe para dar acceso a `thinking_config`, que no tiene equivalente fuera de Gemini. Eso obligaba a decidir dónde se configura.
+
+Se evaluaron dos caminos:
+
+1. **Columna `thinking_level` propia.** Tipada y obvia, pero es una columna que un solo adaptador lee. Con Anthropic entrando en la etapa 3 y su `thinking.budget_tokens`, serían dos columnas muertas para todos los demás: la tabla empieza a crecer por proveedor, que es justo lo que el enum cerrado había evitado.
+2. **Columna `opciones` JSON con allowlist por adaptador.** ✅ **Elegido.** Un solo cambio de esquema para siempre.
+
+**La allowlist no es prolijidad, es la llave del bolsillo.** Sin ella, `opciones` sería un camino directo desde un endpoint sin autenticación hasta el cuerpo del request que sale hacia el proveedor. Cada adaptador declara `OPCIONES_ACEPTADAS` y se valida **al construirlo** —o sea antes de guardar nada—, para que una opción inválida sea un 422 en el alta y no una síntesis que falla cada 15 minutos.
+
+El adaptador compatible declara **cero opciones**, y es una postura: habla con decenas de proveedores distintos, así que una palanca que funcione en uno no tiene por qué existir en otro. Aceptarla sería prometer un efecto que depende de contra quién apunte el `base_url` de esa fila.
+
+### Un mecanismo que no se puede probar no se cuenta como intento
+
+`sondear` probaba siempre `response_format` y después `tools`. El nativo de Gemini tiene **un solo mecanismo**, así que probarle el segundo daba un pedido idéntico al primero, fallaba igual, y el mensaje final acusaba al proveedor de no respetar el esquema *por ninguno de los dos mecanismos* — una conclusión falsa sobre uno que nunca se intentó de verdad.
+
+Cada adaptador declara ahora `MODOS_SOPORTADOS` y el sondeo solo recorre esos.
+
+### El cliente deja de ser global
+
+El camino histórico cachea un `genai.Client` en una variable de módulo. Eso significa que **la credencial queda congelada en el proceso**: cambiar la key no tiene efecto hasta reiniciar.
+
+El adaptador lo arma por instancia. Es lo que hace que cambiar de proveedor no necesite un redeploy — junto con que `_del_entorno` relee el `.env` en cada llamada.
+
+### La medición que la etapa 2 existía para hacer (21/08/2026)
+
+Los tres caminos a Gemini sobre **el mismo prompt real** — cluster 485, 13 noticias de 4 medios, 77.429 caracteres, 18.447 tokens de entrada. Tres rondas cada uno.
+
+| Camino | Éxitos | Mediana | Salida | Razonamiento |
+|---|---|---:|---:|---:|
+| histórico | 3/3 | 8,98 s | 2.099 | 0 |
+| nativo | 2/3 | 8,05 s | 1.712 | 0 |
+| nativo con `thinking_level=HIGH` | 3/3 | 28,38 s | 2.267 | 6.267 |
+| compatible (capa OpenAI de Gemini) | 3/3 | 8,55 s | 2.229 | 0 |
+
+**Los tres caminos son equivalentes.** Misma entrada exacta, 4 ángulos en las doce corridas, entre 9 y 14 puntos clave, y en la mayoría hasta el mismo título de encabezado. La latencia no se distingue: 8,05 · 8,55 · 8,98 s.
+
+**La palanca de razonamiento funciona y es cara, ahora medido de punta a punta.** De 0 tokens con `LOW` a entre 4.204 y 8.579 con `HIGH`, y la latencia se triplica. Eso confirma el motivo de existir del adaptador nativo: la capa compatible no expone `thinking_config`, así que usar Gemini por ahí es renunciar a la única palanca de costo del pipeline.
+
+#### El hallazgo que no se estaba buscando
+
+Una segunda corrida, de seis rondas, para comprobar si la varianza salía de que el adaptador arma un cliente nuevo por llamada mientras el histórico cachea uno global:
+
+| Caso | Mediana | Peor |
+|---|---:|---:|
+| histórico (cliente cacheado) | 7,41 s | **486,33 s** |
+| nativo (cliente nuevo) | 9,50 s | 9,94 s |
+| nativo (cliente reusado) | 7,53 s | 8,56 s |
+
+**El camino histórico tardó 486 segundos en una ronda — ocho minutos — y no falló.** No falló porque `_llamar_gemini` **no tiene timeout configurado**: usa el del socket. Eso no es una anécdota estadística, es una propiedad del código. Y como `llamar_modelo` reintenta hasta tres veces, el techo de un solo cluster es tres veces eso. El ciclo del scheduler es de 15 minutos.
+
+O sea que la comparación se dio vuelta: **el adaptador nuevo no hereda ese riesgo, lo acota.** Su peor caso es el timeout de 120 s, que fue exactamente lo que hizo en la corrida anterior cuando Gemini se colgó (`DEADLINE_EXCEEDED` a los 119,22 s). Lo que parecía una desventaja del adaptador —un fallo donde el histórico "no fallaba"— era el adaptador haciendo lo correcto.
+
+Esto refuerza la etapa 4: retirar el camino histórico no es solo sacar duplicación, es sacar la única llamada sin límite de tiempo del pipeline.
+
+#### Lo que sí costó armar el cliente por llamada
+
+**~2 segundos por llamada** (9,50 s contra 7,53 s de mediana), que es el handshake TLS que el cliente cacheado se ahorra. Con 26 clusters en una corrida son unos 50 segundos, alrededor del 12% del costo de la síntesis medido en la etapa 4.
+
+No se corrigió en esta etapa. La salida no es volver al cliente global —eso es lo que congela la credencial en el proceso— sino **resolver el proveedor una vez por corrida y pasarlo**, igual que ya se hace con el `ModeloIA` y por el mismo motivo. Queda anotado con su medición.
+
+---
+
+## Etapa 4 del punto 2: se retira el camino histórico (21/08/2026)
+
+El camino histórico —`_llamar_gemini` + `get_cliente` + `_cliente`, unas 60 líneas que hablaban Gemini directo leyendo `settings.GEMINI_*`— se borró. Con él se fueron `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_TEMPERATURA` y `GEMINI_THINKING_LEVEL` de `Settings` y del `.env.example`.
+
+### Por qué ahora, y no era solo higiene
+
+El motivo original era la duplicación. El que lo volvió prioritario lo encontró la medición de la etapa 2: **`_llamar_gemini` no tenía timeout**, y en seis rondas tardó 486 segundos en una sin fallar. Era la única llamada del pipeline sin techo, y `llamar_modelo` la reintenta hasta tres veces sobre un ciclo de 15 minutos.
+
+Todo lo que queda pasa por un adaptador, y todo adaptador tiene timeout.
+
+Vale nombrar el otro motivo, que no es de rendimiento: mientras existiera, **el motor tenía un proveedor privilegiado escondido en el código**. Un despliegue que no configuraba nada terminaba mandándole los cuerpos de los artículos a Google sin haberlo elegido. Eso es exactamente lo que el punto 2 venía a sacar, así que dejarlo habría sido cerrar el punto sin cumplirlo.
+
+### La decisión: qué pasa sin ninguna fila activa
+
+Se evaluaron dos caminos y **el usuario eligió el segundo**, con un argumento que el planteo original no tenía: si toda síntesis queda atribuida a un modelo real, **se pueden comparar las síntesis que entregó cada uno**. Con una fila implícita, las del default se habrían agrupado bajo una etiqueta inventada.
+
+1. **La fila implícita.** Sin fila activa, se arma un `ModeloIA` en memoria desde `settings` y se pasa por el adaptador nativo. Cero acción del operador, pero `settings.GEMINI_*` quedaba vivo para siempre y el default oculto seguía ahí.
+2. **Configurar es obligatorio.** ✅ Sin fila activa la síntesis **no corre** y se dice con todas las letras. Un solo lugar donde se configura el modelo: la tabla.
+
+Lo que hace seguro al (2) es la **migración de datos** `5f80e67d5404`, que traduce la configuración de entorno de cada despliegue a la fila que ahora la representa. No inventa nada: lee las mismas variables que leía el código que se borró.
+
+> ⚠️ Esta primera versión insertaba la fila **activa** cuando no hubiera otra activa, y eso resultó estar mal: la revisión de más abajo explica por qué y cómo quedó. La fila entra apagada.
+
+Dos guardas, cada una por un caso distinto. Si ya existe el nombre, no hace nada (la migración se corrió antes, o alguien creó la fila a mano). Y **si ya hay una fila activa, la inserta apagada**: ese despliegue ya eligió su modelo y no estaba usando el camino histórico, así que activarle una de Gemini le cambiaría el proveedor por debajo.
+
+**La credencial es la única acción manual**, y está amortiguada: `leer_api_key` cae a `GEMINI_API_KEY` cuando `MODELO_API_KEY` no está, **avisando en cada lectura**. Es deuda con fecha, no una segunda forma válida — un fallback silencioso es indistinguible de una configuración correcta, y entonces nadie migra nunca.
+
+### Dos detalles que costaron un intento
+
+- **`bulk_insert` no sirve contra un ENUM de Postgres.** `adaptador` y `modo_estructura` son tipos ENUM, y una tabla declarada al vuelo con `sa.String` produce un INSERT que falla con *"column is of type adaptador but expression is of type character varying"*. La migración usa SQL con casts explícitos. De paso quedó verificado contra `pg_enum` que las etiquetas guardadas son los **nombres** del enum de Python (`GEMINI`), no sus valores (`gemini`).
+- **Sin modelo, la corrida corta arriba y no cluster por cluster.** Dejar que cada uno lo descubriera daba 26 excepciones con 26 tracebacks para una sola causa, todas contadas como "fallidas" — que sugiere un problema con los clusters cuando el problema es que falta configurar el motor. `sintetizar_pendientes` devuelve `sin_modelo: True` y no procesa nada.
+
+### Lo que cambió en el vocabulario
+
+`GET /modelos` y `PATCH` devolvían `"(Gemini, camino histórico)"` cuando no había fila activa. Ahora devuelven `"(ninguno activo — la síntesis no corre)"`: **es un estado de alarma, no un default**, y el texto tiene que impedir que se lo lea como "anda solo".
+
+### Lo que la etapa 3 ya no bloquea
+
+Anthropic es usable hoy por el adaptador compatible en modo `tools`, que es el que el sondeo detecta solo. Un adaptador nativo agregaría su palanca de razonamiento, y esa ahora entra por `opciones` sin tocar el esquema. La etapa 3 quedó abierta pero dejó de ser un prerrequisito de nada.
+
+### La revisión de la etapa 4, y lo que encontró (21/08/2026)
+
+Antes de commitear se pasó un revisor sobre las etapas 2 y 4. Encontró siete cosas, y **dos eran agujeros en razonamientos que este mismo documento defiende**. Vale dejarlas escritas con esa forma, porque el patrón —una guarda correcta aplicada a un caso y ciega al otro— es el que hay que aprender a ver.
+
+#### La migración le devolvía a Gemini el privilegio que la etapa 4 vino a sacar
+
+La versión original insertaba la fila **activa cuando no hubiera ninguna otra activa**, y el razonamiento estaba escrito acá arriba: *"ese despliegue ya eligió su modelo"*.
+
+Ese razonamiento vale para el despliegue que **actualiza**. Pero la migración también corre en el que **nace**, y ahí la condición se cumple siempre. Consecuencia, verificada:
+
+1. Instalación limpia. `init_db()` exige `alembic upgrade head`, así que la fila existe **antes** del primer `POST /modelos`.
+2. El operador da de alta su modelo con `activar=true`. Recibe `200` y `"activo": true`.
+3. Las dos filas empatan en `prioridad` —el default es 100 en la columna y en `AltaModelo`— y **desempata el `id`**, o sea gana la de la migración.
+4. Cada 15 minutos los cuerpos de los artículos salen hacia Google, con una credencial que ni siquiera es de Google.
+
+O sea, exactamente *"un despliegue que no configuraba nada terminaba mandándole los cuerpos a Google sin haberlo elegido"*, que es la frase con la que se justificó la etapa 4 — ahora con una fila que lo hacía parecer deliberado.
+
+**La corrección tiene tres partes, y la regla que queda no depende de adivinar en qué caso estamos:**
+
+- **Ninguna migración elige proveedor**: la fila entra siempre apagada. El costo asumido es que quien actualiza tiene que prenderla; a cambio nadie sintetiza contra un proveedor que no eligió.
+- **Prender un modelo apaga a los demás.** No se pierde nada: desde la etapa 2 la credencial es una sola, así que dos proveedores prendidos es un estado que no se puede usar. De paso muere el desempate silencioso por `id`.
+- **`POST /modelos` devuelve `en_uso`**, que era el único de los tres endpoints que no lo hacía — o sea el único punto donde el operador podía quedarse creyendo que el motor usaba su modelo.
+
+#### El saneo de errores cubría la rama 4xx y dejaba abierta la 200
+
+`_mensaje_de_error` está construido con cuidado para no convertir el SSRF en lectura de servicios internos, **pero solo corre cuando el status no es 200**. Si el destino contesta 200, el cuerpo pasaba por `_leer`, volvía crudo, y `sondear` lo pegaba entero —dos veces, una por modo— en el 422 de un endpoint sin autenticación.
+
+Alcanza con que el destino hable formato OpenAI, que es justo lo que hace un LiteLLM o un vLLM en la red de al lado.
+
+Ahora el cuerpo va **solo al log** y la respuesta dice *"respondió 200 pero sin la forma que pide el esquema"*. Se evaluó devolver una caracterización estructural —qué claves traía— y se descartó: los nombres de las claves también son información del servicio interno, y el operador que depura su propio modelo tiene el log en la misma máquina.
+
+**Y el test que supuestamente guardaba esto usaba `httpx.Response(403, ...)`**: la rama que sí estaba tapada. Tercera aparición del mismo modo de fallo en este repo.
+
+#### Un 200 que no es un chat-completion salía como HTTP 500
+
+`respuesta.json()` estaba fuera del `try`, así que `JSONDecodeError` —que no hereda de `ErrorDeProveedor`— se escapaba del sondeo y del alta.
+
+El caso no es adversarial: es **el tipeo más probable de todo este backlog**, `base_url` sin el `/v1` final. Ollama contesta 200 con `"Ollama is running"` en texto plano.
+
+Se eligió chequear el `content-type` antes de parsear —laxo, alcanza con que diga `json`— para poder dar el mensaje que **diagnostica**: *"no es una API compatible con OpenAI; lo más común es que a `base_url` le falte el sufijo del proveedor, por ejemplo `/v1`"*. Debajo quedó igual la red de `try`, más las guardas de tipo para un JSON que no es objeto, un `choices` que no es lista y un `choice` que no es objeto — todos daban `AttributeError` y salían como 500.
+
+#### La migración escribía sin pasar por la puerta que el endpoint sí custodia
+
+Dos lecturas del entorno sin validar. `float(GEMINI_TEMPERATURA)` **abortaba el upgrade entero** ante cualquier tipeo — y `dotenv_values` no pela comentarios de fin de línea sin comillas, así que `0.2 # baja a propósito` bastaba. Y `GEMINI_THINKING_LEVEL` se insertaba sin contrastar, produciendo una fila que el adaptador rechaza pero recién en la síntesis, por la rama "esto se arregla solo": tres intentos con backoff **por cluster**.
+
+Ahora las dos caen al default avisando. Lo que hace aceptable el fallback hoy y no lo hubiera hecho antes: la configuración vive en una fila que se mira con `GET /modelos`, así que un valor que no se respetó queda a la vista en vez de perderse en el entorno.
+
+#### El `downgrade` no miraba los campos que su propio docstring prometía
+
+Prometía respetar la fila *"si el operador la editó — otro modelo, otra temperatura"* y filtraba por `adaptador`, `base_url` y `max_tokens`, que no discriminan nada: en el adaptador de Gemini `base_url` se rechaza en el constructor, así que **siempre** es NULL. Los dos casos que el texto nombraba pasaban el filtro y se borraban igual. Ahora el `WHERE` mira `modelo`, `temperatura`, `opciones` y `activo`.
+
+#### Sin modelo, la alerta de caducados mandaba al lugar equivocado
+
+El barrido corría **antes** del corte por `sin_modelo`, así que una instalación recién migrada iba marcando clusters como caducados y a las 72 h avisaba *"el plazo quedó corto, subilo"*. La causa no era el plazo. Ahora se corta antes de barrer.
+
+Al moverlo apareció una trampa de SQLAlchemy que vale anotar: **`expunge` sobre un objeto ya expirado lo desprende sin valores**, así que el primer acceso tira `DetachedInstanceError` en vez de recargar. El barrido commitea, y `expire_on_commit` está en `True`. El `expunge` tiene que ir antes de cualquier cosa que commitee, no solo antes del bucle.
+
+### Corrida completa contra el back-end tras la etapa 4 (21/08/2026)
+
+Pipeline entero por los endpoints reales, con el back-end levantado. **16 de 16 entregadas, cero rechazos.**
+
+| Paso | Segundos | % del total | Resultado |
+|---|---:|---:|---|
+| `/ingest` | 71,08 | 37,5% | 36 nuevas de El Cronista, 311 pendientes de vectorizar |
+| `/vectorize` | 10,86 | 5,7% | 311/311 |
+| `/cluster` | 1,58 | 0,8% | 37 cerrados, 22 clusters nuevos, 0 fusiones |
+| `/synthesize` | 102,27 | 54,0% | 17 clusters, 16 ángulos creados, 8 descartados, **0 fallidos** |
+| `/deliver` | 3,65 | 1,9% | 16/16, 0 rechazadas |
+| **TOTAL** | **189,44** | | **21% del ciclo de 15 min** |
+
+La síntesis sigue siendo el paso más caro (54%), consistente con lo medido en la etapa 4 del punto 1. La corrida anterior con la que se puede comparar usó el 46% del ciclo; ésta el 21%, pero con menos backlog de síntesis, así que **no son comparables directamente**: lo que fija el trabajo de síntesis es cuántos clusters publicables hay, no el código.
+
+#### Lo que esta corrida existía para verificar
+
+- **Sin modelo activo la síntesis no corre y lo dice**: `POST /synthesize` devolvió `sin_modelo: true` en 0,02 s, sin tocar ningún cluster y sin un solo traceback.
+- **Activar sondea de verdad**: el `PATCH ?activo=true` tardó **8,33 s** —el costo real de una llamada al proveedor— y devolvió *"responde y respeta el esquema vía `response_format`"*. Ese es el precio de que un 401 aparezca con el botón apretado y no quince minutos después.
+- **`GET /modelos` no publica `api_key_env` ni `base_url`**, verificado sobre la respuesta real.
+- **Toda síntesis nueva queda atribuida**: las 16 llevan `modelo_usado='gemini-por-defecto'`. Las 296 anteriores mantienen `NULL`, que sigue significando "anteriores a la columna" — no se rellenaron hacia atrás.
+- **El fallback de credencial funciona**: `MODELO_API_KEY` no está en ese `.env` y la síntesis corrió igual leyendo `GEMINI_API_KEY`.
+
+#### Lo que la corrida encontró, y que ningún test podía encontrar
+
+**19 avisos idénticos del fallback en una sola corrida** — uno por cluster sintetizado, más el sondeo, más cada `GET /modelos`. A 96 corridas por día son unas **1.800 líneas iguales**.
+
+El argumento original era correcto —un fallback silencioso es indistinguible de una configuración correcta— pero la frecuencia estaba mal: a ese volumen el aviso deja de ser visibilidad y pasa a ser ruido que uno aprende a filtrar, y filtrado no avisa nada.
+
+Pasó a **una vez por proceso**, que conserva lo que importa: aparece en cada arranque, o sea después de cada deploy, que es cuando hay alguien mirando.
+
+Vale anotar el patrón: este defecto no era detectable por tests unitarios —cada llamada era correcta por separado— sino solo mirando el log de una corrida real. Es el mismo tipo de hallazgo que el `_llamar_gemini` sin timeout: emerge del volumen, no de la lógica.
+
+#### Un cabo suelto de la misma familia, encontrado al explicar la corrida
+
+Preguntando por qué la corrida había funcionado sin `MODELO_API_KEY` —la respuesta es el fallback a `GEMINI_API_KEY`— salió a la luz qué pasaría el día que esa vía no esté: **`SintesisSinConfigurar` caía en el `except Exception` genérico** de `sintetizar_pendientes`.
+
+O sea, 17 clusters, 17 tracebacks y 17 "fallidos" para una sola causa. Es exactamente el diagnóstico engañoso que la etapa 4 había corregido para el caso *"no hay ninguna fila activa"*, y que se le había escapado al caso *"la fila está pero no tiene con qué autenticarse"* — que llega por un camino distinto (una excepción desde adentro del bucle, no un chequeo previo).
+
+Ahora corta la corrida y lo dice una sola vez. Los clusters quedan sin marca, así que entran en carrera solos cuando la configuración esté.
+
+`stats` distingue las dos formas de "el motor no está configurado", porque se arreglan distinto: `sin_modelo` es que nadie eligió proveedor, `sin_credencial` es que el elegido no tiene credencial. **Ninguna de las dos cuenta como cluster fallido**, que es el punto.
+
+---
+
+## Se cierra el punto 2: la etapa 3 no se implementa (21/08/2026)
+
+**Anthropic nativo queda como limitación documentada, no como tarea pendiente.** Con eso el punto 2 del backlog cierra.
+
+### Lo primero: el roadmap estaba desactualizado
+
+Decía que un adaptador nativo aportaría *"su palanca de razonamiento (`thinking.budget_tokens`)"*. **Eso ya no existe**: `budget_tokens` está removido en los modelos actuales de Anthropic y devuelve **400**. Lo reemplazaron `thinking: {type: "adaptive"}` y `output_config.effort` (`low` a `max`).
+
+Y hay algo que no sabíamos y que hace al nativo **más** valioso de lo que decíamos: Anthropic tiene **salida estructurada nativa** vía `output_config.format`, o sea JSON válido por construcción, igual que `response_schema` en Gemini. Por la capa de compatibilidad, en cambio, el esquema viaja como `tools` y es una guía, no una garantía.
+
+### La decisión, y el número que la define
+
+| Modelo | Por síntesis | ~20/día | Al mes |
+|---|---:|---:|---:|
+| Opus 5 | US$0,147 | US$2,95 | **~US$88** |
+| Sonnet 5 | US$0,088 | US$1,77 | ~US$53 |
+| Haiku 4.5 | US$0,029 | US$0,59 | ~US$18 |
+
+Contra **US$0** del tier gratuito de Gemini que corre hoy. Anthropic no tiene tier gratuito.
+
+Se evaluaron dos caminos: construir el adaptador validándolo con una corrida barata (~US$1,50, que sí es asumible), o cerrar el punto documentando la limitación. **Se eligió el segundo**, y el motivo decisivo no fue el costo de construirlo sino el de **correrlo**: agregar una dependencia y ~250 líneas para un camino que el proyecto no puede pagar es deuda sin contrapartida.
+
+### El supuesto que queda abierto, dicho como supuesto
+
+Está verificado que la capa de compatibilidad de Anthropic **ignora `response_format` en silencio**. Que acepte `tools` —de lo que depende que Anthropic sea usable sin adaptador nativo— **nunca se probó**: no hubo credencial con crédito.
+
+Eso quedó escrito en tres lugares donde alguien lo va a leer antes de tropezarse: el docstring de `ModoEstructura`, el comentario de `Adaptador.ANTHROPIC`, y el mensaje de error de `construir`, que ahora dice qué hacer en lugar de cada adaptador reservado en vez de dar un texto genérico.
+
+Es deliberado no venderlo como hecho: exactamente el error que costó el episodio de Groq fue dar por bueno un mecanismo sin probarlo.
+
+### Dos defectos que aparecieron mientras se documentaba esto
+
+**El placeholder del `.env.example` tapaba el fallback de credencial.** Al renombrar `GEMINI_API_KEY` a `MODELO_API_KEY` en un `.env` real, el valor que quedó fue `tu_api_key_aqui` — que es *truthy*. `leer_api_key` lo devolvía como si fuera una credencial y nunca llegaba a `_heredada`, así que la síntesis habría dado **401 en cada cluster**; y como un 401 es `ErrorDeProveedor`, eso son **tres reintentos con espera creciente por cluster**. El síntoma —"el proveedor rechaza la key"— no se parece en nada a la causa, que es una línea sin completar.
+
+Ahora un valor que empieza con `tu_` cuenta como no configurada y el mensaje lo dice con todas las letras. La comprobación ya existía dentro de `_heredada`; lo que faltaba era aplicarla también en la vía principal.
+
+**Y los tests de credenciales no eran herméticos.** `_del_entorno` hace `dotenv_values(".env")` relativo al directorio actual, así que los tests que no se movían a un temporal leían **el `.env` real del desarrollador**. Se descubrió de la peor forma: cinco tests se rompieron sin que se tocara una línea de código, solo porque el `.env` de la máquina cambió. Ahora la fixture hace `chdir` a un `tmp_path` sin `.env`.
+
+### Se saca el fallback a `GEMINI_API_KEY` (21/08/2026)
+
+La compatibilidad temporal duró lo que tenía que durar: el `.env` del despliegue ya usa `MODELO_API_KEY`, así que `leer_api_key` dejó de mirar el nombre viejo. Con eso se van `VARIABLE_HEREDADA`, `_heredada()`, el flag `_ya_se_aviso` y los cinco tests que lo cubrían.
+
+Sobrevive lo único de ese bloque que no era transitorio: **la comprobación de placeholder**. Nació adentro de `_heredada` y se había extendido a la vía principal el mismo día que se encontró el defecto; ahora es `_es_placeholder`, con `PREFIJO_PLACEHOLDER = "tu_"` como convención declarada del `.env.example`.
+
+Vale anotar que el fallback cumplió su función de manual: existió para que una actualización no cortara la síntesis, avisó hasta que alguien renombró la variable, y se borró apenas dejó de hacer falta. Lo que lo hizo funcionar fue ponerle un aviso — un fallback silencioso habría quedado para siempre porque nadie se habría enterado de que estaba ahí.
+
+**Actualizar el motor ahora exige un renombre en el `.env`**: `GEMINI_API_KEY` → `MODELO_API_KEY`, mismo valor. Está dicho en `.env.example`, `roadmap.md`, `tech_stack.md` y el docstring de la migración `5f80e67d5404`. Si falta, el motor no sintetiza y lo dice; no adivina.
+
+#### Y el aislamiento de los tests se generalizó
+
+El `chdir` a un temporal dejó de ser una fixture de la clase de credenciales y pasó a ser **autouse de todo el archivo**. El problema no era de esos tests en particular: `_del_entorno` lee `dotenv_values(".env")` relativo al directorio actual, así que **cualquier** test del archivo que llegue a esa función lee el `.env` de la máquina. Los dos que sí quieren un `.env` se crean el suyo en su propio `tmp_path`.
+
+---
+
+## Token de operador para la API (punto 10 del backlog, 21/08/2026)
+
+Salió de preguntarse si el punto 3 (alta de medios por el operador) podía arrancar. Resultó que no, y que el motivo estaba escrito en el propio roadmap sin que nadie lo hubiera juntado.
+
+### Una deuda sin acreedor
+
+Tres lugares pedían autenticación y **ninguno la tenía asignada**:
+
+- El punto 3: *"Necesita autenticación y validación del destino desde el diseño, no después"*
+- El punto 9: *"Es el mismo problema de fondo que el SSRF del punto 3 y probablemente se resuelvan juntos"*
+- El punto 2 y varios comentarios del código: *"hasta que exista auth —punto 9—"*… **y el punto 9 es el mail de alertas**
+
+Y la Fase 5 la dejaba explícitamente afuera: *"rate limiting de la API y autenticación pública no están en esta lista a propósito — son problemas de tráfico público que el proyecto todavía no tiene"*.
+
+**Ese razonamiento era correcto cuando se escribió y dejó de serlo con el punto 2.** Desde que existe `POST /modelos`, la API tiene un endpoint que busca una URL arbitraria a pedido de quien llame **y le entrega una credencial**. Eso no es un problema de volumen: existe con un solo visitante.
+
+**La confusión era de vocabulario.** Lo diferido es autenticación *pública* —usuarios, roles, rate limiting—, y eso sigue diferido con razón. Lo que hacía falta es otra cosa y mucho más chica: un token de operador. Conflatirlas es por qué quedó sin dueño.
+
+### El inventario, que era lo que faltaba
+
+Once endpoints, y **todos son del operador**: el back-end recibe las síntesis por push y no consulta nada, el frontend cuelga del back-end. Nada externo consume esta API, así que protegerla entera no rompe ninguna integración — eso hizo la decisión barata.
+
+Dos riesgos que ninguna nota anterior nombraba:
+
+- **`POST /synthesize` es un ataque financiero.** Cuesta plata por invocación, y el gasto en APIs es el límite duro del proyecto. Cualquiera podía vaciar la cuota.
+- **`POST /ingest` es reputacional.** Hace que el motor golpee todos los feeds **con la IP y el User-Agent del operador**, contra medios cuyos términos de uso se revisaron con cuidado. En loop es un mini-DDoS con identidad ajena.
+
+Y una contradicción concreta: **el `docker-compose.yml` ligaba `"8000:8000"`**, o sea `0.0.0.0`. La mitigación documentada decía *"desplegala en una red donde solo llegue el operador"* mientras el archivo que define el despliegue publicaba la API entera — y el pendiente operativo del roadmap es justamente elegir el VPS. Ahora liga a `127.0.0.1`.
+
+### El diseño, y por qué es tan chico
+
+**`API_TOKEN` definido → se exige. Sin definir → la API queda abierta y el motor lo avisa al arrancar.** Una sola regla, sin comportamiento que dependa del entorno.
+
+Se evaluó un tercer modo —abierto en `development`, cerrado en `production`— y **se descartó por decisión del usuario**: el motor es software libre que otros despliegan, así que cómo se expone tiene que ser elección de quien lo corre, no del repo. Un interruptor, de su lado.
+
+Tres decisiones menores que valen escribirse:
+
+- **La puerta se declara en el `app`, no en cada ruta.** Un endpoint que se agregue mañana nace protegido en vez de nacer abierto hasta que alguien se acuerde del decorador. La excepción vive en un solo lugar (`auth.RUTAS_ABIERTAS`).
+- **`GET /` queda abierto porque lo llama el `HEALTHCHECK` del Dockerfile** desde adentro del contenedor. Pedirle token lo rompería, o forzaría a meter la credencial en el `Dockerfile`. La documentación también, porque expone la forma y no los datos.
+- **`hmac.compare_digest` y no `==`.** La comparación de strings de Python corta en el primer byte distinto, así que el tiempo de respuesta filtra cuántos caracteres acertó quien prueba. Como ningún test de comportamiento puede distinguir las dos —dan el mismo 401—, la guarda mira el código fuente.
+
+### Verificado, no supuesto
+
+Contra un servidor real: `/` y `/docs` responden 200 sin token, `/modelos` y `/clusters` dan 401, y con el token correcto pasan. Las 6 mutaciones sobre la puerta caen.
+
+Y una que salió de probar: **la puerta corre antes que la validación de FastAPI.** Un pedido mal formado y sin token da 401, no 422 — si fuera al revés, un anónimo podría sondear qué campos existen y qué rangos aceptan. Depende de un detalle del orden de resolución de dependencias, así que quedó con test propio.
+
+---
+
+## El motor tenía logging pero no salida (punto 12 del backlog, 21/08/2026)
+
+Apareció verificando el pipeline antes de pasar las mejoras post-1.0 a `main`, no buscándolo. Los 16 módulos de `src/` llaman a `logging`, y **no había un solo `basicConfig` ni handler en todo el proyecto**. Estaba anotado como *"persistir los logs"* en notas de planificación viejas y nunca llegó a ser un punto del backlog.
+
+### La consecuencia no era estética
+
+Sin handler en la raíz, `logging` no "usa el formato por defecto": descarta. Medido sobre el proceso real:
+
+```
+handlers en la raiz: NINGUNO
+nivel efectivo de src.main: WARNING
+-> un logger.info del motor SE PIERDE
+```
+
+Todo `logger.info` se tiraba, y todo `WARNING` para arriba caía en `logging.lastResort` —el handler de emergencia de la stdlib— sin fecha, sin nivel y sin nombre de módulo. Uvicorn no lo tapa: configura solo sus loggers `uvicorn*` y deja la raíz intacta **a propósito**, para no pisarle la configuración a la aplicación que hospeda. La aplicación es esta, y no la tenía.
+
+Lo que se perdía: el resultado de cada paso del pipeline, con qué modelo se sintetizó y cuántos tokens costó, el aviso de exclusividad al activar un modelo, y **el porcentaje del ciclo que consumió la corrida** — que es, según el propio roadmap, el número con el que se calibra `INGEST_INTERVAL_MINUTES`. El motor medía su utilización y tiraba la medición.
+
+**Un log que falta no se parece a un error**, y por eso esto sobrevivió a las cinco fases: nada fallaba.
+
+### Las decisiones
+
+**A stdout, no a un archivo.** El motor corre en un contenedor, y ahí un handler de archivo es la peor opción de las dos: lo esconde de `docker logs`, se lo lleva puesto cada recreación del contenedor, y sin rotación llena el disco del VPS —que también tumba a Postgres—. La persistencia y la rotación van al `docker-compose.yml`, donde el driver `json-file` las hace bien: 10 MB × 5 archivos. Medido en corridas reales, un ciclo con trabajo (11 síntesis) deja ~4,7 KB y uno sin nada que hacer ~1 KB, así que el techo son más de tres meses de historia a 96 ciclos por día.
+
+**`LOG_SQL` aparte de `LOG_LEVEL`.** El SQL de un ciclo son miles de líneas: si viniera incluido en `DEBUG`, nadie podría poner el motor en DEBUG sin ahogarse.
+
+**Techo en WARNING para las librerías ruidosas.** Sin él, subir la raíz a INFO —que es todo el punto— entierra al motor bajo el ruido de sus dependencias, y el resultado neto es peor que no tener logs: hay líneas, pero no se encuentra la que importa. `httpx` sola emite una por request, y un ciclo con extracción por URL pide decenas de artículos. **`apscheduler` queda deliberadamente afuera**: sus dos líneas por ciclo son la prueba de vida del scheduler, y hay un test que frena a quien lo agregue.
+
+**Un `LOG_LEVEL` mal escrito no puede tumbar el arranque.** `basicConfig(level="INFOO")` levanta `ValueError`, y esto corre dentro del `lifespan`: un typo en el `.env` dejaría el motor sin levantar. Se cae a INFO y se avisa.
+
+**No se le pisa la configuración a nadie.** Si la raíz ya tiene handlers, alguien más configuró el logging —uvicorn con `--log-config`, un gunicorn por delante— y ese handler manda. En ese caso tampoco se toca el encoding ni los loggers de uvicorn: si la salida es de otro, esas decisiones también.
+
+### Tres hallazgos que no se buscaban
+
+**1. `echo=(ENVIRONMENT == "development")` en el engine tenía que morir.** Con un echo verdadero, SQLAlchemy le cuelga un `StreamHandler` propio al logger de la Engine y **no le apaga la propagación** (verificado en `sqlalchemy/log.py`: `InstanceLogger.__init__` agrega el handler, nadie toca `propagate`). En cuanto la raíz tuviera handler, cada sentencia habría salido **dos veces, con dos formatos distintos**. Ahora `echo=False` siempre —que devuelve un `Logger` pelado— y el SQL se enciende subiendo el nivel del logger con `LOG_SQL`. Como no hay test de comportamiento que distinga las dos sin una base real conectada, quedó una guarda que mira el código, **descartando los comentarios**: el propio comentario que explica esto dice `echo=False`, y sin descartarlos la guarda daba positivo aunque el código dijera otra cosa.
+
+**2. En Windows se perdían líneas enteras.** `sys.stdout` sale en `cp1252`, y una línea con un carácter que ese codec no tiene —un titular con `北京`, un apellido en cirílico— hace que `StreamHandler.emit` levante `UnicodeEncodeError`. `logging` no propaga esa excepción: escribe un `--- Logging error ---` con traceback y **descarta el mensaje**. Verificado con una corrida real. O sea que la línea rara, la que más ganas hay de leer, es justo la que no está. La salida se fuerza a UTF-8.
+
+**3. La hora habría sido la del contenedor, o sea UTC.** `logging` usa `time.localtime`, mientras los mensajes que arma `tiempo.formatear` van en UTC-3 — el log habría tenido el prefijo en una zona y el contenido en otra, que es exactamente lo que `tiempo.py` existe para evitar y ya costó un bug real en la firma del webhook. La regla del proyecto es *"se guarda en UTC, se muestra en UTC-3"*, y un log es para mostrar.
+
+Se descartó la solución obvia —`TZ` en el `docker-compose.yml`— porque **`python:3.12-slim` no trae `tzdata`**: fallaría de vuelta a UTC en silencio, que es peor que no intentarlo. En su lugar, un `converter` propio sobre `ZONA_LOCAL`, que es un offset fijo y no necesita base de zonas. El `-03` va escrito en el formato y no calculado con `%z`, porque `%z` sobre el `struct_time` que consume `strftime` daría el offset de la máquina — justo el que no queremos.
+
+### Verificado, no supuesto
+
+Dos corridas completas contra el back-end real, con el token puesto. Ciclo con trabajo: 11 síntesis, 13 entregas, 0 fallidas. El log resultante decodifica como UTF-8, los acentos salen bien (`Fusión`, `Ángulo`, `Síntesis`) y cada línea lleva fecha, nivel y módulo. **19 mutaciones, 19 detectadas.**
+
+Dos de esas mutaciones no se detectaban al principio, y por el mismo motivo: **la máquina de desarrollo ya está en UTC-3**, así que `time.localtime` devuelve lo mismo que la hora argentina y el test no podía distinguir las dos implementaciones. Se arregló falseando el reloj del sistema dentro del test — parcheando los dos caminos, porque `logging.Formatter` guarda una *referencia* a `time.localtime` en un atributo de clase y pisar el módulo no la alcanza.
+
+### Lo que el log destapó en su primera corrida
+
+Una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*: **entidades HTML sin decodificar** llegando al producto. Medido sobre la base: 38 de 5.390 `contenido_limpio` (0,7%), y `titulo` ninguno. Quedó como punto 13 del backlog.
+
+Es el argumento entero de este punto en una línea: el defecto estaba ahí desde antes, y lo que faltaba para verlo era el log.

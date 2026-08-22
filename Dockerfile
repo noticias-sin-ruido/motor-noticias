@@ -2,8 +2,15 @@
 FROM python:3.12-slim
 
 # Evita que Python escriba archivos .pyc y fuerza el stdout sin buffer para ver logs en tiempo real
+#
+# HF_HUB_DISABLE_PROGRESS_BARS apaga la barra de progreso de huggingface_hub al
+# cargar el modelo de embeddings. En una terminal es útil; en el log del
+# contenedor es una línea de retornos de carro y bloques `#` que no pasa por
+# `logging` —la escribe tqdm directo a stderr— y por lo tanto no lleva fecha ni
+# se puede filtrar. Ver `src/logging_config.py`.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_DISABLE_PROGRESS_BARS=1
 
 # Establecer el directorio de trabajo dentro del contenedor
 WORKDIR /app
