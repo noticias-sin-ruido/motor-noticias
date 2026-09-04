@@ -172,6 +172,8 @@ curl -X POST localhost:8000/medios -H "Content-Type: application/json" -d '{
 
 **Deshabilitar no es borrar.** `PATCH /medios/{id}?activo=false` deja el medio con todas sus noticias, clusters y síntesis; lo único que cambia es que el motor deja de traer sus feeds, y lo volvés a prender cuando quieras. No hay borrado a propósito: se llevaría puestas noticias que quizá ya se entregaron.
 
+Lo que el alta exige del cuerpo, por si el 422 te agarra desprevenido: hasta **20 feeds distintos** (las URLs repetidas se descartan en silencio, no cuentan), **2048 caracteres** por URL, `idioma` como código corto (`es`, `pt-BR`) y `pais` como ISO alfa-2 (`AR`), y `logo_url` obligatoriamente `http` o `https` — un `javascript:` ahí es XSS esperando a la primera interfaz que lo muestre.
+
 Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
 
 ---
@@ -463,7 +465,7 @@ Que ninguna migración elija proveedor por vos es la decisión, no un olvido: el
 
 ### Qué sigue
 
-El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md). Lo próximo: que el alta de medios la haga el operador por API en vez del repo, y que la URL del webhook deje de estar en el `.env`.
+El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md). El alta de medios por API ya está (arriba); lo próximo es que la URL del webhook deje de estar en el `.env`.
 
 ---
 

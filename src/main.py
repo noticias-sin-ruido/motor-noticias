@@ -1,7 +1,7 @@
 import logging
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional
+from typing import Annotated, Any, Callable, Dict, List, Optional
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -9,9 +9,9 @@ from apscheduler.events import (
     EVENT_JOB_MISSED,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -21,7 +21,11 @@ from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
 from .models import Adaptador, Medio, ModeloIA
 from .services.alerts import enviar_alerta
-from .services.medios import FeedInservible, sondear as sondear_medio
+from .services.medios import (
+    FeedInservible,
+    sondear as sondear_medio,
+    validar_url_de_logo,
+)
 from .services.modelos import modelo_activo, sondear
 from .services.proveedores import (
     ErrorDeProveedor,
@@ -360,7 +364,15 @@ def ingest(session: Session = Depends(get_session)):
 
 
 @app.post("/vectorize")
-def vectorize(limite: Optional[int] = None, session: Session = Depends(get_session)):
+def vectorize(
+    # `ge=1` y no solo un tipo: sin la cota, `?limite=-1` devolvía
+    # `{"pendientes": -1}` con 200 — no vectorizaba nada, pero informaba un
+    # dato imposible como si fuera medido. Es la misma forma que ya usan
+    # `/search` y `/clusters`; a este endpoint se le había pasado. Sin techo
+    # a propósito: el backlog real ya lo acota, pedir de más no cuesta nada.
+    limite: Optional[int] = Query(None, ge=1),
+    session: Session = Depends(get_session),
+):
     """
     Vectoriza a demanda las noticias que todavía no tienen embedding.
 
@@ -469,6 +481,48 @@ def clusters(
 # solo llega el operador. Ver specs/roadmap.md, punto 9.
 
 
+# --- Cotas de entrada (tanda 3 de la auditoría) ---
+
+# Techo de los `id` que llegan por la ruta.
+#
+# `medio.id` y `modelo_ia.id` son `integer` en Postgres —32 bits, consultado al
+# esquema vivo y no supuesto—, así que un `id` más grande no es "no encontrado"
+# sino un valor que la columna no puede ni representar. Sin la cota, `PATCH
+# /medios/99999999999999999999999` reventaba con `OverflowError` (medido en
+# SQLite, que es donde corre la suite): un 500 por una entrada mala, justo lo
+# que el resto de la API no hace. No filtra nada; contradice la regla, y la
+# regla es lo que hace que un 500 signifique "se rompió algo nuestro".
+#
+# `ge=1` del otro lado porque las secuencias arrancan en 1: un `id` negativo es
+# un error de quien llama y merece decirlo, no un 404 que sugiere que existía.
+MAX_ID = 2**31 - 1
+
+
+# Largo máximo de cualquier URL que entre por la API y se guarde.
+#
+# 2048 es el techo de hecho: es el límite histórico de Internet Explorer, y por
+# eso es el número bajo el que se quedó todo lo que quiere ser alcanzable. La
+# URL más larga del roster medido tiene 62 caracteres
+# (`ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml`), así que sobra por 33
+# veces. Sin esta cota se persistían 500 KB en `url_base` — comprobado antes del
+# arreglo, se guardaban y `GET /medios` los devolvía.
+MAX_LARGO_URL = 2048
+
+# Cuántos feeds distintos se aceptan por medio.
+#
+# El número lo fija el peor caso de latencia y no el gusto: el sondeo consulta
+# cada feed con `TIMEOUT_SONDEO_SEGUNDOS` (10 s), así que veinte feeds que no
+# respondan ocupan un worker 200 s. Es acotado y reportable; sin cota no lo era.
+#
+# Contra la realidad medida sobra: los 7 medios del roster usan **un** feed cada
+# uno, y el experimento más grande que se hizo —sumar feeds de sección a La
+# Nación y TN— llegó a 8. Se eligió el lado generoso porque desde la tanda 1
+# `POST /medios` pide token: el atacante anónimo ya no existe, y lo que esta
+# cota frena hoy es sobre todo un error de tipeo como el que destapó el ataque
+# (500 copias del mismo feed en un solo POST).
+MAX_FEEDS_POR_MEDIO = 20
+
+
 class AltaModelo(BaseModel):
     """Lo que hace falta para dar de alta un modelo. Ver `models/modelo_ia.py`."""
 
@@ -483,7 +537,10 @@ class AltaModelo(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     adaptador: Adaptador
     modelo: str = Field(min_length=1, max_length=200)
-    base_url: Optional[str] = None
+    # Acotada por lo mismo que `url_base` en `AltaMedio`: es una URL que entra
+    # por la API y se persiste. A dónde puede APUNTAR ya lo decide
+    # `MODELO_HOSTS_PERMITIDOS` desde la tanda 2; esto es solo su largo.
+    base_url: Optional[str] = Field(default=None, max_length=MAX_LARGO_URL)
     # **No se pide `api_key_env`**: la credencial va siempre en la misma variable
     # de entorno (`VARIABLE_UNICA`) y el operador no elige su nombre. Cambiar de
     # proveedor es cambiar el **valor** de esa variable, no agregar otra.
@@ -619,7 +676,9 @@ def alta_modelo(datos: AltaModelo, session: Session = Depends(get_session)):
 
 @app.patch("/modelos/{modelo_id}")
 def activar_modelo(
-    modelo_id: int, activo: bool = Query(...), session: Session = Depends(get_session)
+    modelo_id: int = Path(..., ge=1, le=MAX_ID),
+    activo: bool = Query(...),
+    session: Session = Depends(get_session),
 ):
     """
     Prende o apaga un modelo. **Prender uno apaga a los demás.**
@@ -729,12 +788,73 @@ class AltaMedio(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     nombre: str = Field(min_length=1, max_length=120)
-    url_base: str = Field(min_length=1)
-    feeds_rss: List[str] = Field(min_length=1)
+    url_base: str = Field(min_length=1, max_length=MAX_LARGO_URL)
+    # La cota va en el ELEMENTO y no solo en la lista: sin esto un solo feed
+    # de 500 KB pasaba y se persistía. Se comprueba antes que el validador de
+    # abajo, así que una URL absurda se rechaza sin llegar a deduplicarse.
+    feeds_rss: List[Annotated[str, StringConstraints(max_length=MAX_LARGO_URL)]] = (
+        Field(min_length=1)
+    )
 
-    idioma: str = Field(default="es", max_length=8)
-    pais: Optional[str] = Field(default=None, max_length=2)
-    logo_url: Optional[str] = None
+    # `pattern` y no solo `max_length`: ocho caracteres alcanzan para `<script>`,
+    # que es exactamente el largo del campo. Son códigos de idioma y de país, no
+    # texto libre, así que la forma se puede exigir entera — BCP-47 corto (`es`,
+    # `pt-BR`) e ISO 3166-1 alfa-2 (`AR`). Cerrarlos cuesta una línea y saca dos
+    # campos de la superficie que `logo_url` obligó a mirar.
+    idioma: str = Field(default="es", max_length=8, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$")
+    pais: Optional[str] = Field(default=None, max_length=2, pattern=r"^[A-Za-z]{2}$")
+
+    # Acotado acá y **validado en `alta_medio`** con `validar_url_de_logo`: el
+    # largo es una regla de forma que Pydantic sabe expresar, y el esquema es una
+    # regla del dominio que vive con las otras reglas de URL, en
+    # `services/medios.py`.
+    logo_url: Optional[str] = Field(default=None, max_length=MAX_LARGO_URL)
+
+    @field_validator("logo_url")
+    @classmethod
+    def _logo_en_blanco_es_sin_logo(cls, valor: Optional[str]) -> Optional[str]:
+        """
+        `""` y `"   "` se guardan como `None`.
+
+        Un formulario que deja el logo vacío manda la cadena vacía, no `null`.
+        Sin esto se guardaba `""`, que no es una URL y tampoco es "no hay logo":
+        es un tercer estado que después alguien tiene que interpretar. Y con la
+        validación de esquema puesta pasaría a ser un 422 por dejar un campo
+        opcional en blanco, que es peor todavía.
+        """
+        limpio = (valor or "").strip()
+        return limpio or None
+
+    @field_validator("feeds_rss")
+    @classmethod
+    def _feeds_distintos_y_acotados(cls, feeds: List[str]) -> List[str]:
+        """
+        Deduplica la lista y le pone techo. **En ese orden, y no al revés.**
+
+        Deduplicar primero es lo que hace que la cota signifique lo que dice:
+        veinte *feeds distintos*, que es lo que cuesta veinte pedidos. Si se
+        cortara primero por largo, una lista pegada con repetidas se rechazaría
+        entera cuando en realidad pedía tres feeds, y el operador tendría que
+        limpiarla a mano para descubrir que siempre estuvo dentro del límite.
+
+        La comparación es por string exacto después de `.strip()`. Dos URLs que
+        difieren en una barra final apuntan al mismo lado y acá cuentan como
+        distintas: normalizar de verdad (caja del host, orden de los parámetros)
+        es un problema con esquinas y el techo ya acota lo que se escapa. La
+        amplificación que el ataque midió —la misma URL repetida— la cierra este
+        `dict.fromkeys`.
+        """
+        distintos = list(dict.fromkeys(f.strip() for f in feeds))
+        if len(distintos) > MAX_FEEDS_POR_MEDIO:
+            raise ValueError(
+                f"Son {len(distintos)} feeds distintos y el máximo es "
+                f"{MAX_FEEDS_POR_MEDIO}. Cada feed es un pedido de red en cada "
+                f"ciclo de ingesta, y en el alta uno más que hay que esperar. "
+                f"Si el medio de verdad necesita más, entrá los principales y "
+                f"medí antes si los que sobran aportan notas nuevas: en La "
+                f"Nación y TN los feeds de sección resultaron ser archivo."
+            )
+        return distintos
 
     # **La manda el operador y arranca apagada.** El sondeo detecta si el feed
     # trae el cuerpo de las notas y lo informa, pero no prende esta bandera solo:
@@ -802,6 +922,11 @@ def alta_medio(datos: AltaMedio, session: Session = Depends(get_session)):
         return duplicado
 
     try:
+        # El logo primero, porque no toca la red: un `javascript:` se rechaza sin
+        # gastar los pedidos del sondeo. Comparte el `except` porque para quien
+        # llama es el mismo error —"lo que mandaste no sirve, y acá está por qué".
+        if datos.logo_url:
+            datos.logo_url = validar_url_de_logo(datos.logo_url)
         informe, avisos = sondear_medio(datos.url_base, datos.feeds_rss)
     except FeedInservible as error:
         # 422 y no 500: lo que mandaron no sirve, y el mensaje dice cuál de los
@@ -838,7 +963,9 @@ def alta_medio(datos: AltaMedio, session: Session = Depends(get_session)):
 
 @app.patch("/medios/{medio_id}")
 def habilitar_medio(
-    medio_id: int, activo: bool = Query(...), session: Session = Depends(get_session)
+    medio_id: int = Path(..., ge=1, le=MAX_ID),
+    activo: bool = Query(...),
+    session: Session = Depends(get_session),
 ):
     """
     Habilita o deshabilita un medio. **Deshabilitar no es borrar.**

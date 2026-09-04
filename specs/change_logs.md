@@ -2431,3 +2431,51 @@ Se agregó `api_sin_token` como fixture `autouse` en `conftest.py`, que la neutr
 #### Verificación
 
 642 tests (13 nuevos), `ruff` limpio, **6 mutaciones y 6 detectadas** sobre la comprobación nueva —incluidas la coincidencia por sufijo, la pérdida de normalización y el host que no resuelve—. Y el ataque original repetido contra el código parcheado, esta vez **con un token válido**, o sea en el peor caso: `https://proveedor-malicioso.test/v1` rechazado con 422 y la línea que falta.
+
+### Tanda 3 de la auditoría: lo que entra por la API tiene forma y tiene techo (04/09/2026)
+
+Cierra los **cuatro hallazgos menores** que quedaron anotados al final de la tanda 1. Ninguno filtraba datos, y por eso fueron a una tanda aparte; lo que tenían en común es que el motor aceptaba y **persistía** entradas que después alguien más iba a tener que interpretar o renderizar. Los cuatro se reprodujeron contra el motor antes de tocar nada y se volvieron a correr después.
+
+#### El más importante no es el que más ruido hacía
+
+`logo_url` aceptaba `javascript:alert(document.cookie)`, lo guardaba, y `GET /medios` lo devolvía intacto. No es un problema del motor —el motor nunca baja esa URL— y por eso el escáner de la tanda 1 lo dejó al final de la lista: **es XSS almacenado esperando a que exista un visor**, y el visor es justamente la aplicación de escritorio que se está evaluando. Un hallazgo que hoy no hace nada y que se dispara solo el día que se escriba la pantalla de fuentes es peor que uno ruidoso, porque para entonces nadie va a estar mirando este endpoint.
+
+Se cierra con `validar_url_de_logo`, que exige http o https. **Comprueba la forma y no la red, y la diferencia con `validar_url_de_feed` es deliberada:** el feed lo baja el motor, así que ahí `REDES_PROHIBIDAS` cierra un SSRF real; el logo lo pide el navegador de quien mire la interfaz, y a esa altura la dirección privada que alcanza es la suya. Resolver DNS acá sería pagar una consulta de red en cada alta para defender algo que no existe, y encima rompería un logo servido desde la intranet de quien despliega esto. Hay un test que fija las dos mitades: `http://192.168.1.10/logo.png` entra como logo y sigue rechazado como feed.
+
+Las tres comprobaciones que no tocan la red —esquema, dominio, credenciales embebidas— se extrajeron a `_validar_forma_de_url` y ahora las comparten los dos. La alternativa era una segunda copia de la lista de esquemas peligrosos, que es la clase de duplicado que se desincroniza el día que haya que agregar uno.
+
+#### La amplificación: deduplicar primero, y después medir
+
+`feeds_rss` no deduplicaba ni tenía techo. Medido: 500 copias de la misma URL en un solo POST daban **501 pedidos reales** al mismo servidor —lineal, uno por copia— con nuestro User-Agent puesto, y la fila quedaba con las 500 repetidas adentro.
+
+El orden de las dos operaciones fue la decisión, y va al revés de lo obvio: **primero se deduplica y después se mide el techo.** Una lista pegada con repetidas pide pocos feeds distintos aunque sea larga; cortarla primero por largo la rechazaría entera y obligaría al operador a limpiarla a mano para descubrir que siempre estuvo dentro del límite. Así, las 500 copias entran como un feed y cuestan un pedido.
+
+El techo quedó en **20 feeds distintos**, y lo fija el peor caso de latencia y no el gusto: el sondeo consulta cada feed con 10 s de timeout, así que veinte que no respondan ocupan un worker 200 s — acotado y reportable, que es lo que antes no era. Contra la realidad medida sobra: los 7 medios del roster usan **un** feed cada uno y el experimento más grande que se hizo llegó a 8. Se eligió el lado generoso a propósito, porque desde la tanda 1 `POST /medios` pide token: **el atacante anónimo ya no existe**, y lo que esta cota frena hoy es sobre todo el error de tipeo que destapó el ataque.
+
+Se deduplica **en dos lugares, y no es redundancia**: `AltaMedio` lo hace para que la fila quede limpia, y `sondear` lo hace de nuevo porque cubre el otro camino — `PATCH` sondea la lista **guardada**, que en una fila anterior a esta versión, o cargada por `scripts/seed_medios.py` (que no deduplica), puede traer repetidas. Sin la segunda, rehabilitar esa fila reabría la amplificación entera. Hay un test por cada camino.
+
+#### Las cotas de largo, y dónde se traza la línea
+
+Se persistieron 500 KB en `url_base` y otros 500 KB en `logo_url`. El techo quedó en **2048 caracteres** para toda URL que entre por la API: es el límite histórico de Internet Explorer, y por eso es el número bajo el que se quedó todo lo que quiere ser alcanzable. La URL más larga del roster tiene 62 caracteres, así que entra 33 veces.
+
+Va en el **elemento** de `feeds_rss` y no solo en la lista, porque sin eso un único feed de 500 KB seguía pasando. Y se le puso la misma cota a `base_url` de `AltaModelo`, que tenía el mismo agujero: a dónde puede apuntar ya lo decide `MODELO_HOSTS_PERMITIDOS` desde la tanda 2, pero su largo no lo decidía nadie.
+
+`idioma` y `pais` pasaron de `max_length` a `pattern`. Ocho caracteres alcanzan para `<script>` —que es exactamente el largo de `idioma`—, y son códigos y no texto libre, así que la forma se puede exigir entera: BCP-47 corto y ISO 3166-1 alfa-2.
+
+**`nombre` queda como texto libre, y es la línea.** Se acotan las URLs y los códigos porque son valores con forma, y en el caso del logo porque el esquema es la parte ejecutable. `nombre` es texto para mostrar: escaparlo al renderizar es trabajo de quien lo renderiza, y filtrarlo acá rompería un medio que se llame `Página/12` o `AM 750 & Co.`. Hay un test que lo fija, para que la próxima pasada de seguridad no lo "arregle".
+
+#### Los dos 500 por una entrada mala
+
+`PATCH /medios/{id}` y `PATCH /modelos/{id}` con un id más grande que la columna reventaban con `OverflowError` — medido en SQLite, que es donde corre la suite. No filtraba nada; contradecía la regla de que una entrada mala es 4xx con mensaje, y esa regla es lo que hace que un 500 signifique "se rompió algo nuestro".
+
+Ambos `id` son `integer` de 32 bits, consultado al esquema vivo de Postgres y no supuesto (`information_schema.columns` sobre `medio` y `modelo_ia`), así que la cota es `2**31 - 1`. Y `ge=1` del otro lado, porque las secuencias arrancan en 1 y un id negativo es un error de quien llama, no un 404 que sugiere que alguna vez existió. Un id válido que no está sigue siendo 404: hay un test que separa "imposible" de "no está".
+
+`POST /vectorize?limite=-1` devolvía `{"pendientes": -1}` con un 200. No vectorizaba nada, pero **informaba un número imposible como si lo hubiera medido**, que es lo que lo vuelve un problema y no una curiosidad. `/search` y `/clusters` ya acotaban su `limite` desde la Fase 4; a este endpoint se le había pasado. Queda `ge=1` sin techo, porque el backlog real ya lo acota y pedir de más no cuesta nada.
+
+#### Verificación
+
+687 tests (45 nuevos), `ruff` limpio, `alembic check` contra Postgres sin operaciones pendientes (la tanda no toca el esquema).
+
+**18 mutaciones y 18 detectadas.** Se rompió a propósito cada protección nueva, incluidas las tres que no son evidentes: invertir el orden de dedup y techo, sacarle la cota al elemento de la lista dejándosela a la lista, y hacer que el logo resuelva DNS como el feed. Las dos primeras las cazó un test distinto del que estaba escrito para ellas —`-x` corta en el primer fallo—, así que se volvieron a correr dirigidas contra su propio test para confirmar que no era casualidad.
+
+Y **los cuatro ataques repetidos contra el motor vivo**, sobre Postgres real, por HTTP de verdad y con token válido (el peor caso: atacante autenticado). Las 500 copias del feed de Perfil ahora se guardan como una y cuestan un pedido; 21 feeds distintos dan 422 nombrando el límite; `javascript:` y `data:text/html` en el logo dan 422 diciendo que el campo es el logo; los 500 KB dan `string_too_long`; y los seis `id` imposibles contra los dos `PATCH`, más `?limite=-1` y `?limite=0`, dan 422 en vez de 500. En la misma corrida se comprobó que lo legítimo sigue pasando: alta real de Perfil (50 items, 1 aviso), y el ciclo de deshabilitar y rehabilitar. Las filas de prueba se borraron después; la base quedó con los 8 medios que ya tenía.

@@ -1348,6 +1348,16 @@ class TestEndpoints:
     def test_patch_a_un_id_inexistente(self, client, session):
         assert client.patch("/modelos/9999?activo=true").status_code == 404
 
+    @pytest.mark.parametrize("id_malo", ["99999999999999999999999", "2147483648", "0", "-1"])
+    def test_un_id_imposible_es_422_y_no_500(self, client, id_malo):
+        """
+        `ModeloIA.id` es `INTEGER` en Postgres (32 bits): un id más grande no es
+        "no encontrado", es un valor que la columna no puede representar. Antes
+        de la cota reventaba con `OverflowError` en SQLite y `numeric out of
+        range` en Postgres — un 500 por una entrada mala.
+        """
+        assert client.patch(f"/modelos/{id_malo}?activo=true").status_code == 422
+
 
 class TestUnSoloModeloActivo:
     """

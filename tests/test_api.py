@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.config import settings
@@ -86,6 +87,23 @@ class TestVectorizeEndpoint:
 
         assert response.status_code == 200
         assert mock.call_args.kwargs["limite"] == 5
+
+    @pytest.mark.parametrize("limite", [-1, 0, -999999])
+    def test_un_limite_imposible_es_422_y_no_un_dato_inventado(
+        self, client: TestClient, limite
+    ):
+        """
+        Antes de la cota, `?limite=-1` devolvía `{"pendientes": -1}` con un 200:
+        no vectorizaba nada —el `while restante > 0` no entraba— pero informaba
+        un número imposible como si lo hubiera medido. `/search` y `/clusters`
+        ya acotaban su `limite`; a este endpoint se le había pasado.
+        """
+        with patch("src.main.vectorizar_pendientes") as mock:
+            response = client.post(f"/vectorize?limite={limite}")
+
+        assert response.status_code == 422
+        # Y ni siquiera se llamó al servicio.
+        mock.assert_not_called()
 
 
 class TestSynthesizeEndpoint:

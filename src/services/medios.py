@@ -174,38 +174,83 @@ def _esta_prohibida(direccion) -> bool:
     return not direccion.is_global
 
 
+def _validar_forma_de_url(url: str, que_es: str):
+    """
+    Las tres comprobaciones que NO tocan la red: esquema, dominio y credenciales.
+
+    Devuelve `(limpia, partes)`. Se separó de `validar_url_de_feed` cuando entró
+    `validar_url_de_logo`, que necesita exactamente estas tres y ninguna más —
+    y la alternativa era una segunda copia de la lista de esquemas peligrosos,
+    justo la clase de duplicado que se desincroniza el día que haya que agregar
+    uno.
+
+    `que_es` es cómo se nombra el campo en el mensaje de error ("El feed", "El
+    logo"), porque un error que no dice qué campo revisar obliga a adivinar.
+    """
+    limpia = (url or "").strip()
+    if not limpia:
+        raise FeedInservible(f"{que_es} no puede estar vacío.")
+
+    try:
+        partes = urlparse(limpia)
+    except ValueError as error:
+        raise FeedInservible(f"URL malformada: {limpia[:120]!r} ({error})") from error
+
+    if partes.scheme not in ("http", "https"):
+        # Sin esto entran `file://`, `gopher://` y demás, que son la vía clásica
+        # para convertir un SSRF en lectura de archivos de la máquina — y, en el
+        # logo, `javascript:`, que no es SSRF sino XSS almacenado esperando a
+        # que una interfaz lo ponga en un `href`.
+        raise FeedInservible(
+            f"{que_es} tiene que ser http o https, y vino "
+            f"{partes.scheme or '(nada)'!r}: {limpia[:120]!r}"
+        )
+    if not partes.hostname:
+        raise FeedInservible(f"{que_es} no tiene dominio: {limpia[:120]!r}")
+    if partes.username or partes.password:
+        raise FeedInservible(
+            f"{que_es} no puede llevar credenciales embebidas "
+            f"(`https://usuario:clave@host`)."
+        )
+    return limpia, partes
+
+
+def validar_url_de_logo(url: str) -> str:
+    """
+    La URL del logo, o levanta. **Comprueba la forma y no la red, a propósito.**
+
+    Era la única URL del medio que no pasaba por ningún validador: `url_base` y
+    los feeds ya iban a `validar_url_de_feed` dentro del sondeo, y el logo no
+    iba a ninguna parte porque el motor nunca lo pide. Justamente por eso hacía
+    falta — es la que una interfaz va a poner adentro de un atributo de HTML.
+    `javascript:alert(...)` guardado en `logo_url` y devuelto tal cual por
+    `GET /medios` es XSS almacenado, y el que lo dispara es el visor, no el
+    motor. Verificado antes del arreglo: se guardaba y se devolvía intacto.
+
+    **No se resuelve el host ni se comprueba `REDES_PROHIBIDAS`**, y la
+    diferencia con `validar_url_de_feed` es deliberada: el motor nunca baja esta
+    URL —`models/medio.py` la define como "la URL, no los bytes" y ningún paso
+    del pipeline la mira—, así que no hay SSRF que cerrar. Quien la va a pedir
+    es el navegador de quien mire la interfaz, y a esa altura la dirección
+    privada que alcanza es la SUYA, no la del motor. Resolver DNS acá sería
+    pagar una consulta de red por cada alta para defender algo que no existe, y
+    encima rompería un logo servido desde la intranet de quien despliega esto.
+    """
+    limpia, _ = _validar_forma_de_url(url, "El logo del medio")
+    return limpia
+
+
 def validar_url_de_feed(url: str) -> str:
     """
     La URL del feed normalizada, o levanta explicando qué tiene de malo.
 
     Adaptación de `proveedores.base.validar_base_url` — **revisada, no copiada**,
     porque el destino es distinto: allá es un endpoint de API con forma conocida
-    y acá es cualquier sitio web. Tres de las cuatro reglas se conservan; la que
-    cambia es el juego de redes prohibidas, y el motivo está en `REDES_PROHIBIDAS`.
+    y acá es cualquier sitio web. Tres de las cuatro reglas se conservan —hoy en
+    `_validar_forma_de_url`, compartidas con el logo—; la que cambia es el juego
+    de redes prohibidas, y el motivo está en `REDES_PROHIBIDAS`.
     """
-    limpia = (url or "").strip()
-    if not limpia:
-        raise FeedInservible("La URL del feed no puede estar vacía.")
-
-    try:
-        partes = urlparse(limpia)
-    except ValueError as error:
-        raise FeedInservible(f"URL malformada: {limpia!r} ({error})") from error
-
-    if partes.scheme not in ("http", "https"):
-        # Sin esto entran `file://`, `gopher://` y demás, que son la vía clásica
-        # para convertir un SSRF en lectura de archivos de la máquina.
-        raise FeedInservible(
-            f"El feed tiene que ser http o https, y vino "
-            f"{partes.scheme or '(nada)'!r}: {limpia!r}"
-        )
-    if not partes.hostname:
-        raise FeedInservible(f"La URL del feed no tiene dominio: {limpia!r}")
-    if partes.username or partes.password:
-        raise FeedInservible(
-            "La URL del feed no puede llevar credenciales embebidas "
-            "(`https://usuario:clave@host`)."
-        )
+    limpia, partes = _validar_forma_de_url(url, "La URL del feed")
 
     for direccion in _resolver(partes.hostname):
         for efectiva in _direcciones_efectivas(direccion):
@@ -454,6 +499,19 @@ def sondear(url_base: str, feeds: Sequence[str]) -> Tuple[dict, List[str]]:
     """
     if not feeds:
         raise FeedInservible("Hace falta al menos un feed RSS.")
+
+    # **Se sondea cada feed una sola vez.** Sin esto la lista se recorría tal
+    # cual y una repetida costaba un pedido cada vez: medido antes del arreglo,
+    # 500 copias de la misma URL en un solo POST daban 501 pedidos reales al
+    # mismo servidor, con nuestro User-Agent puesto. `AltaMedio` ya deduplica lo
+    # que entra por la API, así que esto cubre el otro camino: `PATCH` sondea la
+    # lista **guardada**, que en una fila anterior a esta versión —o cargada por
+    # `scripts/seed_medios.py`, que no deduplica— puede traer repetidas.
+    #
+    # `dict.fromkeys` y no `set` porque el orden importa: `informes[0]` es el
+    # feed del que sale el artículo de ejemplo para probar el robots.txt, y con
+    # un set sería uno cualquiera en cada corrida.
+    feeds = list(dict.fromkeys(f.strip() for f in feeds))
 
     # **`url_base` pasa por el mismo validador que los feeds, y no es simetría
     # decorativa**: `_sondear_robots` le pide `{url_base}/robots.txt`, así que un

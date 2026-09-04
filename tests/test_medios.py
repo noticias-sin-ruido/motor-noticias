@@ -14,7 +14,13 @@ from sqlmodel import Session, select
 
 from src.models import Medio
 from src.services import medios
-from src.services.medios import FeedInservible, sondear, validar_url_de_feed
+from src.main import MAX_FEEDS_POR_MEDIO, MAX_LARGO_URL
+from src.services.medios import (
+    FeedInservible,
+    sondear,
+    validar_url_de_feed,
+    validar_url_de_logo,
+)
 
 
 # --------------------------------------------------------------------------
@@ -860,3 +866,307 @@ class TestIPv4EscondidaEnIPv6:
             "http://8.8.8.8/feed",
         ]:
             assert validar_url_de_feed(url) == url
+
+
+# --------------------------------------------------------------------------
+# Las cotas de entrada (tanda 3 de la auditoría)
+# --------------------------------------------------------------------------
+#
+# Los cuatro hallazgos que quedaron abiertos al cerrar el punto 3. Ninguno
+# filtraba datos, y por eso fueron a una tanda aparte; lo que tenían en común es
+# que el motor aceptaba y **persistía** entradas que después alguien más iba a
+# tener que interpretar o renderizar.
+
+
+class TestFeedsDistintosYAcotados:
+    """
+    La amplificación: `feeds_rss` no deduplicaba ni tenía techo.
+
+    Medido antes del arreglo con el motor vivo: 500 copias de la misma URL en un
+    solo POST daban **501 pedidos reales** al mismo servidor —lineal, uno por
+    copia, más el robots— con nuestro User-Agent puesto, y la fila quedaba con
+    las 500 repetidas adentro.
+    """
+
+    def test_la_misma_url_repetida_se_sondea_una_sola_vez(self, client, red):
+        get, _ = red
+
+        respuesta = client.post(
+            "/medios",
+            json={**ALTA, "feeds_rss": ["https://medio.test/feed"] * 500},
+        )
+
+        assert respuesta.status_code == 200
+        # Un solo pedido, no 500. El del robots.txt no pasa por `httpx.get`:
+        # `leer_robots` está mockeado aparte en la fixture `red`.
+        assert get.call_count == 1
+        assert respuesta.json()["medio"]["feeds_rss"] == ["https://medio.test/feed"]
+
+    def test_deduplica_antes_de_medir_el_techo(self, client, red):
+        """
+        **El orden es la decisión.** Una lista pegada con repetidas pide pocos
+        feeds distintos aunque sea larga; cortarla primero por largo la
+        rechazaría entera y obligaría a limpiarla a mano para descubrir que
+        siempre estuvo dentro del límite.
+        """
+        muchas_copias = ["https://medio.test/feed", "https://medio.test/otro"] * 60
+
+        respuesta = client.post("/medios", json={**ALTA, "feeds_rss": muchas_copias})
+
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["feeds_rss"] == [
+            "https://medio.test/feed",
+            "https://medio.test/otro",
+        ]
+
+    def test_el_techo_cuenta_feeds_distintos(self, client, red):
+        distintos = [f"https://medio.test/feed-{n}" for n in range(MAX_FEEDS_POR_MEDIO + 1)]
+
+        respuesta = client.post("/medios", json={**ALTA, "feeds_rss": distintos})
+
+        assert respuesta.status_code == 422
+        assert "feeds distintos" in respuesta.text
+
+    def test_justo_en_el_techo_entra(self, client, red):
+        distintos = [f"https://medio.test/feed-{n}" for n in range(MAX_FEEDS_POR_MEDIO)]
+
+        respuesta = client.post("/medios", json={**ALTA, "feeds_rss": distintos})
+
+        assert respuesta.status_code == 200
+        assert len(respuesta.json()["medio"]["feeds_rss"]) == MAX_FEEDS_POR_MEDIO
+
+    def test_el_sondeo_tambien_deduplica_por_su_cuenta(self, red):
+        """
+        La segunda capa, y **cubre el otro camino**: `PATCH` sondea la lista
+        guardada, no la que entra por la API, y una fila anterior a esta versión
+        —o cargada por `seed_medios.py`, que no deduplica— puede traer repetidas.
+        Sin esto, rehabilitar esa fila reabría la amplificación entera.
+        """
+        get, _ = red
+
+        informe, _avisos = sondear(
+            "https://medio.test", ["https://medio.test/feed"] * 50
+        )
+
+        assert get.call_count == 1
+        assert len(informe["feeds"]) == 1
+
+    def test_rehabilitar_una_fila_con_repetidas_no_amplifica(
+        self, client, session: Session, red
+    ):
+        """El camino de arriba, entero, contra la base."""
+        get, _ = red
+        fila = Medio(
+            nombre="Legado",
+            url_base="https://medio.test",
+            feeds_rss=["https://medio.test/feed"] * 40,
+            activo=False,
+        )
+        session.add(fila)
+        session.commit()
+        session.refresh(fila)
+
+        respuesta = client.patch(f"/medios/{fila.id}?activo=true")
+
+        assert respuesta.status_code == 200
+        assert get.call_count == 1
+
+
+class TestCotasDeLargo:
+    """
+    Se persistieron 500 KB en `url_base` y otros 500 KB en `logo_url`, y
+    `GET /medios` los devolvía tal cual.
+    """
+
+    # El valor gigante se arma ADENTRO del test y no en el `parametrize`:
+    # pytest usa los parámetros para el id del test y lo exporta en
+    # `PYTEST_CURRENT_TEST`, y Windows corta las variables de entorno en 32767
+    # caracteres. Con 500 KB adentro la suite revienta en el teardown.
+    @pytest.mark.parametrize("campo", ["url_base", "logo_url"])
+    def test_una_url_enorme_no_entra(self, client, red, campo):
+        respuesta = client.post(
+            "/medios", json={**ALTA, campo: "https://medio.test/" + "A" * 500_000}
+        )
+
+        assert respuesta.status_code == 422
+
+    def test_un_feed_enorme_tampoco(self, client, red):
+        """
+        La cota va en el **elemento** de la lista y no solo en la lista: sin eso
+        un único feed de 500 KB pasaba.
+        """
+        respuesta = client.post(
+            "/medios",
+            json={**ALTA, "feeds_rss": ["https://medio.test/feed?q=" + "A" * 500_000]},
+        )
+
+        assert respuesta.status_code == 422
+
+    def test_las_urls_del_roster_entran_con_lugar_de_sobra(self, client, red):
+        """
+        La cota no puede llevarse puesto un feed que existe. La más larga del
+        roster medido es la de Ciudad Magazine, con 62 caracteres: entra 33
+        veces en el techo.
+        """
+        respuesta = client.post(
+            "/medios",
+            json={
+                **ALTA,
+                "url_base": "https://www.ciudad.com.ar",
+                "feeds_rss": [
+                    "https://www.ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml"
+                ],
+            },
+        )
+
+        assert respuesta.status_code == 200
+        assert max(len(u) for u in respuesta.json()["medio"]["feeds_rss"]) < MAX_LARGO_URL
+
+
+class TestLogoUrlValidado:
+    """
+    `logo_url` es el único campo del medio que una interfaz va a poner adentro
+    de un atributo de HTML. Antes del arreglo se guardaba
+    `javascript:alert(document.cookie)` y `GET /medios` lo devolvía intacto: XSS
+    almacenado esperando a la aplicación de escritorio.
+    """
+
+    @pytest.mark.parametrize(
+        "logo",
+        [
+            "javascript:alert(document.cookie)",
+            "JavaScript:alert(1)",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+            "https://usuario:clave@medio.test/logo.png",
+            "https://",
+        ],
+    )
+    def test_un_logo_que_no_es_http_no_entra(self, client, session, red, logo):
+        respuesta = client.post("/medios", json={**ALTA, "logo_url": logo})
+
+        assert respuesta.status_code == 422
+        # Y no quedó nada guardado a medias.
+        assert session.exec(select(Medio)).all() == []
+
+    def test_el_error_dice_que_es_el_logo(self, client, red):
+        """Un 422 que no dice qué campo revisar obliga a adivinar."""
+        respuesta = client.post(
+            "/medios", json={**ALTA, "logo_url": "javascript:alert(1)"}
+        )
+
+        assert "logo" in respuesta.json()["detalle"].lower()
+
+    def test_un_logo_normal_sigue_entrando(self, client, red):
+        respuesta = client.post(
+            "/medios", json={**ALTA, "logo_url": "https://medio.test/logo.png"}
+        )
+
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["logo_url"] == "https://medio.test/logo.png"
+
+    def test_en_blanco_es_sin_logo_y_no_un_error(self, client, red):
+        """
+        Un formulario que deja el campo vacío manda `""`, no `null`. Guardar `""`
+        sería un tercer estado, y rechazarlo sería un 422 por dejar un campo
+        opcional en blanco.
+        """
+        for vacio in ("", "   "):
+            respuesta = client.post(
+                "/medios",
+                json={**ALTA, "nombre": f"Medio {vacio!r}", "logo_url": vacio},
+            )
+
+            assert respuesta.status_code == 200
+            assert respuesta.json()["medio"]["logo_url"] is None
+
+    def test_no_resuelve_el_host_del_logo(self, red):
+        """
+        **La diferencia deliberada con el feed.** El motor nunca baja esta URL:
+        quien la pide es el navegador de quien mire la interfaz. Un logo servido
+        desde la intranet de quien despliega esto tiene que entrar, y resolver
+        DNS acá sería pagar una consulta de red por alta para defender un SSRF
+        que no existe.
+        """
+        assert validar_url_de_logo("http://192.168.1.10/logo.png")
+        assert validar_url_de_logo("http://localhost:8080/logo.png")
+
+        # Mientras que el feed, que el motor SÍ baja, las sigue rechazando.
+        with pytest.raises(FeedInservible, match="privada o local"):
+            validar_url_de_feed("http://192.168.1.10/feed")
+
+    def test_el_logo_se_valida_antes_de_gastar_pedidos(self, client, red):
+        """No tiene sentido sondear tres feeds para después rechazar por el logo."""
+        get, _ = red
+
+        client.post("/medios", json={**ALTA, "logo_url": "javascript:alert(1)"})
+
+        assert get.call_count == 0
+
+
+class TestIdiomaYPaisConForma:
+    """
+    Ocho caracteres alcanzan para `<script>`, que es exactamente el largo de
+    `idioma`. Son códigos, no texto libre, así que la forma se exige entera.
+    """
+
+    @pytest.mark.parametrize(
+        "campo, valor",
+        [
+            ("idioma", "<script>"),
+            ("idioma", "../../et"),
+            ("idioma", "e"),
+            ("idioma", "es_AR_x"),
+            ("pais", "<>"),
+            ("pais", "A1"),
+        ],
+    )
+    def test_lo_que_no_es_un_codigo_no_entra(self, client, red, campo, valor):
+        respuesta = client.post("/medios", json={**ALTA, campo: valor})
+
+        assert respuesta.status_code == 422
+
+    @pytest.mark.parametrize(
+        "idioma, pais", [("es", "AR"), ("pt", "BR"), ("en", "US"), ("pt-BR", None)]
+    )
+    def test_los_codigos_de_verdad_entran(self, client, red, idioma, pais):
+        respuesta = client.post(
+            "/medios", json={**ALTA, "idioma": idioma, "pais": pais}
+        )
+
+        assert respuesta.status_code == 200
+
+    def test_el_nombre_sigue_siendo_texto_libre(self, client, red):
+        """
+        **Dónde se traza la línea.** `logo_url`, `idioma` y `pais` se acotan
+        porque son URLs y códigos: valores con forma, y en el caso del logo el
+        esquema es la parte ejecutable. `nombre` es texto para mostrar, y
+        escaparlo al renderizar es trabajo del que lo renderiza — filtrarlo acá
+        sería romper un medio que se llame `Página/12` o `AM 750 & Co.`
+        """
+        respuesta = client.post("/medios", json={**ALTA, "nombre": "Página/12 & Co."})
+
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["nombre"] == "Página/12 & Co."
+
+
+class TestIdFueraDeRango:
+    """
+    `Medio.id` es `INTEGER` en Postgres —32 bits—, así que un id más grande no
+    es "no encontrado": es un valor que la columna no puede representar. Antes
+    del arreglo reventaba con `OverflowError` en SQLite y `numeric out of range`
+    en Postgres, o sea un 500 por una entrada mala.
+    """
+
+    @pytest.mark.parametrize("id_malo", ["99999999999999999999999", "2147483648", "-1", "0"])
+    def test_un_id_imposible_es_422_y_no_500(self, client, id_malo):
+        respuesta = client.patch(f"/medios/{id_malo}?activo=false")
+
+        assert respuesta.status_code == 422
+
+    def test_un_id_valido_que_no_existe_sigue_siendo_404(self, client):
+        """La cota no puede tapar la diferencia entre 'imposible' y 'no está'."""
+        respuesta = client.patch("/medios/12345?activo=false")
+
+        assert respuesta.status_code == 404
