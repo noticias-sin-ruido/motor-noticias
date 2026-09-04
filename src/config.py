@@ -43,6 +43,40 @@ class Settings(BaseSettings):
     # distinta en contextos distintos y cómo lo exponen es decisión suya.
     API_TOKEN: Optional[str] = None
 
+    # A qué hosts públicos se les puede entregar la credencial de IA.
+    #
+    # **Arranca vacía, y eso es la defensa.** `POST /modelos` le manda
+    # `MODELO_API_KEY` al `base_url` que le indiquen para sondearlo: sin esta
+    # lista, un `base_url` mal tipeado —o puesto a propósito— convierte al motor
+    # en el mensajero que le entrega tu credencial a un tercero. Verificado el
+    # 03/09/2026 con un captor local: la key sale como Bearer antes de que el
+    # alta sepa si el proveedor sirve.
+    #
+    # **La red interna NO necesita estar acá.** Un modelo en `localhost:11434` o
+    # un vLLM en la red de al lado quedan permitidos sin declararlos: es el caso
+    # que el punto 2 del backlog existe para habilitar, y el único donde los
+    # cuerpos de los artículos no salen de la máquina. La regla se invierte
+    # respecto de `services/medios.py` —allá lo interno es sospechoso y acá es lo
+    # confiable— porque lo que se protege es distinto: allá, que no nos usen de
+    # escáner; acá, que la credencial no se vaya lejos.
+    #
+    # Separadas por coma, sin esquema y sin puerto:
+    #     MODELO_HOSTS_PERMITIDOS=api.groq.com,api.openai.com
+    #
+    # La comparación es **exacta** y no por sufijo: declarar `openai.com` no
+    # habilita `evil.openai.com.atacante.net`, y un homógrafo con cirílico no
+    # coincide con el host latino. Cada endpoint regional se declara aparte.
+    MODELO_HOSTS_PERMITIDOS: str = ""
+
+    @property
+    def hosts_de_modelo_permitidos(self) -> frozenset:
+        """`MODELO_HOSTS_PERMITIDOS` normalizado a un conjunto comparable."""
+        return frozenset(
+            h.strip().lower().rstrip(".")
+            for h in self.MODELO_HOSTS_PERMITIDOS.split(",")
+            if h.strip()
+        )
+
     # Cada cuánto corre el pipeline completo (ver specs/change_logs.md, Fase 2 --
     # "Scheduler", para el razonamiento del intervalo uniforme).
     #

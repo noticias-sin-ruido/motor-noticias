@@ -72,6 +72,30 @@ def key(monkeypatch):
     monkeypatch.setenv(VARIABLE_UNICA, "clave-de-prueba")
 
 
+@pytest.fixture(autouse=True)
+def hosts_declarados(monkeypatch):
+    """
+    Declara los hosts ficticios de este archivo en `MODELO_HOSTS_PERMITIDOS`.
+
+    Desde la tanda 2 de la auditoría, un `base_url` público tiene que estar
+    declarado o el motor se niega a mandarle la credencial. Todos los hosts de
+    prueba de acá (`proveedor.test` y compañía) son públicos a los ojos del
+    validador —no resuelven, y eso cuenta como público a propósito—, así que sin
+    esta fixture fallarían 92 tests por una razón que no es la que están
+    probando.
+
+    Es `autouse` y no una fixture opcional por el mismo criterio que
+    `sin_el_env_de_la_maquina`: el test que se olvide de pedirla rompe por un
+    motivo equivocado. Los que prueban la protección en sí la pisan con su
+    propio `monkeypatch`.
+    """
+    monkeypatch.setattr(
+        settings,
+        "MODELO_HOSTS_PERMITIDOS",
+        "proveedor.test,x.test,proxy.test,mio.test,interno.test",
+    )
+
+
 def _modelo(**kwargs) -> ModeloIA:
     datos = {
         "nombre": "prueba",
@@ -253,6 +277,89 @@ class TestValidacionDeBaseUrl:
         escenario donde los cuerpos de los artículos no salen de la máquina.
         """
         assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+
+class TestHostsDeclarados:
+    """
+    La credencial de IA no sale hacia un host que el operador no declaró.
+
+    Cierra SR-01 de la auditoría del 03/09/2026, que estaba **verificado con un
+    captor**: `POST /modelos` le mandaba `MODELO_API_KEY` como Bearer al
+    `base_url` que le indicaran —dos veces, una por cada mecanismo de estructura
+    que prueba el sondeo— antes de saber siquiera si el proveedor servía.
+    """
+
+    def test_un_host_publico_sin_declarar_no_recibe_la_credencial(self, key, monkeypatch):
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "")
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url="https://proveedor.test/v1"))
+
+    def test_el_error_dice_la_linea_exacta_que_falta(self, key, monkeypatch):
+        """
+        Mismo criterio que el alta de medios: el motor informa y el operador
+        decide. Un "no permitido" a secas lo dejaría adivinando qué variable es.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "ya.declarado.test")
+        with pytest.raises(ErrorDeProveedor) as error:
+            OpenAICompatible(_modelo(base_url="https://nuevo.test/v1"))
+
+        mensaje = str(error.value)
+        assert "MODELO_HOSTS_PERMITIDOS=ya.declarado.test,nuevo.test" in mensaje
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://192.168.1.50:8000/v1",
+            "http://10.0.0.5/v1",
+        ],
+    )
+    def test_la_red_interna_no_hace_falta_declararla(self, key, monkeypatch, url):
+        """
+        **La regla queda invertida respecto de `services/medios.py`**, y es
+        deliberado: allá lo interno es lo sospechoso porque el riesgo es que nos
+        usen de escáner; acá lo interno es lo confiable porque el riesgo es que
+        la credencial se vaya lejos. Un modelo local es además el único caso
+        donde los cuerpos de los artículos no salen de la máquina.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "")
+        assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+    @pytest.mark.parametrize(
+        "url, motivo",
+        [
+            ("https://proveedor.test.atacante.net/v1", "un sufijo no alcanza"),
+            ("https://evil.proveedor.test/v1", "un subdominio tampoco"),
+            ("https://аpi.proveedor.test/v1", "homógrafo con cirílico"),
+        ],
+    )
+    def test_la_comparacion_es_exacta_y_no_por_sufijo(self, key, url, motivo):
+        """Declarar un host no habilita a todo el que lo contenga en su nombre."""
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url=url))
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://PROVEEDOR.test/v1",
+            "https://proveedor.test./v1",
+            "https://proveedor.test:8443/v1",
+        ],
+    )
+    def test_normaliza_caja_punto_final_y_puerto(self, key, url):
+        """DNS no distingue mayúsculas, y el puerto no cambia a quién le hablás."""
+        assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+    def test_link_local_sigue_bloqueado_aunque_lo_declaren(self, key, monkeypatch):
+        """
+        La lista habilita destinos públicos, **no levanta las otras defensas**.
+        Los metadata de las nubes reparten credenciales y no tienen ningún uso
+        legítimo acá, así que declararlos no puede alcanzar.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "169.254.169.254")
+        with pytest.raises(ErrorDeProveedor, match="link-local"):
+            OpenAICompatible(_modelo(base_url="http://169.254.169.254/latest"))
 
 
 class TestAdaptadorCompatible:

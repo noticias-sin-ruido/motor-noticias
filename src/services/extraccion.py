@@ -68,6 +68,48 @@ def normalizar(texto: str) -> str:
     return _ESPACIOS.sub(" ", texto).strip()
 
 
+def leer_robots(base: str) -> urllib.robotparser.RobotFileParser:
+    """
+    Baja y parsea el `robots.txt` del dominio. **Levanta si no se pudo.**
+
+    Es la parte pura de `_parser_robots`: sin caché y sin alertas. Existe
+    separada porque el sondeo del alta de medios (`services/medios.py`) necesita
+    leer un `robots.txt` de una URL que le acaban de mandar, y hacerlo a través
+    de `_parser_robots` tendría dos efectos que ahí no corresponden: **le
+    mandaría un mail al operador cada vez que alguien sondea un dominio que no
+    responde**, y dejaría el resultado en una caché de proceso que después usa
+    la ingesta real.
+
+    Se baja con httpx y NUESTRO User-Agent por el motivo que documenta
+    `_parser_robots`: `urllib` manda `Python-urllib/3.x` y recibe 403, que por
+    spec se lee como "prohibido todo".
+
+    **Los redirects se siguen validando cada salto**, no con
+    `follow_redirects=True`. Ese atajo era un SSRF: el alta de medios llama acá
+    con un `url_base` que le acaban de mandar, así que un host que responda
+    `302 -> http://169.254.169.254/` se saltaba el filtro entero.
+
+    Y tampoco alcanzaba con `follow_redirects=False`, que era la salida obvia:
+    **el `robots.txt` de Revista Gente redirige** (`gente.com.ar` ->
+    `revistagente.com`), así que cortar los redirects de plano habría dejado a
+    ese medio sin poder leer su `robots.txt`, o sea sin extracción y con un mail
+    de alerta por ciclo. De los 8 medidos es el único, pero alcanza.
+
+    El import es local a propósito, para no armar un ciclo: `medios` importa
+    esta función. Mismo recurso que usa `search.listar_clusters`.
+    """
+    from .medios import bajar_siguiendo_redirects
+
+    texto = bajar_siguiendo_redirects(
+        f"{base}/robots.txt",
+        agente=USER_AGENT,
+        timeout=settings.EXTRACCION_TIMEOUT,
+    )
+    parser = urllib.robotparser.RobotFileParser()
+    parser.parse(texto.splitlines())
+    return parser
+
+
 def _parser_robots(base: str) -> Optional[urllib.robotparser.RobotFileParser]:
     """
     `robots.txt` del dominio, cacheado. `None` si no se pudo leer.
@@ -83,16 +125,9 @@ def _parser_robots(base: str) -> Optional[urllib.robotparser.RobotFileParser]:
     if base in _robots:
         return _robots[base]
 
-    parser: Optional[urllib.robotparser.RobotFileParser] = urllib.robotparser.RobotFileParser()
+    parser: Optional[urllib.robotparser.RobotFileParser]
     try:
-        respuesta = httpx.get(
-            f"{base}/robots.txt",
-            timeout=settings.EXTRACCION_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": USER_AGENT},
-        )
-        respuesta.raise_for_status()
-        parser.parse(respuesta.text.splitlines())
+        parser = leer_robots(base)
     except Exception as error:
         # Falla cerrado y RUIDOSO. Cerrado porque no sabemos qué permite el
         # medio; ruidoso porque el silencio acá significa perder la cobertura

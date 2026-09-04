@@ -22,6 +22,12 @@ Copy-Item .env.example .env
 
 Los valores por defecto de `DATABASE_URL` ya coinciden con las credenciales del `docker-compose.yml` (`usuario`/`password`/`sin_ruido` en `localhost:5432`). `MODELO_API_KEY` y las variables `SMTP_*` pueden quedar como están — no bloquean esta validación.
 
+**`API_TOKEN` sí cambia cómo se llama a la API.** Si lo definís, todos los endpoints piden `Authorization: Bearer <token>` menos la salud (`GET /`) y la documentación. Sin la variable la API queda abierta y los `curl` de más abajo funcionan sin la cabecera — pero el motor te lo avisa con un WARNING en cada arranque. Para generarlo:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
 ## 3. Entorno virtual y dependencias
 
 ```powershell
@@ -58,11 +64,19 @@ Crea los 4 medios: La Nación, Clarín, TN, El Cronista.
 
 ## 7. Correr la ingesta real
 
+Con `API_TOKEN` definido hay que mandar la cabecera. Se lee del `.env` una vez y queda en la sesión:
+
 ```powershell
-curl http://localhost:8000/
-curl http://localhost:8000/clusters
-curl -X POST http://localhost:8000/ingest
+$env:API_TOKEN = ((Get-Content .env | Where-Object { $_ -like 'API_TOKEN=*' }) -split '=',2)[1]
+
+curl.exe http://localhost:8000/
+curl.exe -H "Authorization: Bearer $env:API_TOKEN" http://localhost:8000/clusters
+curl.exe -X POST -H "Authorization: Bearer $env:API_TOKEN" http://localhost:8000/ingest
 ```
+
+> **Es `curl.exe` y no `curl`, y la diferencia importa acá.** En PowerShell `curl` es un alias de `Invoke-WebRequest`, que no entiende `-H` ni `-X`: escrito como `curl`, el `POST` se manda como GET o directamente falla. `curl.exe` es el curl real que trae Windows desde la 1803.
+>
+> `GET /` va sin cabecera a propósito: es el healthcheck, la única ruta que nunca pide token junto con la documentación. Sin `API_TOKEN` definido, las otras dos también andan sin el `-H`.
 
 `POST /ingest` pega contra los feeds reales de los 4 medios — descarga, limpieza HTML, filtro en vivo, dedup, e inserción real en Postgres. La respuesta trae un resumen por medio: `nuevas`, `duplicadas`, `en_vivo`, `sin_contenido`, `error`.
 
@@ -158,7 +172,7 @@ SELECT nombre, feed_rss, activo FROM medio;
 ## 9. Volver a correr la ingesta para probar la deduplicación
 
 ```powershell
-curl -X POST http://localhost:8000/ingest
+curl.exe -X POST -H "Authorization: Bearer $env:API_TOKEN" http://localhost:8000/ingest
 ```
 
 Corré `POST /ingest` una segunda vez sin cambios: los `nuevas` deberían bajar a 0 (o casi) y `duplicadas` debería subir con las mismas noticias que ya estaban — así se valida el dedup por `guid` contra datos reales, no solo contra el mock de los tests.

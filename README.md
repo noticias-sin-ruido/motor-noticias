@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-552%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-642%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
@@ -127,7 +127,8 @@ cp .env.example .env                        # (Windows: copy .env.example .env)
                                             # coinciden con las del compose
 
 alembic upgrade head                        # crea el esquema (obligatorio)
-python scripts/seed_medios.py               # carga los 7 medios
+python scripts/seed_medios.py               # opcional: 7 medios de ejemplo
+                                            # (el roster se maneja por POST /medios)
 uvicorn src.main:app --reload
 ```
 
@@ -156,13 +157,28 @@ Para la síntesis hace falta **un modelo de IA, el que vos elijas**: el que pag�
 
 Sin ningún modelo prendido la síntesis no corre, y el motor lo avisa en cada corrida: **no hay proveedor de reserva**, justamente para que nadie termine mandándole los textos a un tercero que no eligió.
 
+### Los medios los elegís vos
+
+El roster **no viene en el repo**. `scripts/seed_medios.py` carga siete medios argentinos de ejemplo, pero es opcional: lo que manda es `POST /medios`, y la razón es de fondo. Los términos de uso varían muchísimo entre medios —hay quien licencia solo títulos y links, quien pide links de vuelta, quien reserva TDM en su `robots.txt`— y **cuáles son aceptables depende del uso que le des vos**, no de lo que este repo haya decidido por su cuenta.
+
+Por eso el alta **no es un CRUD**: antes de guardar nada sondea los feeds y te informa qué hay del otro lado —cuántos items traen, si traen el cuerpo completo, qué ventana temporal cubren y qué dice el `robots.txt`—. Rechaza lo que está roto (un feed que no responde, no parsea o no trae un item utilizable) y te *avisa* de lo que es criterio tuyo, sin decidirlo por vos. El caso más claro: si un medio publica solo el copete, te lo dice y te deja elegir si activás `extraer_por_url` para ir a buscar el cuerpo a la página — que es cruzar una línea que ese medio trazó.
+
+```bash
+curl -X POST localhost:8000/medios -H "Content-Type: application/json" -d '{
+  "nombre": "Ámbito", "url_base": "https://www.ambito.com", "pais": "AR",
+  "feeds_rss": ["https://www.ambito.com/rss/pages/home.xml"]
+}'
+```
+
+**Deshabilitar no es borrar.** `PATCH /medios/{id}?activo=false` deja el medio con todas sus noticias, clusters y síntesis; lo único que cambia es que el motor deja de traer sus feeds, y lo volvés a prender cuando quieras. No hay borrado a propósito: se llevaría puestas noticias que quizá ya se entregaron.
+
 Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opcionales y el motor degrada solo —sin webhook configurado las síntesis quedan pendientes en la base y salen apenas se lo configure, en vez de romper el pipeline—.
 
 ---
 
 ## API
 
-Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
+Catorce endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -177,6 +193,9 @@ Once endpoints. Los `POST` del pipeline son disparo manual de cada paso, que ade
 | `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
 | `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
 | `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** |
+| `GET` | `/medios` | Los medios cargados, activos y deshabilitados |
+| `POST` | `/medios` | Da de alta un medio **después de sondear sus feeds**. Nace habilitado |
+| `PATCH` | `/medios/{id}` | Habilita o deshabilita un medio. Acepta `?activo=`. **Deshabilitar no borra** |
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 
@@ -187,6 +206,16 @@ Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 Definí `API_TOKEN` en el entorno y los endpoints piden `Authorization: Bearer <token>` — todos menos la salud (`GET /`, que usa el healthcheck de Docker) y la documentación. **Sin la variable, la API queda abierta y el motor te lo avisa en cada arranque.**
 
 Es opcional a propósito: quien lo corre en su notebook no debería pelearse con una credencial, y cómo se expone el servicio es decisión de quien lo despliega. Pero si lo exponés, ponelo — hay endpoints que **gastan plata por invocación** (`POST /synthesize`), que hacen al motor **golpear todos los feeds con tu identidad** (`POST /ingest`), y que **le entregan tu credencial de IA** a la URL que le indiquen (`POST /modelos`).
+
+### A quién le confiás tu credencial de IA
+
+`POST /modelos` **le manda tu `MODELO_API_KEY` al `base_url` que le indiques** para sondearlo, antes de saber si el proveedor sirve. Por eso un destino público tiene que estar declarado:
+
+```bash
+MODELO_HOSTS_PERMITIDOS=api.groq.com,api.openai.com
+```
+
+Arranca vacía. Si das de alta un proveedor que no está en la lista, el motor te contesta con la línea exacta que falta en vez de un "no permitido" a secas. **La red interna no hace falta declararla**: un modelo en `localhost:11434` pasa sin lista, que es el caso donde los cuerpos de los artículos no salen de tu máquina.
 
 ```bash
 # Generá uno
@@ -333,13 +362,13 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 552 tests
+pytest                                            # 642 tests
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
 ```
 
-**552 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+**642 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
 
 **Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 
@@ -375,6 +404,7 @@ src/
     ├── categorias.py    # notas sin hecho (horóscopo, opinión): no se agrupan
     ├── preprocessing.py # evidencia para el prompt (TF-IDF + NER)
     ├── synthesis.py     # ángulos, tópicos y copy de redes
+    ├── medios.py        # alta de medios: sondeo del feed + validacion de destino
     ├── modelos.py       # alta, sondeo y exclusividad del modelo activo
     ├── proveedores/     # adaptadores: gemini nativo · openai_compatible
     ├── topicos.py       # taxonomía cerrada + sección declarada por el medio

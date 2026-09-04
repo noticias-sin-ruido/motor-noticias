@@ -2249,3 +2249,185 @@ Dos de esas mutaciones no se detectaban al principio, y por el mismo motivo: **l
 Una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*: **entidades HTML sin decodificar** llegando al producto. Medido sobre la base: 38 de 5.390 `contenido_limpio` (0,7%), y `titulo` ninguno. Quedó como punto 13 del backlog.
 
 Es el argumento entero de este punto en una línea: el defecto estaba ahí desde antes, y lo que faltaba para verlo era el log.
+
+---
+
+## Backlog punto 3: el alta de medios la hace el operador (03/09/2026)
+
+Hasta la 1.1.0 el roster vivía hardcodeado en `scripts/seed_medios.py`. El problema no era de comodidad sino de a quién le corresponde la decisión: **el repo aceptaba los términos de uso de siete medios argentinos en nombre de cualquiera que lo desplegara**. La revisión del 19-20/08 mostró que esos términos varían muchísimo —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario reserva TDM en su `robots.txt`— y que cuál es aceptable depende del uso que le dé cada operador.
+
+Se construyeron `GET /medios`, `POST /medios` y `PATCH /medios/{id}?activo=`.
+
+### Lo que ya estaba hecho y nadie había notado
+
+`Medio.activo` existe desde la Fase 1 y `ingerir_todos_los_medios` **ya filtraba por él** (`ingestion.py`, `select(Medio).where(Medio.activo.is_(True))`). O sea que la semántica "deshabilitar no es borrar" estaba implementada en el pipeline desde el principio y lo único que faltaba era el endpoint que diera vuelta la bandera. Encontrarlo cambió el tamaño del punto: la baja pasó de ser una funcionalidad a ser tres líneas más un test de integración que fija que la bandera efectivamente manda sobre lo que el motor sale a buscar.
+
+### Las cinco decisiones
+
+**1. El sondeo bloquea lo inservible e informa lo opinable.** Se evaluaron las tres posturas. Bloquear todo, como hace `POST /modelos`, es coherente con el precedente pero deja que un feed caído cinco minutos impida registrar un medio que el operador ya decidió sumar. Informar todo nunca traba, pero deja registrar un feed que da 404 permanente y enterarse quince minutos después por un mail de alerta.
+
+Se eligió el mixto, y el criterio para partirlo es **si hay algo que decidir**. Un feed que no responde, no parsea o no trae un solo item utilizable está roto y ninguna decisión lo arregla — el `/feed/internacionales` de Perfil da 404 aunque Perfil lo publique en su propia página de RSS. En cambio que un medio retenga el cuerpo, que su `robots.txt` sea restrictivo o que la ventana parezca archivo son cosas sobre las que el operador tiene algo que decir, y el motor no puede dictaminar por él sin volver a cometer el error que este punto vino a corregir.
+
+**Todos los feeds de la lista tienen que servir**, no alcanza con que sirva uno: la lista la manda el operador de forma explícita, así que uno roto es un error de tipeo que conviene ver ahora.
+
+**2. `extraer_por_url` la decide el operador; el sondeo solo informa.** Es la tentación obvia —el sondeo ya sabe si el feed trae `content:encoded`, prenderla sola sería un renglón— y se descartó a propósito. Esa bandera marca los medios donde el motor va a buscar a la página el cuerpo que el medio **eligió no publicar** en su feed, y cruzar esa línea es exactamente la decisión que este backlog le devuelve a quien acepta los términos.
+
+Se la contrastó con `modo_estructura` en `POST /modelos`, que sí se autodescubre, y la diferencia aguanta: allá lo que se descubre es un detalle técnico del protocolo (si el proveedor acepta `response_format` o solo tool-calling), acá lo que se decidiría es un permiso.
+
+**3. Campos nuevos: `idioma`, `pais`, `logo_url`.** El logo se guarda como URL y no como bytes: mantiene la base chica y sin datos binarios, y el costo asumido —que el logo deje de verse si el medio mueve el archivo— es de presentación, porque nada del pipeline lo mira.
+
+El sondeo los **propone** leyéndolos del canal RSS (`<language>` y `<image><url>`), pero el valor que se guarda es el que manda el operador: esos tags son opcionales y muchos feeds los traen mal o vacíos.
+
+Se evaluó también sumar `terminos_url` y `descripcion` para dejar auditable qué términos aceptó el operador, y quedó afuera de esta tanda.
+
+**4. No existe DELETE: la baja es `activo=False`.** Dos motivos que apuntan al mismo lado. El de producto: deshabilitar tiene que ser reversible sin perder nada, para apagar un medio hoy y volver a prenderlo el mes que viene. El de datos: `Noticia.medio_id` es `NOT NULL` con clave foránea a `medio.id` **sin cascada**, así que borrar un medio que ya ingirió algo violaría la restricción — y forzarlo con cascada se llevaría puestas noticias que quizá ya formaron clusters, se sintetizaron y se entregaron al back-end.
+
+**5. El alta deja el medio habilitado.** Diferencia deliberada con `POST /modelos`, donde `activar` es `False` por default. Allá prender un modelo **apaga a los demás** (la credencial es una sola, dos proveedores prendidos son un estado inusable), así que activar es un interruptor y encenderlo solo sería tomar una decisión ajena. Acá los medios conviven —el clustering *necesita* varios para encontrar el mismo hecho contado por distintas redacciones— y sumar uno es aditivo. Dar de alta un medio para después tener que acordarse de prenderlo sería ceremonia sin contenido.
+
+Por eso mismo `PATCH /medios/{id}` **no** apaga a los demás, a diferencia de su equivalente de modelos.
+
+### El SSRF: por qué el validador se revisó y no se copió
+
+El endpoint hace que el motor **pida una URL elegida por quien llama**, que es la definición de SSRF. El patrón ya estaba resuelto en `proveedores.base.validar_base_url`, y el roadmap avisaba que había que revisarlo y no copiarlo porque acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida.
+
+Al leerlo apareció la diferencia concreta. `proveedores.base.REDES_PROHIBIDAS` bloquea **solo link-local**, y su comentario explica que no bloquear los rangos privados fue deliberado: un modelo de IA en `localhost:11434` o un vLLM en la red interna es justamente el caso que ese backlog existe para habilitar, y encima es el escenario donde los cuerpos de los artículos no salen de la máquina.
+
+**Ese razonamiento no se traslada.** Un medio de noticias en `127.0.0.1` o en `10.0.0.5` no tiene ningún uso legítimo, y sin bloquearlos el endpoint sería un escáner de la red interna a pedido de quien llame: aunque el cuerpo no se devuelva, la diferencia entre "no responde" y "responde pero no es un feed" ya delata qué hay escuchando. Así que `medios.REDES_PROHIBIDAS` suma loopback, los tres rangos privados de IPv4, `fc00::/7` y `0.0.0.0/8`.
+
+Hay un test que fija la divergencia a propósito (`test_es_mas_estricto_que_el_de_proveedores_y_a_proposito`): comprueba que `validar_base_url` acepte `localhost` y que `validar_url_de_feed` lo rechace. Si alguien "unifica" los dos validadores, se cae y explica por qué no hay que hacerlo.
+
+**`url_base` pasa por el mismo validador que los feeds**, y no por simetría: el sondeo le pide `{url_base}/robots.txt`, así que sin validarlo el SSRF entraba por la puerta de al lado.
+
+### Dos hallazgos de leer el código antes de escribirlo
+
+**`_parser_robots` manda mails.** Reusarla tal cual para el sondeo habría hecho que cada alta contra un dominio caído le mandara un mail de alerta al operador — y que cualquiera con acceso al endpoint pudiera inundarle la casilla. Se extrajo `extraccion.leer_robots`, la parte pura sin caché ni alertas, y `_parser_robots` ahora la envuelve. La ingesta sigue alertando igual, que es lo correcto ahí: perder la cobertura de un medio entero sí es grave.
+
+**`_descargar_feed` no sirve para sondear.** Trae `@retry` de 3 intentos con backoff exponencial hasta 10 s —casi 20 s por feed— y acá hay una persona esperando la respuesta de un alta. El sondeo lleva política de red propia y más corta, con el mismo criterio que ya había tomado `extraccion._descargar_pagina` frente a la misma tentación.
+
+Lo que sí se reusa es `ingestion._parsear_entry`, aunque sea privado: **es la definición de qué cuenta como item utilizable**, y el sondeo tiene que contar exactamente lo mismo que después va a ingerir el pipeline. Una segunda copia del criterio haría que el alta prometiera items que la ingesta descarta.
+
+### La ventana temporal se mide sobre la fecha declarada
+
+`_parsear_entry` cae en `ahora_utc()` cuando el item no trae fecha, que es lo correcto para persistir pero daría una ventana de 0 h para un feed sin fechas — una medición inventada, justo la que el sondeo reporta. Se mide sobre `published_parsed` y, si no hay al menos dos fechas declaradas, se informa que no se pudo medir en vez de inventar un número.
+
+El umbral de "esto huele a archivo" quedó en 72 h, contra lo medido: los feeds generales que ya corren son ventanas móviles de 7 h (La Nación, Perfil) a 23 h (TN), mientras que los de sección guardan meses. Es un aviso y no un rechazo — un medio chico que publica dos notas por semana tiene una ventana ancha y es perfectamente legítimo.
+
+### Verificación
+
+604 tests (52 nuevos), `ruff` limpio, `alembic check` contra Postgres.
+
+**7 mutaciones, 7 detectadas.** Una de ellas encontró un test flojo antes de que llegara a `main`: la aserción del aviso "este feed no trae cuerpo" buscaba la subcadena `extraer_por_url`, que **también aparece en el otro aviso** —el de "solo algunos items traen cuerpo"—, así que borrar el primero pasaba desapercibido. Se ajustó a la parte distintiva del mensaje.
+
+### Lo que quedó afuera, a propósito
+
+**Retirar el roster del repo.** El roadmap lo pide, pero sacarlo obliga a resolver la migración de las instancias que hoy corren con siete medios cargados, y eso es una decisión aparte. `scripts/seed_medios.py` sigue existiendo y pasó a ser **datos de ejemplo**: se le reescribió el bloque de comentarios para que conserve el conocimiento medido que el alta por API no puede redescubrir sola —por qué Clarín, Ámbito y La Izquierda Diario quedan afuera, la trampa de los feeds de sección de TN, el `?outputType=xml` obligatorio de Ciudad Magazine— porque son juicios sobre términos de uso, no sobre feeds.
+
+**Editar los datos de un medio ya cargado.** No hay `PATCH` de metadatos: los siete medios que ya existían se quedan con `pais` en `None` hasta que alguien los complete, y `idioma`/`pais`/`logo_url` quedaron fuera de `CAMPOS_SINCRONIZADOS` del seed porque son datos descriptivos y no configuración de ingesta —el seed no debe pisar lo que el operador ajustó a mano—.
+
+### El ataque a los endpoints nuevos, y lo que encontró (03/09/2026)
+
+Antes de commitear el punto 3 se atacaron los tres endpoints en vez de revisarlos de a ojo: servicio señuelo en loopback, ataques corriendo contra el motor vivo, y verificación en un contenedor `python:3.12-slim` de lo que no reproducía en Windows. Aparecieron seis cosas; se arreglaron tres en esta tanda y las otras quedan anotadas abajo.
+
+#### 1. SSRF por redirect — `follow_redirects=True` hacía de adorno al validador
+
+El agujero real y verificado: `validar_url_de_feed` aprueba la URL que le mandan, y **httpx después se va sola a donde diga el `Location`**, sin que nadie revalide. Un host público que responda `302 -> http://169.254.169.254/latest/meta-data/` atravesaba el filtro entero. En la prueba, el motor leyó el cuerpo de un servicio en `127.0.0.1` cuya URL directa el validador sí rechazaba.
+
+**Se evaluaron las dos salidas y se midió antes de elegir.**
+
+*Rechazar el redirect y pedirle al operador la URL final* era más simple y de superficie cero — no hay cadena que validar, así que no hay validador de cadena que se equivoque— y además dejaría mejor dato persistido: los feeds que redirigen pagan un salto en cada uno de los 96 ciclos diarios.
+
+Se descartó por lo que dijo la medición sobre los 8 feeds del roster: **3 redirigen** (TN, El Cronista y Revista Gente, que además cambia de dominio a `revistagente.com`), o sea que habría dado de baja tres medios en producción. Y sobre todo por *por qué* redirigen: TN y El Cronista **ya migraron a Arc**, y ese 301 es lo que mantiene viva la URL que tenemos sembrada. Fijar la URL final nos rompería en la mudanza siguiente, en silencio.
+
+**Elegido: seguir los redirects con un bucle propio que valida cada salto** (`bajar_siguiendo_redirects`). Tope de 5 saltos —ninguno de los 3 reales pasa de 1—, detección de bucles, y `urljoin` para resolver un `Location` relativo. La URL inicial se revalida aunque el llamador ya lo haya hecho, para que la función sea segura la llame quien la llame.
+
+**No cierra el TOCTOU**, y está dicho en el código: entre validar la IP y conectar hay una segunda resolución de DNS. Es el mismo límite que `proveedores.base` ya asume; cerrarlo exige conectar a la IP validada preservando Host y SNI, artillería desproporcionada para un motor de un operador.
+
+#### 2. `leer_robots` tenía el mismo agujero, y la salida obvia lo habría roto
+
+También usaba `follow_redirects=True`, y le llega un `url_base` recién mandado por quien llama al alta. La salida evidente era `follow_redirects=False`, y la medición la descartó: **el `robots.txt` de Revista Gente redirige** (1 de 8 medidos). Cortarlos de plano habría dejado ese medio sin poder leer su `robots.txt` — o sea sin extracción, fallando cerrado, con un mail de alerta por ciclo. Usa el mismo bucle validado, con import local para no armar ciclo (el recurso que ya usa `search.listar_clusters`).
+
+#### 3. Una IPv4 escondida en una IPv6 se colaba entera
+
+`::ffff:127.0.0.1` apunta a loopback, pero como objeto es un `IPv6Address`, y `IPv6Address in IPv4Network("127.0.0.0/8")` da `False`. Pasaba el filtro.
+
+**En Windows no conecta y parecía inofensivo.** Se verificó dentro de `python:3.12-slim`, que es el destino real de despliegue: **pasa el filtro y conecta**. Es la clase de hallazgo que se pierde si uno se conforma con que no reproduzca en la máquina de desarrollo.
+
+Entró junto con el punto 1 y no como tanda aparte porque sin esto el arreglo del redirect es evitable: alcanza con redirigir a `http://[::ffff:127.0.0.1]/`.
+
+El arreglo cambió la forma de preguntar. **La regla de fondo pasó a ser `is_global`, en positivo**: un medio de noticias vive en una dirección ruteable en internet, punto. Enumerar rangos malos es una carrera que se pierde, y se perdió en el acto — la primera versión del filtro dejaba pasar `100.64.0.1` (CGNAT) porque **en Python 3.13 `is_private` da `False` ahí**. La lista explícita se conserva igual, por dos motivos: es la parte auditable, y cubre `64:ff9b::/96` (NAT64), lo único que `is_global` considera global aunque encapsule una IPv4.
+
+#### Lo que resistió el ataque
+
+Vale anotarlo para no volver a probarlo:
+
+- **XXE**: `<!ENTITY xxe SYSTEM "file:///...">` volvió como el literal `&xxe;`. feedparser no resuelve entidades externas.
+- **Bomba de entidades** (billion laughs): "undefined entity", no expande.
+- **Notación decimal/hex/octal de IP**: parecía evasión en Windows, pero en Linux `getaddrinfo("2130706433")` devuelve `127.0.0.1`, así que el validador sí la ve. Falsa alarma — se verificó antes de anotarla.
+- Inyección SQL, mass assignment (`extra="forbid"`), y las formas directas de SSRF que el validador ya bloqueaba.
+- **La extracción de artículos** (`extraccion.py`) toma URLs del feed, o sea contenido de terceros, y también sigue redirects — pero está protegida por su propia exigencia: pide poder leer el `robots.txt` del destino y falla cerrado si no puede, así que un `169.254.169.254` metido en un feed no llega a pedirse.
+
+#### Lo que la prueba de mutación enseñó sobre las capas
+
+14 mutaciones, **13 detectadas**. La que no se detecta está etiquetada como tal: romper el desenvolvimiento de IPv4-en-IPv6 no reabre nada, porque `is_global` ya las rechaza por su cuenta. Es capa redundante haciendo su trabajo, no un hueco — y se mantiene igual porque `ipaddress` **ya cambió de semántica una vez y nos mordió** (el CGNAT), así que apoyar una defensa en una sola propiedad de la librería estándar es la apuesta que acabamos de perder.
+
+Una mutación sí destapó un hueco real: **`follow_redirects=True` no se detectaba**, porque todos los tests mockean `httpx.get` entero y el mock ignora ese kwarg. Habrían quedado en verde con el agujero abierto en producción. Se agregó un test que mira el kwarg y no el resultado.
+
+#### Lo que quedó abierto, y por qué
+
+Tres hallazgos del mismo ataque **no** se arreglaron acá, para no mezclar tandas:
+
+- **Amplificación de pedidos.** `feeds_rss` no tiene techo de elementos ni deduplica. Medido lineal: 12 copias del mismo feed = 12 pedidos reales. Con 10.000 entradas, un solo POST convierte al motor en un ariete contra un tercero con nuestra identidad en el User-Agent, y bloquea un worker sincrónico por horas.
+- **Campos sin techo y `logo_url` sin validar.** Se persistieron 500 KB de `url_base` y 500 KB de `logo_url`, este último empezando con `javascript:`. `GET /medios` lo devuelve tal cual: es XSS almacenado esperando a la interfaz de escritorio.
+- **`PATCH /medios/{id}` con un `id` mayor que bigint da 500** (desborde en Postgres). No filtra nada, pero contradice la regla de que una entrada mala es 4xx con mensaje.
+
+### Tanda 2 de la auditoría: la credencial de IA no sale hacia un host sin declarar (03/09/2026)
+
+**Cierra SR-01**, el hallazgo crítico. `POST /modelos` le mandaba `MODELO_API_KEY` como Bearer al `base_url` que le indicaran —dos veces, una por cada mecanismo de estructura que prueba el sondeo— **antes de saber si el proveedor servía**. Verificado con un captor local, que registró la llegada de la credencial sin imprimir su valor. El alta devolvía 422 y no guardaba nada, pero la key ya había viajado.
+
+`validar_base_url` bloqueaba solo link-local, y eso era deliberado: el comentario decía que un modelo en `localhost:11434` es el caso que el punto 2 existe para habilitar. Lo que faltaba no era bloquear más adentro sino **mirar hacia afuera**.
+
+#### La decisión: lista blanca, con la regla invertida
+
+Se evaluaron tres formas.
+
+*Prohibir loopback y privadas, como en `services/medios.py`*, era lo simétrico. Se descartó rápido: mata el modelo local —el único escenario donde los cuerpos de los artículos no salen de la máquina— y **no arregla lo que importa**, porque la exfiltración hacia un host externo seguiría permitida. Habría sido gastar el cambio en el lado equivocado.
+
+*Sondear en dos pasos, primero sin credencial*, no necesita configuración nueva. Se descartó porque casi todos los proveedores contestan 401 sin key, así que el primer paso no distingue un destino sano de uno hostil — y encima no impide que alguien confirme igual hacia un host malicioso.
+
+**Elegido: `MODELO_HOSTS_PERMITIDOS`.** Un destino público tiene que estar declarado; la red interna no. Lo importante es que **la regla queda invertida respecto de `medios.py`**, y eso no es una inconsistencia sino la consecuencia de que se protege otra cosa: allá lo interno es lo sospechoso porque el riesgo es que nos usen de escáner de la red; acá lo interno es lo confiable porque el riesgo es que la credencial se vaya lejos. Los dos comentarios se remiten mutuamente para que nadie los "unifique".
+
+#### Arranca vacía, y el error dice qué agregar
+
+Fue decisión del usuario entre tres opciones. Sembrarla con los proveedores conocidos no rompía nada, pero era el repo decidiendo a quién confiarle la credencial del operador — exactamente lo que el punto 3 acababa de corregir para los medios. Hacerla opt-in como `API_TOKEN` era coherente con `auth.py`, pero ahí el riesgo es exponer un servicio y acá es filtrar tu propia credencial por un error de tipeo: un default inseguro pesa distinto.
+
+Vacía, entonces, con el mismo criterio de "informar, no decidir" que el alta de medios. El 422 no dice "no permitido" sino la línea exacta:
+
+```
+MODELO_HOSTS_PERMITIDOS=ya.declarado.test,nuevo.test
+```
+
+**Rompe configuración al actualizar**, y va avisado: una instancia que use `openai_compatible` contra un proveedor público deja de sintetizar hasta declarar su host. La que corría acá no se vio afectada —su modelo activo es el Gemini nativo, que no usa `base_url`— pero su `groq-qwen` apagado sí necesita la declaración para volver a prenderse.
+
+#### Los detalles que se decidieron y por qué
+
+**Comparación exacta, no por sufijo.** Declarar `openai.com` no habilita `openai.com.atacante.net` ni `evil.openai.com`, y un homógrafo con cirílico no coincide con el host latino. Cada endpoint regional se declara aparte: explícito es el punto.
+
+**Se normaliza caja, punto final y se ignora el puerto.** DNS no distingue mayúsculas, `api.groq.com.` es el mismo host, y si confiás en un host el puerto no cambia a quién le hablás.
+
+**Un host que no resuelve cuenta como público**, o sea que hay que declararlo. Es fallar cerrado: desde el validador no se distingue un `.local` que resolverá por mDNS al hacer el request de un dominio que todavía no existe pero existirá mañana, y lo que está en juego es una credencial. El mensaje de error lo dice, para que un problema de DNS no se lea como un problema de lista.
+
+**La lista habilita, no levanta las otras defensas.** Declarar `169.254.169.254` no alcanza: link-local se comprueba antes y sigue bloqueado. Hay un test que lo fija.
+
+#### Lo que el arreglo NO cierra, dicho con todas las letras
+
+La credencial **sigue saliendo hacia loopback y hacia la red interna sin declaración**, y se comprobó volviendo a correr el captor: recibió el Bearer igual. Es el precio elegido, y es el correcto — quien pueda levantar un servicio en tu máquina ya tiene tu máquina, y la red interna es justamente lo que esta funcionalidad existe para soportar.
+
+#### Un defecto de la suite que destapó el `.env`
+
+Al definir `API_TOKEN` en la tanda 1, **63 tests de endpoints pasaron a fallar con 401**. No estaba mal el código: el resultado de la suite dependía de si quien la corría tenía un token configurado. `test_modelos.sin_el_env_de_la_maquina` ya aislaba las credenciales, pero esta variable se le había escapado.
+
+Se agregó `api_sin_token` como fixture `autouse` en `conftest.py`, que la neutraliza para todos los tests; `test_auth.py` la pisa con sus propias fixtures, porque ahí el token es el objeto del test y no ruido del entorno. Comprobado corriendo la suite con `API_TOKEN` y `MODELO_HOSTS_PERMITIDOS` forzados desde el entorno a valores distintos: 642 pasando igual.
+
+#### Verificación
+
+642 tests (13 nuevos), `ruff` limpio, **6 mutaciones y 6 detectadas** sobre la comprobación nueva —incluidas la coincidencia por sufijo, la pérdida de normalización y el host que no resuelve—. Y el ataque original repetido contra el código parcheado, esta vez **con un token válido**, o sea en el peor caso: `https://proveedor-malicioso.test/v1` rechazado con 422 y la línea que falta.

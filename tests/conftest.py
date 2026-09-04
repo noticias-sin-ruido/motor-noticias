@@ -11,6 +11,7 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
+from src.config import settings
 from src.database import get_session
 from src.main import app
 from src.models import Medio, Noticia, Cluster, Sintesis  # noqa: F401
@@ -46,6 +47,27 @@ def spacy_mockeado():
     """
     with patch.object(preprocessing, "get_nlp", return_value=lambda _: _DocSinEntidades()):
         yield
+
+
+@pytest.fixture(autouse=True)
+def api_sin_token(monkeypatch):
+    """
+    Ningún test hereda el `API_TOKEN` del `.env` del desarrollador.
+
+    **Lo destapó el propio arreglo**: al definir `API_TOKEN` para cerrar el
+    CSRF y la exfiltración de credencial, 63 tests de endpoints pasaron a
+    fallar con 401 — no porque estuviera mal el código, sino porque el
+    resultado de la suite dependía de si quien la corría tenía un token
+    configurado. Eso es exactamente lo que un test no puede hacer.
+
+    Es el mismo criterio de `test_modelos.sin_el_env_de_la_maquina`, que ya
+    aislaba las credenciales, extendido a la variable que se le había escapado.
+
+    `test_auth.py` la pisa con sus propias fixtures `con_token` y `sin_token`:
+    son las que prueban la puerta en sí, así que ahí el token es el objeto del
+    test y no ruido del entorno.
+    """
+    monkeypatch.setattr(settings, "API_TOKEN", None)
 
 
 @pytest.fixture(name="session")

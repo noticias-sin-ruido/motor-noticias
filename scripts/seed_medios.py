@@ -48,11 +48,13 @@ from src.models import Medio
 MEDIOS = [
     {
         "nombre": "La Nación",
+        "pais": "AR",
         "url_base": "https://www.lanacion.com.ar",
         "feeds_rss": ["https://www.lanacion.com.ar/arc/outboundfeeds/rss/"],
     },
     {
         "nombre": "TN",
+        "pais": "AR",
         "url_base": "https://tn.com.ar",
         # OJO si alguna vez se agregan secciones: `tn.com.ar/feed/<seccion>/`
         # responde 200 pero IGNORA la seccion y devuelve el general. La que
@@ -62,6 +64,7 @@ MEDIOS = [
     },
     {
         "nombre": "El Cronista",
+        "pais": "AR",
         # No es Arc, tiene su propio esquema. Su general ya trae el 97% de lo
         # alcanzable entre sus secciones.
         "url_base": "https://www.cronista.com",
@@ -70,6 +73,7 @@ MEDIOS = [
     # --- Farandula / espectaculos ---
     {
         "nombre": "Revista Gente",
+        "pais": "AR",
         # El feed se sirve desde gente.com.ar pero los articulos viven en
         # revistagente.com (redireccion del propio medio).
         "url_base": "https://www.revistagente.com",
@@ -77,11 +81,13 @@ MEDIOS = [
     },
     {
         "nombre": "Revista Paparazzi",
+        "pais": "AR",
         "url_base": "https://www.paparazzi.com.ar",
         "feeds_rss": ["https://www.paparazzi.com.ar/feed/"],
     },
     {
         "nombre": "Ciudad Magazine",
+        "pais": "AR",
         # Arc XP: el parametro ?outputType=xml es obligatorio, sin el da 404.
         # Su general ya trae el 100% de lo que publica (25 items).
         "url_base": "https://www.ciudad.com.ar",
@@ -89,6 +95,7 @@ MEDIOS = [
     },
     {
         "nombre": "Perfil",
+        "pais": "AR",
         # Su RSS no trae content:encoded (0/438 medido el 18/08): la licencia de
         # sus terminos cubre "el contenido" y no lo retiene por descuido, asi
         # que entra por la segunda via -- extraer_por_url va en True.
@@ -109,25 +116,61 @@ MEDIOS = [
 # no pisar ajustes manuales, igual que antes.
 #
 # `activo` queda afuera a proposito: dar de baja un medio es una decision
-# operativa que se toma en la base, y volver a correr el seed no debe revivirlo.
-# `url_base` tambien: nunca se piso hasta ahora y no hay motivo para empezar.
+# operativa —hoy `PATCH /medios/{id}?activo=false`— y volver a correr el seed no
+# debe revivir lo que el operador apago. `url_base` tambien: nunca se piso hasta
+# ahora y no hay motivo para empezar.
+#
+# `idioma`, `pais` y `logo_url` tampoco entran, y por el mismo criterio: son
+# datos DESCRIPTIVOS del medio, no configuracion de ingesta. Se aplican al crear
+# y despues son del operador. La consecuencia a la vista: un medio que ya existia
+# antes de esta version se queda con `pais` en None hasta que alguien lo complete.
 CAMPOS_SINCRONIZADOS = ["feeds_rss", "extraer_por_url"]
 
-# Clarin queda FUERA del roster, y no por falta de herramienta: su RSS no trae
-# content:encoded (verificado el 18/08, 0 de 438 items) y sus terminos de uso
-# licencian explicitamente "titulos y/o links", nada mas -- retienen el cuerpo
-# a proposito. La segunda via de ingesta (extraer_por_url) existe desde la
-# etapa 2 y podria traerlo igual, pero seria cruzar una linea que el medio
-# trazo. Ver specs/change_logs.md, "Backlog punto 1".
+# ============================================================================
+# Ejemplos medidos: por que estos siete y no otros
+# ============================================================================
 #
-# Ambito y La Izquierda Diario quedan postergados por el mismo tipo de
-# revision: Ambito no tiene contrato de reuso pero tampoco se evaluo a fondo
-# todavia; La Izquierda Diario bloquea crawlers de IA y reserva TDM en su
-# robots.txt (Directiva UE 2019/790 art. 4) pese a no tener terminos propios.
+# Desde el punto 3 del backlog **el roster lo maneja el operador** por
+# `POST /medios`, que sondea el feed e informa antes de aceptar. Este script
+# quedo como datos de ejemplo y arranque rapido, no como la fuente de verdad.
 #
-# Cadena 3 tiene el tag pero con el copete adentro, y ademas su feed esta
-# congelado desde 2018. Diario Cronica trae el tag vacio y su agenda es de
-# Chubut, que casi no se cruza con la nacional.
+# Lo que sigue NO es una lista de descartados: es el conocimiento que costo
+# medirlo, y que el alta por API no puede redescubrir sola porque son juicios
+# sobre terminos de uso, no sobre feeds.
+#
+# --- Por sus terminos de uso ---
+#
+# Clarin queda FUERA, y no por falta de herramienta: su RSS no trae
+# content:encoded (verificado el 18/08, 0 de 438 items) y sus terminos licencian
+# explicitamente "titulos y/o links", nada mas -- retienen el cuerpo a
+# proposito. La segunda via de ingesta (extraer_por_url) existe desde la etapa 2
+# y podria traerlo igual, pero seria cruzar una linea que el medio trazo. Es
+# exactamente la decision que `extraer_por_url` le deja al operador, y el sondeo
+# del alta se la avisa. Ver specs/change_logs.md, "Backlog punto 1".
+#
+# Ambito no tiene contrato de reuso y su aviso legal solo cubre datos personales
+# (Ley 25.326): viable, pero nunca se evaluo a fondo.
+#
+# La Izquierda Diario trae el cuerpo completo en el feed (48/48, el mejor
+# medido) y aun asi quedo postergado: su robots.txt bloquea crawlers de IA y
+# reserva TDM (Directiva UE 2019/790 art. 4) pese a no tener terminos propios.
+#
+# --- Por como esta armado su feed ---
+#
+# Cadena 3 tiene el tag content:encoded pero con el copete adentro, y ademas su
+# feed esta congelado desde 2018. Diario Cronica trae el tag vacio y su agenda
+# es de Chubut, que casi no se cruza con la nacional.
+#
+# --- Trampas de URL que ya nos costaron tiempo ---
+#
+# - TN: `tn.com.ar/feed/<seccion>/` responde 200 pero IGNORA la seccion y
+#   devuelve el general. La que filtra de verdad es la de Arc:
+#   `tn.com.ar/arc/outboundfeeds/rss/category/<seccion>/?outputType=xml`
+# - Ciudad Magazine: el parametro `?outputType=xml` es obligatorio, sin el da 404.
+# - Perfil: `/feed/internacionales` da 404 pese a que Perfil lo publica en su
+#   propia pagina de RSS. Verificar cada URL antes de sembrarla -- por esto el
+#   alta por API sondea y rechaza un feed que no responde.
+#
 # Ver specs/change_logs.md, Fase 2 y Fase 4.
 
 

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
+from ...config import settings
 from ...models import ModeloIA
 from ...models.modelo_ia import PREFIJO_API_KEY_ENV, VARIABLE_UNICA
 
@@ -202,7 +203,7 @@ def validar_base_url(url: str) -> str:
     """
     La `base_url` normalizada, o levanta explicando qué tiene de malo.
 
-    Tres comprobaciones, cada una por un motivo distinto:
+    Cuatro comprobaciones, cada una por un motivo distinto:
 
     1. **Esquema http/https.** Sin esto entran `file://`, `gopher://` y demás,
        que son la vía clásica para convertir un SSRF en lectura de archivos.
@@ -210,6 +211,8 @@ def validar_base_url(url: str) -> str:
        puerta para meter un secreto en la base, justo lo que `api_key_env`
        existe para evitar — y encima se devolvería en cualquier listado.
     3. **Sin direcciones link-local.** Ver `REDES_PROHIBIDAS`.
+    4. **Un destino público tiene que estar declarado** en
+       `MODELO_HOSTS_PERMITIDOS`. Ver `_exigir_host_declarado`.
     """
     limpia = (url or "").strip().rstrip("/")
     if not limpia:
@@ -231,14 +234,68 @@ def validar_base_url(url: str) -> str:
             f"va en la variable de entorno {VARIABLE_UNICA}, no en la URL."
         )
 
-    for familia in _resolver(partes.hostname):
+    direcciones = _resolver(partes.hostname)
+    for familia in direcciones:
         if any(familia in red for red in REDES_PROHIBIDAS):
             raise ErrorDeProveedor(
                 f"`base_url` apunta a una dirección link-local ({familia}), que "
                 f"es donde viven los metadata de las nubes. Un modelo local en "
                 f"localhost o en la red interna sí está permitido."
             )
+
+    _exigir_host_declarado(partes.hostname, direcciones)
     return limpia
+
+
+def _exigir_host_declarado(host: str, direcciones: list) -> None:
+    """
+    Un destino público tiene que estar en `MODELO_HOSTS_PERMITIDOS`.
+
+    **Es lo que impide que el motor le entregue tu credencial a un desconocido.**
+    El sondeo del alta manda `MODELO_API_KEY` como Bearer al `base_url` que le
+    indiquen, antes de saber si el proveedor sirve — así que un host mal tipeado
+    basta para regalar la key. Está verificado con un captor local: sale igual,
+    y sale dos veces, una por cada mecanismo de estructura que el sondeo prueba.
+
+    **La red interna no necesita declararse.** Un modelo en `localhost:11434` o
+    un vLLM en la red de al lado pasan sin lista: es el caso que el punto 2 del
+    backlog existe para habilitar, y el único donde los cuerpos de los artículos
+    no salen de la máquina. La regla queda invertida respecto de
+    `services/medios.py` —allá lo interno es lo sospechoso— porque lo que se
+    protege es otra cosa: allá, que no nos usen de escáner de la red; acá, que
+    la credencial no se vaya lejos.
+
+    **Un host que no resuelve se trata como público**, o sea que hace falta
+    declararlo. Es fallar cerrado: desde acá no se puede distinguir un `.local`
+    que resolverá por mDNS al hacer el request de un dominio que todavía no
+    existe pero existirá mañana, y la que está en juego es una credencial.
+    """
+    limpio = (host or "").lower().rstrip(".")
+
+    # Sin ninguna dirección global de por medio el destino es interno, y ahí no
+    # hace falta permiso. `direcciones` vacío significa que no resolvió, y eso
+    # cuenta como público por lo dicho arriba.
+    es_publico = not direcciones or any(d.is_global for d in direcciones)
+    if not es_publico:
+        return
+
+    if limpio in settings.hosts_de_modelo_permitidos:
+        return
+
+    # El mensaje dice **exactamente qué hacer**, que es el mismo criterio del
+    # punto 3: el motor informa y el operador decide. Un "no permitido" a secas
+    # dejaría a quien da de alta su proveedor adivinando cuál es la variable.
+    ya = sorted(settings.hosts_de_modelo_permitidos)
+    raise ErrorDeProveedor(
+        f"El host {limpio!r} no está declarado, así que el motor no le va a "
+        f"entregar tu credencial de IA. Si confiás en él, agregalo a "
+        f"`MODELO_HOSTS_PERMITIDOS` en el .env:\n"
+        f"    MODELO_HOSTS_PERMITIDOS={','.join(ya + [limpio])}\n"
+        f"Los destinos en localhost o en la red interna no hace falta "
+        f"declararlos. Si el host es correcto y aun así aparece esto, puede que "
+        f"no esté resolviendo por DNS: un host que no resuelve se trata como "
+        f"público."
+    )
 
 
 def _resolver(host: str):

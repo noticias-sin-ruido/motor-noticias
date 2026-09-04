@@ -1,7 +1,7 @@
 import logging
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -19,8 +19,9 @@ from .auth import RUTAS_ABIERTAS, avisar_si_esta_abierta, exigir_token
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
-from .models import Adaptador, ModeloIA
+from .models import Adaptador, Medio, ModeloIA
 from .services.alerts import enviar_alerta
+from .services.medios import FeedInservible, sondear as sondear_medio
 from .services.modelos import modelo_activo, sondear
 from .services.proveedores import (
     ErrorDeProveedor,
@@ -698,3 +699,204 @@ def _apagar_los_demas(session: Session, id_que_queda: Optional[int]) -> None:
         otro.activo = False
         session.add(otro)
         logger.info(f"Se apaga '{otro.nombre}': solo puede haber un modelo activo")
+
+
+# ============================================================
+# Medios: el roster lo maneja el operador (backlog punto 3)
+# ============================================================
+#
+# Hasta la 1.1.0 los siete medios venían hardcodeados en `scripts/seed_medios.py`,
+# o sea que **el repo aceptaba sus términos de uso en nombre de quien lo
+# desplegara**. Esa decisión es del operador, y estos tres endpoints se la
+# devuelven. Ver specs/roadmap.md, punto 3, y `services/medios.py` por qué el
+# alta sondea en vez de registrar a ciegas.
+#
+# **La baja es `activo=False` y no un DELETE**, a propósito y por dos motivos que
+# apuntan al mismo lado. El de producto: deshabilitar tiene que ser reversible
+# sin perder nada, para poder apagar un medio hoy y volver a prenderlo el mes que
+# viene. El de datos: `Noticia.medio_id` es `NOT NULL` con clave foránea a
+# `medio.id` y sin cascada, así que borrar un medio que ya ingirió algo violaría
+# la restricción — y si se forzara con cascada se llevaría puestas noticias que
+# quizá ya formaron clusters, se sintetizaron y se entregaron al back-end.
+
+
+class AltaMedio(BaseModel):
+    """Lo que hace falta para dar de alta un medio. Ver `models/medio.py`."""
+
+    # Mismo criterio que `AltaModelo`: **los campos de más se rechazan, no se
+    # ignoran**. Descartar en silencio un campo que alguien creyó que el motor
+    # iba a leer es la peor respuesta posible.
+    model_config = ConfigDict(extra="forbid")
+
+    nombre: str = Field(min_length=1, max_length=120)
+    url_base: str = Field(min_length=1)
+    feeds_rss: List[str] = Field(min_length=1)
+
+    idioma: str = Field(default="es", max_length=8)
+    pais: Optional[str] = Field(default=None, max_length=2)
+    logo_url: Optional[str] = None
+
+    # **La manda el operador y arranca apagada.** El sondeo detecta si el feed
+    # trae el cuerpo de las notas y lo informa, pero no prende esta bandera solo:
+    # marca los medios donde el motor va a buscar a la página el cuerpo que el
+    # medio eligió no publicar en su feed, y cruzar esa línea es una decisión de
+    # quien acepta los términos, no del motor. Es la diferencia con
+    # `modo_estructura` en `POST /modelos`, que sí se autodescubre — ahí lo que
+    # se descubre es un detalle técnico del protocolo, no un permiso.
+    extraer_por_url: bool = False
+
+
+def _vista_medio(medio: Medio) -> dict:
+    """
+    Lo que se devuelve de un medio.
+
+    A diferencia de `_vista_publica` para modelos, acá **no hay nada que filtrar**:
+    `Medio` no guarda credenciales ni URLs que completen una cadena de ataque,
+    solo datos que el medio ya publica de sí mismo. Existe igual como único punto
+    de serialización, para que un campo sensible que se agregue mañana tenga un
+    solo lugar donde decidirse.
+    """
+    return medio.model_dump()
+
+
+@app.get("/medios")
+def listar_medios(session: Session = Depends(get_session)):
+    """Los medios cargados, activos y deshabilitados."""
+    filas = session.exec(select(Medio).order_by(Medio.nombre)).all()
+    return {
+        "status": "ok",
+        "activos": sum(1 for f in filas if f.activo),
+        "total": len(filas),
+        "medios": [_vista_medio(f) for f in filas],
+    }
+
+
+@app.post("/medios")
+def alta_medio(datos: AltaMedio, session: Session = Depends(get_session)):
+    """
+    Da de alta un medio, **después de sondear sus feeds**, y lo deja habilitado.
+
+    No es un CRUD: antes de guardar nada se leen los feeds y se informa qué hay
+    del otro lado — cuántos items traen, si traen el cuerpo, qué ventana cubren y
+    qué dice el `robots.txt`. Así el alta pasa de *"registrá esto"* a *"esto es
+    lo que encontramos, decidí vos"*.
+
+    **Qué frena y qué no.** Un feed que no responde, no parsea o no trae un solo
+    item utilizable devuelve 422 y no guarda nada: ahí no hay criterio que
+    aplicar, está roto. Lo que sí es criterio del operador —que el medio no
+    publique el cuerpo, que su `robots.txt` sea restrictivo, que la ventana
+    parezca archivo— viaja en `avisos` y **no impide el alta**.
+
+    **Nace activo**, y es la diferencia deliberada con `POST /modelos`, donde
+    `activar` es `False` por default: allá prender un modelo apaga a los demás,
+    así que activar es un interruptor y encenderlo solo sería tomar una decisión
+    ajena. Acá los medios conviven —cuantos más, mejor funciona el clustering— y
+    sumar uno es aditivo. Dar de alta un medio para después tener que acordarse
+    de prenderlo sería una ceremonia sin contenido.
+    """
+    duplicado = JSONResponse(
+        status_code=409,
+        content={"status": "error", "detalle": f"Ya existe un medio '{datos.nombre}'"},
+    )
+    if session.exec(select(Medio).where(Medio.nombre == datos.nombre)).first():
+        return duplicado
+
+    try:
+        informe, avisos = sondear_medio(datos.url_base, datos.feeds_rss)
+    except FeedInservible as error:
+        # 422 y no 500: lo que mandaron no sirve, y el mensaje dice cuál de los
+        # feeds falló y por qué.
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+
+    medio = Medio(**datos.model_dump(), activo=True)
+    session.add(medio)
+    try:
+        session.commit()
+    except IntegrityError:
+        # El SELECT de arriba deja una ventana entre la comprobación y el INSERT.
+        # El índice único de `Medio.nombre` protege el dato; esto protege la
+        # respuesta, que si no salía como un 500 por una carrera perfectamente
+        # normal. Mismo patrón que `alta_modelo`.
+        session.rollback()
+        return duplicado
+    session.refresh(medio)
+
+    logger.info(
+        f"Alta de medio '{medio.nombre}' (id={medio.id}): "
+        f"{informe['items_totales']} items, {informe['items_con_cuerpo']} con cuerpo, "
+        f"extraer_por_url={medio.extraer_por_url}, {len(avisos)} avisos"
+    )
+    return {
+        "status": "ok",
+        "medio": _vista_medio(medio),
+        "sondeo": informe,
+        "avisos": avisos,
+    }
+
+
+@app.patch("/medios/{medio_id}")
+def habilitar_medio(
+    medio_id: int, activo: bool = Query(...), session: Session = Depends(get_session)
+):
+    """
+    Habilita o deshabilita un medio. **Deshabilitar no es borrar.**
+
+    Un medio deshabilitado conserva todo —sus noticias, sus clusters, sus
+    síntesis ya entregadas— y lo único que cambia es que
+    `ingerir_todos_los_medios` deja de traer sus feeds (`services/ingestion.py`,
+    que ya filtraba por `Medio.activo` desde la Fase 2). Se puede volver a
+    habilitar cuando sea.
+
+    **No hay exclusividad**, a diferencia de `PATCH /modelos/{id}`: ahí prender
+    uno apaga a los demás porque la credencial es una sola y dos proveedores
+    prendidos son un estado que no se puede usar. Acá los medios conviven, y de
+    hecho el clustering necesita varios para encontrar el mismo hecho contado por
+    distintas redacciones.
+
+    **Habilitar sondea; deshabilitar no.** Al prender se re-verifican los feeds
+    con la misma regla que el alta, porque entre aquel día y hoy el medio pudo
+    cambiar de URL o dar de baja el feed — y el error conviene verlo al apretar
+    el botón, no quince minutos más tarde en un mail de alerta.
+
+    Apagar, en cambio, **no consulta la red y no puede fallar por ella**. Es la
+    válvula de escape: si un medio está devolviendo basura o golpeando de más,
+    hay que poder apagarlo con la conexión caída y con su servidor muerto. Un
+    apagado que dependa de que el feed responda es un apagado que falla justo
+    cuando se lo necesita.
+    """
+    medio = session.get(Medio, medio_id)
+    if medio is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detalle": "No existe ese medio"},
+        )
+
+    informe = None
+    avisos: List[str] = []
+    if activo:
+        try:
+            informe, avisos = sondear_medio(medio.url_base, medio.feeds_rss)
+        except FeedInservible as error:
+            return JSONResponse(
+                status_code=422, content={"status": "error", "detalle": str(error)}
+            )
+
+    medio.activo = activo
+    session.add(medio)
+    session.commit()
+    session.refresh(medio)
+
+    logger.info(
+        f"Medio '{medio.nombre}' (id={medio.id}) "
+        f"{'habilitado' if activo else 'deshabilitado'}"
+    )
+    respuesta = {
+        "status": "ok",
+        "medio": _vista_medio(medio),
+        "avisos": avisos,
+    }
+    if informe is not None:
+        respuesta["sondeo"] = informe
+    return respuesta
