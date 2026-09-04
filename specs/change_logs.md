@@ -2479,3 +2479,78 @@ Ambos `id` son `integer` de 32 bits, consultado al esquema vivo de Postgres y no
 **18 mutaciones y 18 detectadas.** Se rompió a propósito cada protección nueva, incluidas las tres que no son evidentes: invertir el orden de dedup y techo, sacarle la cota al elemento de la lista dejándosela a la lista, y hacer que el logo resuelva DNS como el feed. Las dos primeras las cazó un test distinto del que estaba escrito para ellas —`-x` corta en el primer fallo—, así que se volvieron a correr dirigidas contra su propio test para confirmar que no era casualidad.
 
 Y **los cuatro ataques repetidos contra el motor vivo**, sobre Postgres real, por HTTP de verdad y con token válido (el peor caso: atacante autenticado). Las 500 copias del feed de Perfil ahora se guardan como una y cuestan un pedido; 21 feeds distintos dan 422 nombrando el límite; `javascript:` y `data:text/html` en el logo dan 422 diciendo que el campo es el logo; los 500 KB dan `string_too_long`; y los seis `id` imposibles contra los dos `PATCH`, más `?limite=-1` y `?limite=0`, dan 422 en vez de 500. En la misma corrida se comprobó que lo legítimo sigue pasando: alta real de Perfil (50 items, 1 aviso), y el ciclo de deshabilitar y rehabilitar. Las filas de prueba se borraron después; la base quedó con los 8 medios que ya tenía.
+
+
+### Backlog punto 8: purga de cuerpos — borrar el texto ajeno una vez que cumplió su función (04/09/2026)
+
+**Cierra el punto 8 del backlog, parcialmente y a propósito.** El alcance es solo las noticias huérfanas —sin cluster, con su ventana ya vencida—; los clusters cerrados y entregados quedan afuera, aunque son candidatos por el mismo argumento de antigüedad. Es una segunda población con su propia condición de seguridad (la re-síntesis), y mezclarla acá habría resuelto dos problemas con una sola comprobación. Queda anotada como tanda aparte en `roadmap.md`.
+
+Medido antes de tocar nada: **22 MB de texto de terceros**, de los cuales **4.083 noticias (69%) ya habían vencido la ventana de 7 días** sin haber formado cluster nunca. Después de purgar: **6,58 MB**, **15,5 MB liberados**. Se corrió de verdad contra la base de producción, no solo contra los tests — ver "Verificación en vivo" más abajo.
+
+#### La decisión que definió el punto 4 del plan: medir antes de escribir código
+
+El plan original dejaba abierto cómo resolver el único consumidor que sí lee el corpus entero, `get_vectorizador` (TF-IDF de `preprocessing.py`), con dos caminos: excluir las purgadas del corpus, o dejar que aporten solo su título. Antes de elegir se armaron los dos vectorizadores contra la base real y se corrió `_terminos_propios` —lo que sale publicado como "qué destacó cada medio"— sobre 15 clusters ya sintetizados (38 pares cluster×medio):
+
+| | Vocabulario | Cambio de código |
+|---|---|---|
+| Hoy (cuerpo completo) | 109.127 términos | — |
+| Excluir del corpus | 29.679 términos | filtro en el `select` + resincronizar el disparador de reajuste |
+| Dejar que degrade solo | 32.457 términos | **ninguno** |
+
+El segundo camino no necesita tocar `preprocessing.py`: la línea que arma el corpus ya es `f"{n.titulo}. {n.contenido_limpio}"`, así que una fila con `contenido_limpio=''` se reduce sola a "solo título". Es la consecuencia automática de la **marca** elegida (`purgado_en` + `contenido_limpio=''`) y no una decisión aparte. Ganó por ser al mismo tiempo el más simple —cero código— y el que evita el riesgo que el propio plan había anotado: si el corpus excluyera filas, el conteo `total` que dispara el reajuste (línea 100) tendría que mirar exactamente el mismo filtro, y desincronizarlos sería el bug silencioso de siempre. Confirmado contra la base real después de purgar: **38.730 términos** (más que la simulación porque el corte real usó 7 días y no "toda huérfana", así que quedaron más noticias recientes aportando cuerpo completo).
+
+En los 38 pares revisados, `_terminos_propios` cambió en todos —nunca es idéntico al de hoy— pero los términos siguieron siendo coherentes con el tema de cada cluster; el "núcleo común" (lo que comparten los medios) se mantuvo prácticamente estable entre las tres variantes.
+
+#### La condición de seguridad que no estaba en el plan original
+
+`_limite_de_purga` no usa `DIAS_RETENCION_CUERPO` solo: usa `max(DIAS_RETENCION_CUERPO * 24, HORAS_CLUSTER_ABIERTO)`. La razón es un caso real y no una cautela decorativa: `HORAS_CLUSTER_ABIERTO` es configurable por el operador, y el propio comentario de `DIAS_RETENCION_CUERPO` invita a subirlo como la recuperación ante un problema (es lo que ya hace `HORAS_MAXIMAS_SIN_SINTETIZAR` con la síntesis). Si `HORAS_CLUSTER_ABIERTO` quedara alguna vez por encima de los 7 días de default, un límite de purga fijo le comería el cuerpo a noticias que `agrupar_pendientes` todavía considera candidatas a cluster — la purga rompiendo el clustering, en silencio. El `max()` hace que ese error de configuración no pueda pasar, en vez de confiar en que dos números configurados por separado se mantengan en el orden correcto. Hay dos tests que fijan exactamente este borde, subiendo `HORAS_CLUSTER_ABIERTO` a 300 h y comprobando que una huérfana de 200 h sobrevive mientras una de 310 h no.
+
+#### Qué sobrevive y qué no
+
+Se borra **solo `contenido_limpio`**, nunca la fila: sobreviven título, URL, guid, fecha, medio y el `embedding`, así que `GET /search` no se entera. La marca es `purgado_en` (nueva columna, migración `5a246beb14bd`) más `contenido_limpio=''` — no alcanza con la cadena vacía sola, porque sin la fecha no se puede distinguir "se purgó" de "nunca tuvo cuerpo" (que hoy no pasa: la ingesta descarta antes de insertar cualquier nota sin cuerpo, salvo por extracción).
+
+**Es irreversible, y se documentó así antes de escribir el endpoint.** El texto no vuelve —la ventana del feed que lo trajo ya pasó, ni re-ingiriendo se recupera— y el costo real no es perderlo para el producto (ya cumplió, se vectorizó antes de que este paso corra) sino no poder revectorizar si algún día cambia `EMBEDDING_MODEL`. Por eso `POST /purge?solo_contar=true` existe como primera clase: mide exactamente la misma condición sin escribir, para comprobar el alcance contra datos reales antes de tocarlos.
+
+`purgar_cuerpos_vencidos` corre como último paso de `_job_ingesta_programada`, después de la entrega — a propósito, para que nada de la corrida dependa de que haya pasado antes — y es idempotente por construcción: `purgado_en IS NULL` en la condición hace que correrla de más no tenga costo.
+
+#### Un defecto que destapó la propia disciplina de mutación, dos veces
+
+Al mutar a propósito el `session.commit()` (romperlo para confirmar que algún test lo cazaba), no lo cazó nada. La causa es del entorno de tests y no del código: la base SQLite en memoria usa una sola conexión (`StaticPool`), así que `session.refresh()` ve la escritura pendiente aunque nunca se haya confirmado — no hay una segunda conexión real contra la que distinguir "escrito" de "confirmado". El síntoma que sí importa (que la corrida siguiente, con una sesión nueva, no vea el cambio) no es observable en ese entorno. Se agregó un test que espía `session.commit` directamente (`patch.object(session, "commit", wraps=session.commit)`), primer caso de este patrón en la suite: verificar que el método se llamó es lo único equivalente que el entorno permite comprobar.
+
+**El segundo hallazgo fue un defecto del propio proceso de mutación, no del código.** El primer intento de correr la tanda de mutaciones se mató por timeout a mitad de una corrida, y quedó una mutación real aplicada y sin restaurar: el endpoint `POST /purge` había quedado con `solo_contar=False` hardcodeado, ignorando el parámetro de la query. La revisión posterior del diff lo encontró antes de commitear nada — ahí es donde sirvió releer el propio cambio en vez de confiar en que "la suite ya había pasado en verde" (había pasado, pero *antes* de que el script de mutaciones corrompiera el archivo). Corregido, y la tanda completa se volvió a correr desde una base confirmada limpia.
+
+#### Verificación
+
+707 tests (20 nuevos), `ruff` limpio, `alembic check` contra Postgres sin operaciones pendientes. **12 mutaciones y 12 detectadas** sobre `purga.py` y su cableado —incluidas las tres no evidentes: el `max()` de la ventana de seguridad, el orden solo-contar/escritura, y el `commit()` recién descripto—.
+
+**Verificación en vivo, contra la base de producción real:**
+1. `pg_dump` completo antes de tocar nada (22,3 MB, formato custom, verificado con `pg_restore --list`).
+2. `solo_contar=true`: 4.083 noticias, 16.246.730 bytes — coincidió exacto con la corrida real.
+3. Purga real: `{"evaluadas": 4083, "purgadas": 4083, "bytes_liberados": 16246730}`.
+4. Confirmado contra la base: `noticia` sigue en 5.880 filas (nada se borró), texto total 22 MB → 6,58 MB, y **`purgadas_con_cluster = 0`** — ninguna noticia agrupada fue tocada.
+5. Segunda corrida: `{"evaluadas": 0, "purgadas": 0}` — idempotente contra datos reales.
+6. Spot-check de filas purgadas: título y `embedding` intactos, `contenido_limpio` vacío.
+7. `get_vectorizador` reconstruido contra la base ya purgada: 38.730 términos, sin excepciones.
+8. `agrupar_pendientes` corrido contra el estado post-purga: sin excepciones.
+
+**Deliberadamente no se corrió `/synthesize` ni `/deliver`** como parte de esta verificación: el primero gasta la cuota de la API de síntesis y el segundo entregaría al back-end real, y ninguno de los dos hace falta para confirmar que la purga no rompió el pipeline — `agrupar_pendientes` y `get_vectorizador` ya lo prueban sin gastar nada.
+
+
+#### Revisión independiente antes de commitear, y las correcciones que salieron de ella (04/09/2026)
+
+Se pidió una revisión con un modelo distinto (Opus, sin el contexto de esta sesión) enfocada en un solo criterio: qué podía causar pérdida de información valiosa, dado que la purga es irreversible por diseño. Corrió mutaciones reales contra una copia del repo y auditó la corrida en producción con SQL de solo lectura, sin tocar nada. Encontró un hallazgo urgente, uno de alcance ya ejecutado, y varios menores. Los primeros dos se resolvieron con las decisiones del usuario; los menores se corrigieron todos.
+
+**El hallazgo urgente: `_condicion_de_purga` no exigía `embedding IS NOT NULL`.** El docstring del módulo daba por sentado que toda huérfana "ya se vectorizó antes de que este paso corra" — una suposición sobre el orden del pipeline, no algo que la consulta obligara. Si la vectorización fallara alguna corrida (`_correr_paso` está diseñado para que un paso roto avise y siga, no para frenar el job), esa noticia queda sin `embedding` y sin cluster posible para siempre —`agrupar_pendientes` exige el embedding—, y a los 7 días la purga le habría borrado el cuerpo igual: el único insumo del que sale ese embedding, justo cuando más hace falta para reintentar. Se agregó `Noticia.embedding.is_not(None)` a la condición. **Costo cero sobre lo ya purgado**: auditado contra la base real antes de tocar el código, 0 filas en ese estado.
+
+**El hallazgo de alcance ya ejecutado: 238 de las 4.083 filas purgadas eran notas sin hecho** (111 opinión, 80 recetas, 46 horóscopo, 1 juegos) — las que `categorias.py` excluye del agrupamiento a propósito y que ese mismo módulo promete conservar disponibles para que el back-end decida qué hacer con ellas. Nunca pueden agruparse, así que son huérfanas para siempre y quedaron adentro del alcance de "solo huérfanas" sin que nadie lo pensara como una decisión aparte. **Se evaluó y se decidió no revertir**: el back-end nunca leyó `contenido_limpio` (`GET /search` no lo devuelve, y no hay otro consumidor), así que la letra de la promesa de `categorias.py` sigue en pie aunque el espíritu no se haya discutido a tiempo. Queda anotado acá para que la próxima vez que se toque el alcance de esta purga, se decida a propósito y no por default. El backup (`pre_purga_20260904.dump`) sigue disponible si en algún momento se necesitara revertir específicamente esas 238 filas.
+
+**Las cuatro correcciones menores, todas aplicadas:**
+
+- **Los "bytes" contaban caracteres, no bytes.** `func.length()` de Postgres sobre `text` cuenta caracteres; con acentos y eñes de sobra en español, subestimaba el texto real liberado (verificado: `"ñññ"` da 3 con `length` y 6 con `octet_length`, tanto en Postgres como en el SQLite de los tests). Cambiado a `func.octet_length`. Los `16.246.730` que quedaron documentados arriba, de la corrida real, están subestimados por este motivo — no se recalculan retroactivamente porque el texto que los generó ya no existe para volver a medirlo.
+- **`purgadas` se copiaba del `SELECT COUNT` en vez de leer el `rowcount` real del `UPDATE`.** Son la misma condición evaluada dos veces con una ventana de tiempo en el medio; una purga concurrente sobre alguna de las mismas filas haría que el conteo previo sobrestimara lo que esta corrida tocó de verdad. Ahora `purgadas` sale de `resultado_update.rowcount`. `bytes_liberados` se queda atado al `SELECT` de arriba a propósito —no hay forma de medir el largo de un texto después de blanquearlo—, así que en el caso raro de una purga concurrente esa cifra queda como aproximación mientras `purgadas` es exacto.
+- **El comentario de `_limite_de_purga` comparaba 7 contra 12 en vez de 168 contra 12** (le faltaba el `*24` en la comparación, aunque el código sí lo tenía). Corregido en el código y en el docstring de la clase de test que lo ejercita — es exactamente el comentario que alguien podría usar para "simplificar" el código mal el día de mañana.
+- **La migración `5a246beb14bd` afirmaba que había dos consultas usando el índice; hay una sola.** Corregido el docstring, y se anotó que con ~30% de la tabla en `NULL`, Postgres probablemente prefiera un seq scan para ese `IS NULL` de todos modos — no se creó un índice parcial sin medir primero que haga falta, siguiendo la misma regla de "medir antes de resolver" del resto del backlog.
+
+**Cobertura agregada junto con las correcciones**: un test que prueba que una huérfana sin `embedding` no se purga; uno que confirma el conteo en octetos y no en caracteres; uno que fuerza (con un `session.exec` espiado) que `rowcount` difiera del conteo previo y confirma que `purgadas` sigue al primero; dos tests de punta a punta contra `POST /purge` **sin mockear el servicio** — cerraban un hueco real: los tres tests previos del endpoint mockeaban `purgar_cuerpos_vencidos` entero, así que nada probaba la garantía de `solo_contar=true` a través del camino HTTP completo; y `test_corre_los_ocho_pasos` pasó a verificar también el ORDEN de ejecución (que la purga corre último), no solo que cada paso se llamó una vez — antes hubiera pasado igual si alguien la movía al principio del job.
+
+**Verificación**: 712 tests (5 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes. **4 mutaciones y 4 detectadas** sobre las cuatro correcciones —sacar el chequeo de embedding, volver a `length`, volver a usar `evaluadas` como `purgadas`, y mover la purga al principio del job—. Confirmado con un dry-run contra Postgres real después de aplicar todo: `{"evaluadas": 0, ...}`, consistente con que ya no queda nada pendiente de purgar desde la corrida del punto anterior.

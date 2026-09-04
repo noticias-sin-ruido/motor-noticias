@@ -38,6 +38,7 @@ from .services.clustering import (
     fusionar_clusters_duplicados,
 )
 from .services.ingestion import ingerir_todos_los_medios
+from .services.purga import purgar_cuerpos_vencidos
 from .services.search import buscar_noticias_similares, listar_clusters
 from .services.synthesis import sintetizar_pendientes
 from .services.vectorization import vectorizar_pendientes
@@ -211,6 +212,12 @@ def _job_ingesta_programada() -> None:
         # corridas anteriores no tiene por qué esperar a que se arregle la
         # fusión. Por lo mismo tampoco necesita un job de reintento aparte.
         _correr_paso(session, "entrega al backend", entregar_pendientes)
+
+        # Al final a propósito: nada de lo que hizo esta corrida depende de que
+        # la purga haya pasado antes. Idempotente como el resto — una noticia
+        # ya purgada no vuelve a tocarse — así que corre todos los ciclos y no
+        # necesita su propio disparador.
+        _correr_paso(session, "purga de cuerpos", purgar_cuerpos_vencidos)
 
     fin = ahora_local()
     duracion = (fin - arranque).total_seconds()
@@ -408,6 +415,30 @@ def deliver(forzar: bool = False, session: Session = Depends(get_session)):
     que reenviarles lo trabado una vez resuelto.
     """
     stats = entregar_pendientes(session, forzar=forzar)
+    return {"status": "ok", **stats}
+
+
+@app.post("/purge")
+def purge(
+    solo_contar: bool = Query(
+        False,
+        description="Mide sin borrar: cuántas noticias y cuántos bytes tocaría.",
+    ),
+    session: Session = Depends(get_session),
+):
+    """
+    Borra el cuerpo de las noticias huérfanas que ya vencieron su ventana.
+
+    **Irreversible.** El cuerpo no vuelve: la ventana del feed que lo trajo ya
+    pasó, así que ni re-ingiriendo se recupera. `solo_contar=true` es la forma
+    de comprobar el alcance contra los datos reales antes de tocarlos, y es
+    exactamente lo que corre este endpoint sin el flag salvo por el `commit()`
+    final — mismo cálculo, misma condición.
+
+    Solo toca noticias sin cluster: una noticia agrupada, por vieja o entregada
+    que esté, no se purga acá. Ver `services/purga.py`.
+    """
+    stats = purgar_cuerpos_vencidos(session, solo_contar=solo_contar)
     return {"status": "ok", **stats}
 
 

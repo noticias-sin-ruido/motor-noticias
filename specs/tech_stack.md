@@ -65,7 +65,8 @@ sin_ruido/
 │       ├── topicos.py          # Taxonomía cerrada + sección declarada por el medio (Fase 4)
 │       ├── webhook_delivery.py # Entrega firmada de las síntesis al back-end (Fase 4)
 │       ├── alerts.py           # Avisos por mail ante fallo de cualquier paso
-│       └── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
+│       ├── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
+│       └── purga.py            # Borra el cuerpo de las huérfanas vencidas (backlog 8)
 │
 ├── alembic/                    # Migraciones de esquema
 │   ├── env.py                  # Toma DATABASE_URL de src.config
@@ -120,7 +121,7 @@ Medio (1) ─────→ (∞) Noticia
 ```
 
 - **Medio**: Fuente de noticias. **El roster lo maneja el operador** por `POST /medios` desde el punto 3 del backlog; `scripts/seed_medios.py` quedó como datos de ejemplo. Campos: `nombre` (único), `url_base`, `feeds_rss`, `activo`, `extraer_por_url`, `idioma`, `pais`, `logo_url`. **`activo=False` es la baja** — no hay borrado, porque `Noticia.medio_id` es NOT NULL con FK sin cascada. 7 activos: La Nación, TN, El Cronista, Perfil (generales) + Revista Gente, Revista Paparazzi, Ciudad Magazine (espectáculos). Perfil entra por la segunda vía de ingesta: su RSS no trae el cuerpo, se extrae desde la URL
-- **Noticia**: Artículo individual con `embedding` (Vector 384 dims)
+- **Noticia**: Artículo individual con `embedding` (Vector 384 dims). `purgado_en` (backlog punto 8): `None` mientras conserva su `contenido_limpio`; una fecha una vez que `services/purga.py` se lo borró (guarda `''`, no `NULL` — la columna es lo que distingue "se purgó" de "nunca tuvo cuerpo")
 - **Cluster**: El hecho y toda su cobertura. Agrupa por similitud semántica buscando no perder cobertura; **no** es la unidad que se publica
 - **Sintesis**: Un **ángulo** del cluster (el hecho, sus consecuencias, las reacciones) con su resumen neutro y comparativa de enfoques. Un cluster produce varias, y separarlas requiere leer los textos — lo hace el modelo en Fase 4
 - **SintesisNoticia**: Qué noticias respaldan cada ángulo. Es muchos-a-muchos porque una nota puede sostener varios ángulos, y es tabla (y no una lista JSON) porque de este join sale el `count(distinct medio_id)` que decide si el ángulo se publica

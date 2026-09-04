@@ -148,6 +148,37 @@ class TestDeliverEndpoint:
         assert mock.call_args.kwargs["forzar"] is True
 
 
+class TestPurgeEndpoint:
+    """Pruebas del endpoint manual POST /purge (backlog punto 8)."""
+
+    def test_purge_devuelve_las_stats(self, client: TestClient):
+        stats = {
+            "evaluadas": 4083, "bytes_evaluados": 16246730,
+            "purgadas": 4083, "bytes_liberados": 16246730,
+        }
+
+        with patch("src.main.purgar_cuerpos_vencidos", return_value=stats) as mock:
+            response = client.post("/purge")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", **stats}
+        assert mock.call_args.kwargs["solo_contar"] is False
+
+    def test_por_default_no_es_solo_contar(self, client: TestClient):
+        with patch("src.main.purgar_cuerpos_vencidos", return_value={}) as mock:
+            client.post("/purge")
+
+        assert mock.call_args.kwargs["solo_contar"] is False
+
+    def test_purge_pasa_el_solo_contar(self, client: TestClient):
+        """`solo_contar=true` es la corrida en seco: mide sin borrar."""
+        with patch("src.main.purgar_cuerpos_vencidos", return_value={}) as mock:
+            response = client.post("/purge?solo_contar=true")
+
+        assert response.status_code == 200
+        assert mock.call_args.kwargs["solo_contar"] is True
+
+
 class TestPipelineProgramado:
     """
     El job del scheduler aísla los pasos: uno que falla no frena a los que
@@ -155,35 +186,72 @@ class TestPipelineProgramado:
     """
 
     def _mocks(self, **overrides):
-        nombres = {
-            "ingerir_todos_los_medios": {"ok": True},
-            "vectorizar_pendientes": {"ok": True},
-            "cerrar_clusters_vencidos": {"ok": True},
-            "agrupar_pendientes": {"ok": True},
-            "fusionar_clusters_duplicados": {"ok": True},
-            "sintetizar_pendientes": {"ok": True},
-            "entregar_pendientes": {"ok": True},
-        }
+        # `PASOS_DEL_PIPELINE` (arriba) es la lista real de pasos: reusarla acá
+        # es lo que hace que agregar un paso nuevo al job no pueda dejar este
+        # dict desactualizado sin que un test lo note.
+        nombres = {paso: {"ok": True} for paso in PASOS_DEL_PIPELINE}
         nombres.update(overrides)
         return nombres
+
+    def test_corre_los_ocho_pasos_en_orden(self):
+        """
+        Nada más que probara `_job_ingesta_programada` chequeaba que un paso
+        estuviera de verdad enganchado al job -- los otros tests de esta clase
+        prueban aislamiento entre pasos que YA están, no que la lista completa
+        se llame. Un paso agregado y olvidado de conectar habría pasado la
+        suite entera igual.
+
+        Además del `call_count`, se registra el ORDEN real de ejecución: el
+        comentario de `main.py` y el changelog prometen que la purga corre
+        último, a propósito, y un test que solo mira "se llamó" pasaría igual
+        si alguien la moviera al principio del job.
+        """
+        from src import main
+
+        config = self._mocks()
+        orden: list = []
+
+        def registrar(nombre, valor):
+            def _lado(*args, **kwargs):
+                orden.append(nombre)
+                return valor
+            return _lado
+
+        with ExitStack() as pila:
+            mocks = {
+                nombre: pila.enter_context(
+                    patch.object(main, nombre, side_effect=registrar(nombre, valor))
+                )
+                for nombre, valor in config.items()
+            }
+            pila.enter_context(patch.object(main, "enviar_alerta"))
+            pila.enter_context(patch.object(main, "get_engine"))
+            pila.enter_context(patch.object(main, "Session"))
+            main._job_ingesta_programada()
+
+        for nombre, mock in mocks.items():
+            assert mock.call_count == 1, f"{nombre} no se llamó una vez"
+
+        assert orden[-1] == "purgar_cuerpos_vencidos", (
+            f"la purga tiene que correr última y corrió en la posición "
+            f"{orden.index('purgar_cuerpos_vencidos')} de {orden}"
+        )
 
     def test_un_paso_que_falla_no_frena_a_los_siguientes(self):
         from src import main
 
         config = self._mocks(vectorizar_pendientes=RuntimeError("boom"))
-        parches = []
-        for nombre, valor in config.items():
-            kwargs = (
-                {"side_effect": valor} if isinstance(valor, Exception)
-                else {"return_value": valor}
-            )
-            parches.append(patch.object(main, nombre, **kwargs))
 
-        with parches[0], parches[1], parches[2], parches[3], parches[4], parches[5], \
-             parches[6], \
-             patch.object(main, "enviar_alerta") as alerta, \
-             patch.object(main, "get_engine"), \
-             patch.object(main, "Session"):
+        with ExitStack() as pila:
+            for nombre, valor in config.items():
+                kwargs = (
+                    {"side_effect": valor} if isinstance(valor, Exception)
+                    else {"return_value": valor}
+                )
+                pila.enter_context(patch.object(main, nombre, **kwargs))
+            alerta = pila.enter_context(patch.object(main, "enviar_alerta"))
+            pila.enter_context(patch.object(main, "get_engine"))
+            pila.enter_context(patch.object(main, "Session"))
             main._job_ingesta_programada()
 
         # Avisó del fallo, pero la síntesis igual corrió.
@@ -205,6 +273,7 @@ class TestPipelineProgramado:
                           side_effect=RuntimeError("boom")), \
              patch.object(main, "sintetizar_pendientes") as sintesis, \
              patch.object(main, "entregar_pendientes") as entrega, \
+             patch.object(main, "purgar_cuerpos_vencidos"), \
              patch.object(main, "enviar_alerta"), \
              patch.object(main, "get_engine"), \
              patch.object(main, "Session"):
@@ -337,6 +406,7 @@ PASOS_DEL_PIPELINE = [
     "fusionar_clusters_duplicados",
     "sintetizar_pendientes",
     "entregar_pendientes",
+    "purgar_cuerpos_vencidos",
 ]
 
 

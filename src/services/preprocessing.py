@@ -101,6 +101,16 @@ def get_vectorizador(session: Session) -> TfidfVectorizer:
 
     if _vectorizador is None or total > _corpus_entrenado * (1 + settings.TFIDF_REFIT_RATIO):
         logger.info(f"Ajustando TF-IDF sobre {total} noticias")
+        # Una noticia purgada (`services/purga.py`, backlog punto 8) llega acá
+        # con `contenido_limpio=""`, así que esta misma línea la reduce sola a
+        # "solo título" — no hace falta filtrarla ni tratarla aparte. Medido
+        # antes de decidirlo: purgar 4.083 de 5.880 noticias baja el vocabulario
+        # de 109.127 a 32.457 términos, y los `_terminos_propios` de clusters
+        # reales siguieron siendo coherentes con el tema en la muestra revisada.
+        # La alternativa —excluir las purgadas del corpus— daba un vocabulario
+        # apenas más chico (29.679) a cambio de un filtro nuevo acá y de tener
+        # que sincronizar `total` (abajo) con ese mismo filtro para que el
+        # disparador de reajuste no se desincronice del contenido real.
         corpus = [
             f"{n.titulo}. {n.contenido_limpio}"
             for n in session.exec(select(Noticia)).all()

@@ -180,7 +180,7 @@ Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opci
 
 ## API
 
-Catorce endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
+Quince endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -190,6 +190,7 @@ Catorce endpoints. Los `POST` del pipeline son disparo manual de cada paso, que 
 | `POST` | `/cluster` | Cierra vencidos, agrupa las sueltas y fusiona duplicados |
 | `POST` | `/synthesize` | Genera las síntesis de los clusters publicables |
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
+| `POST` | `/purge` | Borra el cuerpo de las noticias huérfanas vencidas. **Irreversible**. Acepta `?solo_contar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
 | `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
@@ -412,7 +413,8 @@ src/
     ├── topicos.py       # taxonomía cerrada + sección declarada por el medio
     ├── webhook_delivery.py  # payload, firma HMAC y reintentos
     ├── alerts.py        # avisos por mail ante fallo de cualquier paso
-    └── search.py        # búsqueda semántica y listado
+    ├── search.py        # búsqueda semántica y listado
+    └── purga.py         # borra el cuerpo de las noticias huérfanas vencidas
 ```
 
 ---

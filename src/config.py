@@ -377,6 +377,22 @@ class Settings(BaseSettings):
     # seguidas sin respirar no es forma de presentarse.
     EXTRACCION_PAUSA_SEGUNDOS: float = 1.0
 
+    # --- Purga de cuerpos (backlog post-1.0, punto 8) ---
+
+    # Días desde que una noticia quedó fuera de juego —sin cluster y ya vencida
+    # su ventana— hasta que `services/purga.py` le borra el cuerpo.
+    #
+    # La ventana que la ata es `HORAS_CLUSTER_ABIERTO` (12 h): pasadas esas 12 h
+    # sin formar cluster, `agrupar_pendientes` deja de mirarla y no hay otra vía
+    # de entrada. 7 días son 14 veces ese plazo — bastante margen para notar un
+    # problema y recuperarlo subiendo `HORAS_CLUSTER_ABIERTO` antes de que el
+    # cuerpo se haya ido, y aun así acota cuánto texto de terceros se retiene.
+    #
+    # No se toca el resto de la tabla: una noticia CON cluster nunca se purga
+    # acá, sin importar cuán vieja o entregada esté su síntesis. Es una segunda
+    # población con su propia condición de seguridad — ver `services/purga.py`.
+    DIAS_RETENCION_CUERPO: int = 7
+
 
 # Instancia única de configuración, importada en el resto de la aplicación.
 settings = Settings()

@@ -269,15 +269,15 @@ Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el 
 
 Tres puntos de `tech_stack.md` (1, 4 y 6: engine de BD síncrono, scheduler embebido, modelo de embeddings en memoria por worker) comparten la misma condición: importan si el despliegue pasa de una réplica a varias, no por la cantidad de medios que se ingieran con la réplica única actual. Fase 5 fijó a propósito un solo proceso Uvicorn sin `--workers`; mientras eso no cambie, estos tres quedan correctamente diferidos.
 
-### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función
+### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función ✅ COMPLETO, PARCIAL (04/09/2026)
 
-**Último en la lista a propósito: hoy no genera inconvenientes.** No son tantas noticias y el espacio que ocupan tampoco aprieta. Se hace cuando alguna de las dos cosas cambie.
+**Cerrado para las noticias huérfanas; la población agrupada queda afuera a propósito.** `services/purga.py` borra `contenido_limpio` —nunca la noticia— de lo que nunca formó cluster y ya venció su ventana. Corrido de verdad contra la base real: **22 MB de texto ajeno → 6,58 MB**, 4.083 noticias purgadas (el MB liberado está subestimado: la primera versión medía caracteres y no bytes, corregido después — ver más abajo). Detalle completo, incluida la medición que decidió el corpus de TF-IDF y la verificación en vivo con backup previo, en `change_logs.md`.
 
-Borrar **solo `contenido_limpio`** —no la noticia— cuando su cluster ya cerró, se sintetizó y se entregó, más un margen. Medido al 20/08/2026: **17,5 MB de texto ajeno**, del cual el **71% (3.186 de 4.485) es de artículos que nunca formaron cluster y ya no pueden formarlo**, porque quedaron fuera de la ventana.
+**Revisión independiente antes de commitear** (mismo día): encontró que la condición de purga no exigía que la noticia estuviera vectorizada —cerrado, sin costo sobre lo ya purgado— y que 238 de las 4.083 filas purgadas eran notas sin hecho (opinión, recetas, horóscopo) que `categorias.py` promete mantener disponibles para el back-end. Se decidió no revertirlas —el back-end nunca leyó ese campo— pero queda anotado como una decisión de alcance que se tomó por default y no a propósito. Detalle completo en `change_logs.md`.
 
-Sobrevive todo lo demás —título, URL, fecha, categoría y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
+Sobrevive todo lo demás —título, URL, fecha, medio y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
 
-**Rompe un solo consumidor**: el corpus de TF-IDF ajusta sobre `select(Noticia)` sin filtro ([preprocessing.py:105](src/services/preprocessing.py#L105)). Hay que decidir entre incluir las purgadas solo con título o excluirlas con una ventana móvil.
+**Lo que queda deliberadamente afuera de esta tanda**: los clusters cerrados, sintetizados y entregados, que son candidatos por el mismo argumento de antigüedad. Es una segunda población con su propia condición de seguridad —la re-síntesis: `clusters_pendientes` puede reabrir un cluster viejo si llega material nuevo de un medio que ya estaba— y mezclarla acá habría resuelto dos problemas con una sola comprobación. Queda como tanda aparte, sin medir todavía cuánto libera.
 
 **El costo real de purgar** no es perder el texto para el producto —ya cumplió— sino **no poder revectorizar si algún día se cambia `EMBEDDING_MODEL`**: habría que re-ingerir, y lo que salió de la ventana del feed no vuelve.
 
