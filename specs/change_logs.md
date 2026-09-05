@@ -2674,3 +2674,85 @@ Se agregó `TestLaCadenaConTraduccionRealDeExcepciones`, donde el único mock es
 **Un hallazgo del propio test.** El primer intento montaba dos modelos con variables inexistentes para forzar dos fallos de credencial, y no entró ninguno a la cadena: `_tiene_credencial_propia` filtra a los suplentes cuya variable no resuelve, así que **"un suplente sin credencial" es un estado que no existe**. La cadena solo puede tener suplentes que sí pueden autenticarse. Quedó escrito en la fixture, porque es una propiedad del diseño que no era evidente.
 
 **Y las clases mockeadas ahora dicen hasta dónde llegan.** No se desmockeó nada que estuviera bien mockeado —eso habría sido cambiar tests correctos por tests lentos— pero cada clase apunta a dónde se prueba lo que ella no puede probar. Un test que dice qué cubre vale más que uno que aparenta cubrir todo.
+
+#### Las seis afirmaciones pendientes, verificadas — y las dos que se arreglaron (05/09/2026)
+
+La tanda del 6-bis cerró con **seis afirmaciones de la revisión independiente sin verificar**, dicho de frente en el commit: después de que dos de diez no resistieran, ninguna merecía crédito hasta comprobarla. Se comprobaron las seis.
+
+**El paso cero fue recuperar el texto literal**, y no es ceremonia. Las seis estaban resumidas por mí, no en las palabras del revisor — y una de las dos que se había caído lo hizo justamente por un encuadre mal parafraseado. Verificar sobre la paráfrasis era arriesgarse al mismo error, así que se fue a buscar el reporte original al transcript de la sesión antes de tocar nada.
+
+**El método: cada afirmación se resuelve por algo que corre**, o por lectura contra la fuente cuando la pregunta es de criterio y no de comportamiento — diciendo cuál de las dos fue. Es la contracara del error que hizo caer a las dos primeras: el revisor había probado lo que su propio mock devolvía.
+
+| Afirmación | Cómo se resolvió | Estado |
+|---|---|---|
+| Amplificación de costo en `/clusters/{id}/synthesize` | Sonda con contador | **Confirmada**: 5 POST = 5 llamadas al proveedor |
+| Reset de `enviado_backend`/`intentos_envio` | Lectura + sonda | **Confirmada, y deliberada** — el comentario de `_persistir` ya la explica |
+| Re-síntesis de un cluster `descartado` | Sonda | **Confirmada**: 200, y la síntesis queda lista para entregar |
+| `ErrorDeProveedor` → 500 | Sonda | **Confirmada, y peor**: no había ni handler genérico |
+| `POST /modelos` como oráculo de variables | Sonda comparativa | **Confirmada**, impacto bajo |
+| Siete comentarios desactualizados | Lectura mecánica | **Confirmados los siete**, palabra por palabra |
+
+**Y una séptima que se reabrió.** El hallazgo del "modelo apagado que entra a la cadena" se había descartado por encuadre equivocado, y al releer el reporte literal resultó que **el descarte respondía a una versión más débil de la afirmación que la que el revisor había corrido**. Lo que no significa nada es que un no-titular esté en `activo=False` — eso es cierto por construcción, porque `_apagar_los_demas` garantiza como mucho un activo. Lo que sí importa es lo otro: si el operador reemplaza un titular que resultó malo prendiendo otro, el viejo **vuelve solo a la cadena como suplente** si tiene credencial propia, contradiciendo el docstring de `activar_modelo`, que promete que apagar es la marcha atrás. Verificado con sonda. Queda anotado, sin arreglar todavía: cambiar qué significa `activo` es una decisión de producto y merece su propia discusión.
+
+Lo que **no** se pudo verificar sigue sin verificarse, y se dice: la sub-afirmación de que las re-síntesis duplican ángulos depende de si el modelo obedece la instrucción en prosa del prompt —`construir_prompt` sí le manda los `id` de los ángulos existentes— y eso no se prueba con un mock que ya decidió desobedecerla.
+
+#### Corrección 1: `POST /modelos` era un oráculo de qué variables existen
+
+`OpenAICompatible.__init__` leía la credencial **antes** de validar el host. Como una variable inexistente cortaba ahí, el mensaje de error revelaba si esa variable existía en el servidor **sin necesidad de un host permitido**: bastaba con nombrarla. Dos 422 distinguibles, corridos y comparados.
+
+Se invirtió el orden. Ahora cualquiera que pruebe con un host no confiable —el único caso que le sirve a quien ataca, porque exfiltrar necesita ese host igual— recibe siempre el mismo "host no declarado", exista la variable o no. Un operador legítimo, con su host ya declarado, sigue viendo el mensaje específico de credencial faltante: **no se le sacó diagnóstico, se le sacó al desconocido**.
+
+Se evaluó la alternativa —un mensaje genérico en el 422— y se descartó: cierra el síntoma dejando el orden intacto, y le cuesta al operador la pista de cuál de los dos problemas tiene.
+
+**El arreglo destapó un tercer hueco de aislamiento en la suite.** `test_synthesis.py` construye modelos con `base_url="https://proveedor.test/v1"` y **nunca declaraba `MODELO_HOSTS_PERMITIDOS`**. Hasta el reorden nunca se notó, porque la credencial fallaba primero y el chequeo de host no llegaba a correr. Invertido el orden, el resultado de ese test pasó a depender de lo que hubiera en el `.env` real de la máquina. Es la misma familia que `sin_credencial_de_ia` y `api_sin_token`, que nacieron las dos de un problema idéntico: **un test no puede depender de una variable que nadie en ese archivo pidió**. Se le agregó al archivo su propia fixture `hosts_declarados`, como la que `test_modelos.py` ya tenía.
+
+#### Corrección 2: un 429 del proveedor terminaba en un 500 sin manejar
+
+`llamar_modelo` traducía todo `ErrorDeProveedor` a un `ValueError` pelado para que `tenacity` lo reintentara. `sintetizar_pendientes` lo atrapaba igual —su `except Exception` no distingue—, pero `POST /clusters/{id}/synthesize` solo atajaba `SintesisSinConfigurar` y `SintesisBloqueada`. Resultado: **un rate limit del proveedor, que es la condición más esperable de ese endpoint, salía como un 500 sin cuerpo** — justo lo que este archivo ya documentó al fijar `MAX_ID` que un 500 no puede significar.
+
+Se agregó `SintesisFallida`, que es lo que queda de un `ErrorDeProveedor` cuando los tres intentos se agotaron, y el endpoint la traduce a 422. **El retry no cambió**: la clase nueva tampoco está en `retry_if_not_exception_type`, así que se sigue reintentando exactamente igual; lo único que cambia es qué queda cuando los reintentos terminan.
+
+Se evaluó atrapar `ValueError` a secas en el endpoint —una línea en vez de una clase— y se descartó por lo de siempre en este repo: taparía un bug propio que levante `ValueError` por otro motivo y lo reportaría como "el proveedor tuvo un problema", que es un diagnóstico que manda a buscar el error al lugar equivocado.
+
+#### Verificación
+
+768 tests (5 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes.
+
+**2 mutaciones y 2 detectadas**: revertir el orden en `OpenAICompatible.__init__` (lo caza el test nuevo del oráculo, levantando la excepción equivocada) y sacar el `except SintesisFallida` del endpoint (lo caza el test de endpoint, con el 500 sin manejar de vuelta). Las dos se restauraron y se re-corrió la suite entera después.
+
+Las sondas de las seis afirmaciones se re-corrieron contra el código ya arreglado: el oráculo devuelve mensajes idénticos para variable existente e inexistente, y el endpoint devuelve 422 con los tres reintentos de `tenacity` corridos de verdad.
+
+**Un error propio, encontrado revisando el diff antes de commitear.** Al insertar el test nuevo, un `Edit` empujó la línea `mock.assert_not_called()` del test vecino hasta el final del mío; al ver el `NameError` se la tomó por un resto de copy-paste y se la borró, sacándole en silencio una aserción a un test que ya existía. Lo delató `ruff` con un `F841` sobre una variable que quedó sin usar, y el `git diff` contra `HEAD` mostró qué había pasado. Queda como recordatorio de por qué el diff se lee antes de commitear y no después.
+
+#### Lo que la realidad dijo sobre el multimodelo (05/09/2026)
+
+La cadena de fallback sigue **sin probarse contra dos proveedores reales**, y ahora se sabe por qué con datos y no por falta de intentos:
+
+- **`groq-qwen` no sirve en el tier gratuito.** Con el host declarado y la credencial válida, el sondeo pega contra un techo de **1000 tokens de salida por minuto** para `qwen/qwen3.6-27b`. Con `max_tokens` acotado a 900 el primer mecanismo devuelve un JSON inválido —no le alcanza para armarlo— y el segundo ya no entra en la cuota del mismo minuto. Una síntesis real necesita bastante más que eso.
+- **`gemini-3.8-flash` está saturado del lado de Google**: `503 UNAVAILABLE` en 3 de 3 intentos a lo largo de varios minutos, con dos credenciales distintas. Que el problema es del modelo y no de la cuenta quedó aislado con un control: la misma credencial nueva sondeó bien contra `gemini-3.5-flash-lite`, y el titular con la credencial vieja respondió al primer intento en el mismo momento.
+
+Como efecto de la prueba, `gemini-3.8-flash` quedó apuntando a `MODELO_API_KEY_GEMINI2` en vez de compartir la variable del titular — que era lo que lo dejaba fuera de la cadena por `_tiene_credencial_propia`. Está cargada y lista para el día que Google libere capacidad. **No hay endpoint para cambiar `api_key_env` de una fila ya creada**: el `PATCH` solo acepta `activo`, así que se hizo por SQL directo. Vale anotarlo como hueco de la API, no como decisión.
+
+#### Una trampa de sesión que el `expunge` no cubre
+
+Una corrida completa del pipeline a mano falló en la síntesis con `DetachedInstanceError`, y **reproducida en aislamiento** resultó ser una precondición que nadie había escrito: `sintetizar_pendientes(session, modelo)` no tolera un `ModeloIA` cargado **antes** de otros pasos que commitean. Con `expire_on_commit=True` ese objeto queda expirado, y el `expunge` de adentro —que existe para evitar el N+1— lo desprende *sin valores*, así que el primer acceso a un atributo revienta.
+
+Ningún camino de producción la pisa hoy: `POST /synthesize?modelo_id=` carga el modelo justo antes de llamar. Pero **el caso de uso para el que se construyó 6-bis sí la pisaría**: una app de escritorio que orquesta pasos y después elige modelo es exactamente un llamador que sostiene ese objeto a través de commits. El propio código ya advierte de esta trampa para su orden interno (`synthesis.py`, "es la misma trampa que ya está documentada más arriba"), pero la advertencia no cubre la precondición del llamador. Es la tercera vez que esta trampa aparece en el repo.
+
+#### La corrida completa, con los números
+
+Corrida real de punta a punta con el modelo titular, **sin el paso de entrega al back-end**, para tener números frescos:
+
+| Paso | Resultado |
+|---|---|
+| Ingesta | 363 noticias nuevas de 7 medios, 30 duplicadas, 0 feeds fallados — 72,1 s |
+| Vectorización | 363 de 363 — 11,4 s |
+| Cierre de vencidos | 63 evaluados → 53 procesados, 10 descartados |
+| Agrupamiento | 27 clusters creados, 158 sin match |
+| Fusión | 27 evaluados → 1 fusionado |
+| Síntesis | **26 de 26**, 30 ángulos creados, 0 fallidos, 0 bloqueados, 0 descartados |
+| Purga (solo contar) | 1 huérfana, 1.711 bytes, 0 purgadas |
+
+**Las mediciones viejas se sostienen**, que es lo que esta corrida venía a comprobar: **9,2 s por cluster** contra los ~8,7 s que este archivo ya tenía anotados, y **26,7% del ciclo** de 15 minutos para 26 clusters contra el 23% que se había medido para 24. La estimación con la que se descartaron los hilos por modelo era buena.
+
+`agotados` quedó vacío y `por_modelo` en `{'gemini-por-defecto': 26}`: la cadena **no se activó ni una vez**, así que esta corrida no dice nada sobre el fallback. Lo único que probó es que el titular solo alcanza.

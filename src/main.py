@@ -45,6 +45,7 @@ from .services.search import buscar_noticias_similares, listar_clusters
 from .services.synthesis import (
     _RESOLVER,
     SintesisBloqueada,
+    SintesisFallida,
     SintesisSinConfigurar,
     sintetizar_cluster,
     sintetizar_pendientes,
@@ -548,6 +549,18 @@ def synthesize_cluster(
             content={
                 "status": "error",
                 "detalle": f"El proveedor bloqueó el contenido: {error}",
+            },
+        )
+    except SintesisFallida as error:
+        # 422 y no 500: un rate limit o un JSON mal armado del proveedor no es
+        # que "se rompió algo nuestro" — es la condición más esperable de este
+        # endpoint, y antes de esto quedaba indistinguible de un bug real. El
+        # mensaje ya viene saneado desde `llamar_modelo`.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "status": "error",
+                "detalle": f"El proveedor tuvo un problema técnico: {error}",
             },
         )
 

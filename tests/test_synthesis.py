@@ -56,6 +56,28 @@ MODELO = ModeloIA(
 
 
 @pytest.fixture(autouse=True)
+def hosts_declarados(monkeypatch):
+    """
+    Declara `proveedor.test` en `MODELO_HOSTS_PERMITIDOS`, para todo el archivo.
+
+    **Sin esto, el resultado de un test podía depender de lo que hubiera de
+    verdad en el `.env` del desarrollador.** Lo destapó invertir el orden de
+    `OpenAICompatible.__init__` (host antes que credencial, para cerrar un
+    oráculo -- ver `test_modelos.TestElHostSeValidaAntesQueLaCredencial`):
+    `TestLaCadenaConTraduccionRealDeExcepciones` construye modelos con
+    `base_url="https://proveedor.test/v1"`, y hasta ese cambio el chequeo de
+    host nunca se ejecutaba en esos tests porque la credencial fallaba
+    primero. Al invertirse el orden, el host pasó a validarse de verdad, y
+    como este archivo -- a diferencia de `test_modelos.py`, que ya tiene su
+    propia `hosts_declarados` -- nunca lo declaraba, el resultado pasaba a
+    depender de si `MODELO_HOSTS_PERMITIDOS` en el `.env` real incluía o no
+    ese host. Mismo criterio que `conftest.sin_credencial_de_ia`: el test no
+    puede depender de una variable que nadie en este archivo pidió.
+    """
+    monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "proveedor.test")
+
+
+@pytest.fixture(autouse=True)
 def modelo_configurado(session: Session):
     """
     Deja un modelo activo en la base, para todos los tests del archivo.
@@ -1187,11 +1209,16 @@ class TestLlamarModelo:
         assert proveedor.generar.call_count == 1
 
     def test_un_error_del_proveedor_se_reintenta(self):
-        """Un 429 o un JSON mal armado se arreglan solos en el intento siguiente."""
+        """
+        Un 429 o un JSON mal armado se arreglan solos en el intento siguiente,
+        y si los tres fallan queda `SintesisFallida` -- no un `ValueError` a
+        secas, que es lo que dejaba `POST /clusters/{id}/synthesize` sin nada
+        que atajarlo y terminaba en un 500 sin manejar.
+        """
         proveedor = self._proveedor(side_effect=ErrorDeProveedor("HTTP 429"))
 
         with patch.object(synthesis, "construir", return_value=proveedor):
-            with pytest.raises(ValueError):
+            with pytest.raises(synthesis.SintesisFallida):
                 synthesis.llamar_modelo("un prompt", MODELO)
 
         assert proveedor.generar.call_count == 3

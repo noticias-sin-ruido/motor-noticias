@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-642%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-768%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
@@ -196,7 +196,7 @@ Dieciséis endpoints. Los `POST` del pipeline son disparo manual de cada paso, q
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
 | `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
 | `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
-| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** |
+| `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** — pero apagar no lo saca de la cadena de fallback si tiene credencial propia |
 | `GET` | `/medios` | Los medios cargados, activos y deshabilitados |
 | `POST` | `/medios` | Da de alta un medio **después de sondear sus feeds**. Nace habilitado |
 | `PATCH` | `/medios/{id}` | Habilita o deshabilita un medio. Acepta `?activo=`. **Deshabilitar no borra** |
@@ -359,6 +359,10 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 
 **El adaptador es código, la configuración es dato.** El enum `Adaptador` está cerrado a propósito: si la fila de la base pudiera nombrar una ruta de import, dar de alta un modelo sería ejecución remota de código. La fila dice *qué* modelo y contra *qué* `base_url`; **la credencial vive en el entorno y nunca en la base**, que se respalda, se dumpea y se lee desde endpoints.
 
+**Un modelo por cluster, y una cadena que no pierde la corrida.** El modelo activo es el default desatendido y encabeza la cadena; detrás van los suplentes **con credencial propia**, en una variable `MODELO_API_KEY_<SUFIJO>` distinta. Compartir la variable del titular es compartir su cuota, así que caer de Gemini a Gemini no resuelve nada cuando lo agotado es la cuota de Gemini — **configurar esa variable es el opt-in**, no hace falta una columna que declare quién es suplente. Dos fallos seguidos sacan a un modelo por lo que queda de la corrida: sin ese cortocircuito, con la cuota agotada cada cluster paga sus tres reintentos con espera creciente antes de caer al siguiente. Un **bloqueo de contenido no cae al siguiente**, y es deliberado: buscar un proveedor que acepte lo que otro rechazó por sus filtros es rodear una negativa de seguridad. Y un `?modelo_id=` explícito **apaga la cadena** — si alguien eligió un modelo, caer en silencio a otro contradice la elección y dejaría en `modelo_usado` una serie histórica que dice que se usó uno que nadie pidió.
+
+**`activo=False` significa "no es el default", no "no se usa".** Un modelo apagado que tenga credencial propia sigue entrando a la cadena como suplente, así que apagarlo no alcanza para dejar de pagarlo: hay que desconfigurar su variable. Está anotado en el roadmap como decisión de producto pendiente, porque el docstring de `PATCH /modelos/{id}` promete que apagar es la marcha atrás y con multimodelo eso dejó de ser cierto.
+
 **El motor tenía logging pero no salida.** Los 16 módulos llaman a `logging` y no había un solo handler: todo `INFO` se descartaba, incluido **el porcentaje del ciclo que consumía cada corrida** — el número con el que se calibra el intervalo del scheduler. Un log que falta no se parece a un error, y por eso sobrevivió a las cinco fases.
 
 ---
@@ -366,13 +370,13 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 642 tests
+pytest                                            # 768 tests
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
 ```
 
-**642 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+**768 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
 
 **Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 

@@ -362,6 +362,43 @@ class TestHostsDeclarados:
             OpenAICompatible(_modelo(base_url="http://169.254.169.254/latest"))
 
 
+class TestElHostSeValidaAntesQueLaCredencial:
+    """
+    El orden de `OpenAICompatible.__init__` es la defensa contra un oráculo.
+
+    Hallazgo de una revisión independiente sobre el punto 6-bis: `POST
+    /modelos` distinguía dos 422 según si la variable de `api_key_env`
+    existía o no, sin que hiciera falta un host confiable de por medio —
+    `leer_api_key` corría antes que `validar_base_url`, así que nombrar una
+    variable inexistente cortaba ahí y nunca llegaba a mirar el host. Bastaba
+    con probar nombres de variable contra `POST /modelos` para saber cuáles
+    existen en el servidor, sin ningún host permitido.
+
+    Invertido el orden, un host no confiable falla siempre con el mismo
+    mensaje, exista la variable o no — que es el único caso que le importa a
+    quien ataca, porque exfiltrar la credencial de verdad necesita ese host
+    permitido de cualquier forma. Un operador legítimo, con un host ya
+    declarado, sigue viendo el mensaje específico de credencial faltante.
+    """
+
+    def test_host_no_declarado_gana_aunque_la_variable_no_exista(self):
+        """
+        Sin `key`: `ENV_OK` no está seteada. Si el orden estuviera al revés,
+        esto levantaría `ProveedorNoConfigurado` por la variable, y el test
+        fallaría por levantar la excepción equivocada.
+        """
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url="https://atacante.test/v1"))
+
+    def test_con_host_declarado_el_diagnostico_de_credencial_sigue_intacto(self):
+        """
+        La otra mitad: un operador legítimo, con un host que sí declaró, no
+        pierde el mensaje que le dice qué variable falta configurar.
+        """
+        with pytest.raises(ProveedorNoConfigurado, match=ENV_OK):
+            OpenAICompatible(_modelo(base_url="https://proveedor.test/v1"))
+
+
 class TestAdaptadorCompatible:
     def test_pide_estructura_por_response_format(self, key):
         with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)) as post:

@@ -136,6 +136,27 @@ class SintesisSinConfigurar(Exception):
     """
 
 
+class SintesisFallida(Exception):
+    """
+    El proveedor tuvo un problema técnico y `tenacity` ya agotó los reintentos.
+
+    Es lo que queda de un `ErrorDeProveedor` (un 429, un JSON mal armado, un
+    `base_url` que dejó de responder) después de los 3 intentos de
+    `llamar_modelo` — reintentar de nuevo con la misma entrada tiene el mismo
+    chance de andar que el intento siguiente del scheduler, no uno mejor.
+
+    **Antes de que existiera esta clase, ese caso subía como un `ValueError` a
+    secas.** `sintetizar_pendientes` lo atrapaba igual —un `except Exception`
+    genérico no distingue—, pero `POST /clusters/{id}/synthesize` solo
+    atajaba `SintesisSinConfigurar` y `SintesisBloqueada`, así que un rate
+    limit del proveedor —la condición más esperable de ese endpoint— salía
+    como un 500 sin manejar: exactamente lo que `main.py` documenta que un 500
+    no puede significar ("se rompió algo nuestro", no "el proveedor tuvo un
+    problema pasajero"). El mensaje ya viene saneado desde `llamar_modelo`, así
+    que exponerlo en un 4xx no reabre ninguna fuga.
+    """
+
+
 # --- Esquema de la respuesta del modelo -------------------------------------
 # Se le pasa al proveedor como esquema estructurado para que devuelva JSON
 # válido por construcción, en vez de pedírselo en prosa y parsear a la
@@ -638,9 +659,12 @@ def llamar_modelo(prompt: str, modelo: ModeloIA) -> RespuestaSintesis:
         # No nombra variables del entorno ni la configuración del operador.
         raise SintesisSinConfigurar(f"{modelo.nombre}: {error}") from error
     except ErrorDeProveedor as error:
-        # Este sí se deja subir como error común para que `tenacity` reintente:
-        # un 429 o un JSON mal armado se arreglan solos.
-        raise ValueError(f"{modelo.nombre}: {error}") from error
+        # `SintesisFallida` no está en `retry_if_not_exception_type` de arriba,
+        # así que esto SIGUE reintentándose igual que antes —el cambio no toca
+        # el comportamiento de `tenacity`, solo lo que queda cuando los 3
+        # intentos se agotan—: un 429 o un JSON mal armado se arreglan solos
+        # en el intento siguiente, y recién si los tres fallan esto sube.
+        raise SintesisFallida(f"{modelo.nombre}: {error}") from error
 
 
 def _sin_acentos(texto: str) -> str:

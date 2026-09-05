@@ -769,6 +769,67 @@ class TestSynthesizeDeUnCluster:
         assert respuesta.status_code == 422
         mock.assert_not_called()
 
+    def test_fallo_tecnico_del_proveedor_es_422_y_no_500(
+        self, client: TestClient, session
+    ):
+        """
+        El hallazgo real: un `ErrorDeProveedor` que agota los 3 reintentos de
+        `tenacity` (un 429, un JSON mal armado) llegaba hasta acá como un
+        `ValueError` sin atajar en ningún `except` de este endpoint, y salía
+        como un 500 sin manejar — justo la condición más esperable de este
+        endpoint, indistinguible de un bug del motor.
+
+        **Se mockea `synthesis.llamar_modelo`, no `sintetizar_cluster`.** Un
+        mock un nivel más arriba no habría visto si el endpoint atrapa lo que
+        la traducción real produce, que es justamente lo que fallaba antes de
+        que existiera `SintesisFallida`.
+        """
+        from datetime import datetime
+
+        from src.models import Medio, Noticia
+        from src.services import synthesis
+        from src.services.synthesis import SintesisFallida
+
+        session.add(
+            ModeloIA(nombre="titular", adaptador=Adaptador.GEMINI, modelo="m", activo=True)
+        )
+        cluster = Cluster(titulo_evento="Evento", estado="abierto")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        for i, nombre in enumerate(("Uno", "Dos")):
+            medio = Medio(
+                nombre=nombre,
+                url_base=f"https://{nombre}.test",
+                feeds_rss=[f"https://{nombre}.test/rss"],
+            )
+            session.add(medio)
+            session.commit()
+            session.refresh(medio)
+            session.add(
+                Noticia(
+                    medio_id=medio.id,
+                    cluster_id=cluster.id,
+                    titulo=f"Titulo {i}",
+                    url=f"https://{nombre}.test/{i}",
+                    guid=f"guid-{i}",
+                    contenido_limpio="Cuerpo suficientemente largo de la nota.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+        session.commit()
+
+        with patch.object(
+            synthesis, "llamar_modelo",
+            side_effect=SintesisFallida("titular: HTTP 429 Too Many Requests"),
+        ):
+            respuesta = client.post(f"/clusters/{cluster.id}/synthesize")
+
+        assert respuesta.status_code == 422
+        assert respuesta.status_code != 500
+
 
 class TestLaSuiteNoPuedeGastarCuota:
     """

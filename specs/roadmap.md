@@ -266,7 +266,17 @@ Ver `change_logs.md`, "Backlog punto 3".
 
 **Lo que queda deliberadamente afuera**: el reparto proactivo de cupo (la mitad pesada, y sigue sin hacer falta), los hilos por modelo (ninguno de los dos modos de uso corre dos modelos a la vez, y la síntesis usa el 23% del ciclo), y la interfaz de escritorio, que se construye cuando exista la app.
 
-**Sin probar contra dos proveedores reales.** La cadena está verificada contra mocks y con mutación, pero no hay una segunda credencial configurada todavía. Es lo primero que hay que hacer el día que aparezca.
+**Sin probar contra dos proveedores reales, y ahora se sabe por qué** (05/09/2026). La cadena está verificada contra mocks y con mutación. Se intentó probarla de verdad y los dos candidatos fallaron por motivos ajenos al motor:
+
+- **`groq-qwen`**: credencial válida y host declarado, pero el tier gratuito topea en **1000 tokens de salida por minuto** para `qwen/qwen3.6-27b`. Ni siquiera el pedido mínimo del sondeo entra. Requeriría plan pago.
+- **`gemini-3.8-flash`**: `503 UNAVAILABLE` en 3 de 3 intentos con dos credenciales distintas. Aislado con un control —la misma credencial nueva sondeó bien contra `gemini-3.5-flash-lite`—, así que es el modelo y no la cuenta. Quedó apuntando a `MODELO_API_KEY_GEMINI2`, listo para cuando Google libere capacidad.
+
+**Lo que quedó abierto de la verificación de hallazgos** (05/09/2026), confirmado con sondas pero sin arreglar:
+
+- **Amplificación de costo**: `POST /clusters/{id}/synthesize` no tiene guarda de idempotencia — N llamadas son N llamadas al proveedor. Se le suma que cada una resetea `enviado_backend`/`intentos_envio` (deliberado, pero el efecto combinado no se evaluó) y que **no mira el estado del cluster**: uno `descartado` se sintetiza igual y queda listo para entregar.
+- **Qué significa `activo=False` con multimodelo**: un modelo que el operador apaga —reemplazándolo por otro— vuelve solo a la cadena como suplente si tiene credencial propia, contradiciendo el docstring de `activar_modelo`. Es una decisión de producto, no un parche.
+- **No hay forma de cambiar `api_key_env` de una fila ya creada**: el `PATCH` solo acepta `activo`. Hoy se resuelve por SQL directo.
+- **Una precondición no escrita**: `sintetizar_pendientes(session, modelo)` no tolera un `ModeloIA` cargado antes de pasos que commitean (queda expirado, y el `expunge` interno lo desprende sin valores). Ningún camino de producción la pisa hoy, **pero la app de escritorio de este mismo punto sí la pisaría**.
 
 **Lo que sí habría que revisar**: `PATCH ?activo=true` sondea contra el proveedor justamente porque con credencial única la variable no dice de quién es la key. Con nombres por proveedor esa comprobación vuelve a poder ser barata — pero conviene medir antes de aflojarla.
 
