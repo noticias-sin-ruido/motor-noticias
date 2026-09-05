@@ -2554,3 +2554,123 @@ Se pidió una revisión con un modelo distinto (Opus, sin el contexto de esta se
 **Cobertura agregada junto con las correcciones**: un test que prueba que una huérfana sin `embedding` no se purga; uno que confirma el conteo en octetos y no en caracteres; uno que fuerza (con un `session.exec` espiado) que `rowcount` difiera del conteo previo y confirma que `purgadas` sigue al primero; dos tests de punta a punta contra `POST /purge` **sin mockear el servicio** — cerraban un hueco real: los tres tests previos del endpoint mockeaban `purgar_cuerpos_vencidos` entero, así que nada probaba la garantía de `solo_contar=true` a través del camino HTTP completo; y `test_corre_los_ocho_pasos` pasó a verificar también el ORDEN de ejecución (que la purga corre último), no solo que cada paso se llamó una vez — antes hubiera pasado igual si alguien la movía al principio del job.
 
 **Verificación**: 712 tests (5 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes. **4 mutaciones y 4 detectadas** sobre las cuatro correcciones —sacar el chequeo de embedding, volver a `length`, volver a usar `evaluadas` como `purgadas`, y mover la purga al principio del job—. Confirmado con un dry-run contra Postgres real después de aplicar todo: `{"evaluadas": 0, ...}`, consistente con que ya no queda nada pendiente de purgar desde la corrida del punto anterior.
+
+
+### Backlog punto 6-bis: multimodelo — un modelo por cluster, y una cadena que no pierde la corrida (05/09/2026)
+
+**Cierra 6-bis en su mitad reactiva.** El motor pasa de sintetizar todo con un modelo a poder elegir uno por cluster, y de perder la corrida cuando el proveedor falla a caer al siguiente.
+
+#### El reencuadre que lo destrabó
+
+Este punto estuvo frenado desde el 21/08 por un argumento que era correcto pero de alcance más chico del que aparentaba: *"la cadena no termina en «si falla, probá el siguiente»; para que sirva de verdad hay que decidir cuánto mandarle a cada proveedor según los créditos que le queden"*.
+
+Eso es cierto del **reparto proactivo** de carga, y no del **fallback reactivo**. Caer al siguiente cuando el primero ya falló no necesita saber cuánto crédito queda: la información llega sola, en forma de error. Separadas las dos mitades, la reactiva se podía hacer sin tocar la pesada — que sigue sin hacer falta.
+
+#### La mitad del trabajo ya estaba hecha
+
+Leer el código antes de planificar cambió el tamaño del punto. Ya existían, sin que hiciera falta migración ni esquema nuevo:
+
+- `sintetizar_cluster(session, cluster, modelo)` **ya recibía el modelo por parámetro**, con un centinela `_RESOLVER` puesto justamente para poder pasarlo resuelto.
+- `leer_api_key` **ya aceptaba la forma con sufijo** (`MODELO_API_KEY_GROQ`), con un comentario que decía "es lo que va a necesitar el punto de multimodelo".
+- `Sintesis.modelo_usado` ya guardaba qué modelo produjo cada síntesis, y **se actualiza en una re-síntesis**.
+- `modelo_activo` ya toleraba varias filas activas y desempataba de forma determinista.
+
+Lo que faltaba era chico: que el alta aceptara el campo, armar la cadena, recorrerla, y exponerlo por API.
+
+#### Las decisiones
+
+**`activo` sigue significando "el default desatendido".** Hay uno solo, `_apagar_los_demas` se queda, y el scheduler no se enteró del cambio: sigue llamando a `sintetizar_pendientes(session)` sin parámetros. Se evaluó la alternativa —varios activos más una columna `es_default`— y se descartó: cambia el significado de un endpoint que ya está en uso y pide migración, a cambio de nada que esto necesite.
+
+**La cadena la forman el activo y los suplentes con credencial propia**, no todos los modelos dados de alta. El criterio no es un proxy de la intención del operador: es lo único que hace que el suplente sirva. Un modelo que comparte `api_key_env` con el titular comparte su credencial y por lo tanto su **cuota** — caer de Gemini a Gemini no resuelve nada cuando lo agotado es la cuota de Gemini. Como efecto, configurar la variable con sufijo **es** el opt-in, y no hace falta una columna que diga quién es suplente.
+
+**El activo encabeza aunque su `prioridad` sea peor.** `prioridad` ordena a los suplentes entre sí; si pudiera adelantarse al activo, prender un modelo dejaría de significar algo.
+
+**El cortocircuito, y por qué son dos fallos y no uno.** Un modelo que falla sale de la cadena por lo que queda de la corrida. Sin eso, con la cuota del titular agotada cada cluster paga sus 3 reintentos de `tenacity` con espera creciente hasta 30 s antes de caer al suplente: con 26 clusters, minutos de sleeps puros por corrida. Es el mismo modo de falla que ya se había corregido una vez, cuando `SintesisSinConfigurar` dejó de reintentarse.
+
+Dos y no uno porque un fallo suelto puede ser un JSON mal armado de ese cluster puntual, y sacar al titular por eso cambiaría de proveedor —y con él lo que queda escrito en `modelo_usado`— por una casualidad. El costo del segundo intento está acotado: ~60 s en el peor caso, sobre un ciclo de 15 minutos. `SintesisSinConfigurar` es la excepción y agota de una, porque una credencial que falta no se arregla entre un cluster y el siguiente.
+
+**Qué cae al siguiente y qué no:**
+
+| Fallo | ¿Cae? | Por qué |
+|---|---|---|
+| Rate limit u otro error del proveedor | Sí | Es el caso que la cadena existe para cubrir |
+| `SintesisSinConfigurar` | Sí, y agota de una | Antes cortaba la corrida entera; con cadena significa "usá el siguiente" |
+| `SintesisBloqueada` | **No** | El proveedor rechazó el contenido por sus filtros. Buscar otro que sí lo acepte es rodear una negativa de seguridad, y además destruye la señal: su propio docstring dice que si pasa seguido, lo que informa es que el producto no puede cubrir cierto material, y eso es una decisión de producto |
+
+**Un `modelo_id` explícito apaga la cadena.** Si alguien eligió un modelo, caer en silencio a otro contradice la elección, y dejaría en `modelo_usado` una serie histórica que dice que se usó uno que nadie pidió — justo la comparación que esa columna existe para habilitar. Por lo mismo, un `modelo_id` que no existe es **404 y no se sintetiza**: caer al default gastaría cuota del proveedor equivocado.
+
+**Concurrencia: secuencial.** Se evaluó un hilo por modelo y se descartó por ahora, con dos razones medidas. Ninguno de los dos modos de uso corre dos modelos a la vez —"paso a paso" es un cluster y un modelo; "todas con el default" es un solo modelo—, y la síntesis de 24 ángulos usa el 23% del ciclo de 15 minutos. Además el costo es concreto: la `Session` de SQLAlchemy no es thread-safe, así que cada hilo necesitaría la suya, y el `expunge` anti-N+1 y el commit por cluster habría que rediseñarlos. Se retoma con el síntoma, no antes.
+
+#### Dos hallazgos del camino
+
+**Una regresión propia, cazada por los tests que ya estaban.** Al reescribir el bucle, el cluster que destapaba el agotamiento de la cadena quedaba contado como `fallido`, cuando lo que pasó fue que el motor se quedó sin proveedores. Es el mismo diagnóstico engañoso que este archivo ya documenta dos veces —"apunta a un problema con los clusters cuando el problema es la configuración"— y lo agarró el test que se había escrito la primera vez.
+
+**Un agujero preexistente, más serio: la suite podía gastar la cuota real.** `test_synthesis.py` no aislaba el `.env` (solo lo hacía `test_modelos.py`, en su propio archivo), así que un test que llegara a `llamar_modelo` de verdad leía la credencial del desarrollador. Lo destapó un parche mal puesto de esta misma tanda: el test le pegó a Gemini y falló con un 404 **del proveedor**, o sea que la llamada salió. En un proyecto con límite de costos duro eso no puede depender de que ningún parche se equivoque.
+
+Se agregó `conftest.sin_credencial_de_ia`, `autouse` para toda la suite, que cierra las dos puertas por las que entra la credencial: el entorno del proceso y el `.env` del directorio actual (`_del_entorno` mira las dos). Mismo criterio que `api_sin_token`, que ya existía por un problema de la misma familia.
+
+#### Verificación
+
+756 tests (44 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes — esta tanda no toca el esquema.
+
+**15 mutaciones y 15 detectadas.** Dos no se detectaban en la primera pasada, y las dos eran informativas:
+
+- **El validador de `api_key_env` en el alta** es indetectable desde el endpoint, porque `leer_api_key` vuelve a validar dentro del sondeo y sacarlo da exactamente el mismo 422. Es una capa redundante a propósito —lo que aporta es no depender de un efecto secundario del sondeo— así que se le escribió un test que la ejercita **en aislamiento**, sobre el modelo Pydantic, donde la otra capa no la tapa.
+- **La fixture que impide gastar cuota** no la cubría nada, porque solo actúa cuando un parche está mal puesto. Ahora hay dos tests que comprueban directamente que ninguna credencial queda visible durante la suite.
+
+**Lo que NO está verificado, dicho de frente: la cadena nunca corrió contra dos proveedores reales.** Hace falta una segunda credencial de un proveedor distinto en `MODELO_API_KEY_<SUFIJO>`, y hoy no hay ninguna configurada. Todo lo de arriba está probado contra mocks y con mutación, que prueba que la lógica hace lo que dice — no que el segundo proveedor conteste. Es lo primero que hay que hacer el día que aparezca esa credencial, y conviene hacerlo sobre **un cluster puntual** con `POST /clusters/{id}/synthesize`: es una llamada al proveedor, no veintiséis.
+
+
+#### Corrección: el punto 6-bis publicaba el nombre de la variable de entorno (05/09/2026)
+
+Una revisión independiente con otro modelo, antes de commitear, encontró que la tanda anterior **reabría por la puerta de al lado la fuga que la tanda 2 había cerrado**. Verificado corriendo sondas contra `TestClient`, no deducido.
+
+**Lo que salía, y en un 200:**
+
+```
+POST /synthesize -> 200
+{... "agotados": {"titular-groq": "configuracion: titular-groq: La variable
+ 'MODELO_API_KEY_GROQ' no está definida o está vacía. …"}}
+```
+
+`agotados` es un campo nuevo de 6-bis y llevaba el mensaje entero de `ProveedorNoConfigurado`, que nombra la variable de entorno. El mismo dato salía por el `detalle` del 422 de `POST /clusters/{id}/synthesize`.
+
+**Por qué importa, y por qué es peor de lo que parecía.** Es exactamente lo que `_vista_publica` filtra de `GET /modelos` desde la tanda 2, con el mismo modelo de amenaza: quien sabe qué variable nombrar puede dar de alta un modelo con `base_url` propio y `api_key_env` apuntando ahí, y el motor le entrega la credencial del operador durante el sondeo. Con `API_TOKEN` sin definir —configuración soportada y documentada— lo lee cualquiera que alcance el puerto. Y a diferencia del 422, el 200 **no requiere provocar ningún error**: es el endpoint que menos sospecha levanta.
+
+**Un tercer camino, preexistente:** el mensaje del placeholder interpolaba el **valor** de la variable (`base.py`), y ese mensaje llega al 422 de `POST /modelos`. Que un placeholder empiece con `tu_` acota el daño pero no lo cierra — es una convención de nombres, no una garantía.
+
+#### El arreglo, en la frontera y no en cada consumidor
+
+Tres cambios, todos sobre el mismo principio, que además ya estaba escrito en este repo: **al log lo que sirve para diagnosticar, a la respuesta lo que se puede decir sin abrir una puerta.** Es la regla que `modelos.sondear` aplica y documenta para el cuerpo del proveedor; a esta rama se le había escapado.
+
+1. **`llamar_modelo` sanea al convertir la excepción.** `ProveedorNoConfigurado` se loguea entero y se re-levanta como un mensaje que dice qué modelo falla y que el detalle está en el log. Se separó de `AdaptadorNoImplementado`, que **sí viaja entero** y no es una excepción a la regla: su mensaje dice qué adaptador falta y qué usar en su lugar, sin nombrar variables ni configuración del operador.
+2. **`agotados` lleva categorías cerradas** (`sin_configurar`, `fallos_seguidos`) en vez de texto libre. Sanear la frontera ya cerraba la fuga; esto hace que el campo **no pueda volver a filtrar** por un mensaje que mañana se vuelva sensible, y de paso es lo que una interfaz necesita para mostrar el motivo sin parsear prosa.
+3. **El valor de la variable no se interpola nunca**, ni siquiera el del placeholder. El operador sabe qué puso ahí; no hace falta devolvérselo.
+
+#### Los dos huecos de método que lo dejaron pasar
+
+**El invariante no estaba testeado donde hacía falta.** "Ninguna respuesta publica `api_key_env`" tenía tests para `GET /modelos` y `POST /modelos`, y para ningún otro endpoint. Por esa grieta entraron los dos caminos. Ahora hay una clase de tests que lo verifica **sin mocks**, sobre el camino real, más uno que comprueba la otra mitad: que el detalle completo **sí** siga estando en el log, porque sacarlo de la respuesta no puede costar el diagnóstico.
+
+**Y un test que aparentaba cubrir el camino.** `test_sin_configurar_es_422_y_no_500` inyecta un mensaje inventado y benigno y asertaba sobre él, así que pasaba en verde mientras el mensaje real filtraba. Es el caso de "mock que tapa el camino real": verificaba el código de estado y parecía verificar el contenido. Se le sacó la aserción sobre el mensaje y se le escribió en el docstring qué cubre y qué no, con el puntero a los tests que sí lo cubren.
+
+#### Verificación
+
+761 tests (5 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**: devolver el mensaje entero a `agotados`, sacar el saneo de la frontera, y volver a interpolar el valor de la variable. La tercera no se detectaba con los tests nuevos —nada ejercitaba el camino del placeholder por HTTP— y se le escribió el suyo antes de darla por cerrada.
+
+Corregido además el conteo de tests de la entrada anterior, que decía 746: son 756, y la aritmética del propio archivo lo delataba (712 + 44).
+
+#### El patrón de fondo: tests que pasan porque el mock les da la respuesta (05/09/2026)
+
+La fuga de arriba no se escapó por falta de tests: se escapó porque **el test que cubría ese camino mockeaba el servicio que estaba probando**, así que el mensaje sobre el que asertaba lo ponía el propio mock. Pasaba en verde con la fuga abierta.
+
+Se revisó el patrón en toda la suite de endpoints en vez de arreglar solo ese caso.
+
+**El relevamiento salió mejor de lo temido.** De los 50 tests de `test_api.py`, la enorme mayoría son de **cableado** —"¿le llega el parámetro al servicio?", "¿devuelve sus stats?", "¿un id imposible es 422 sin llamar a nadie?"— y ahí mockear es correcto **y completo**: lo que el test promete es exactamente lo que puede probar. Solo tres asertan sobre el contenido de la respuesta, y de esos uno era el que fallaba.
+
+**El hueco real era otro, y estructural.** `TestCadenaDeFallback` mockea `sintetizar_cluster` entero. Es la decisión correcta para probar la lógica de la cadena —qué cae al siguiente, qué agota un modelo, qué corta la racha— pero por eso mismo **nunca ejercita** el camino que va de `leer_api_key` a `ProveedorNoConfigurado` a `SintesisSinConfigurar`, que es justamente donde se construía el mensaje que filtraba. La cadena estaba probada como lógica y no como integración.
+
+Se agregó `TestLaCadenaConTraduccionRealDeExcepciones`, donde el único mock es la frontera de red: resolver la credencial, levantar, traducir, caer y sanear son el código real. **Verificado que sirve**: se reintrodujeron las dos mutaciones de la fuga y las cazó las dos, o sea que ahora hay dos capas independientes que la ven.
+
+**Un hallazgo del propio test.** El primer intento montaba dos modelos con variables inexistentes para forzar dos fallos de credencial, y no entró ninguno a la cadena: `_tiene_credencial_propia` filtra a los suplentes cuya variable no resuelve, así que **"un suplente sin credencial" es un estado que no existe**. La cadena solo puede tener suplentes que sí pueden autenticarse. Quedó escrito en la fixture, porque es una propiedad del diseño que no era evidente.
+
+**Y las clases mockeadas ahora dicen hasta dónde llegan.** No se desmockeó nada que estuviera bien mockeado —eso habría sido cambiar tests correctos por tests lentos— pero cada clase apunta a dónde se prueba lo que ella no puede probar. Un test que dice qué cubre vale más que uno que aparenta cubrir todo.

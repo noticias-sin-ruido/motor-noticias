@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.config import settings
+from src.models import Adaptador, Cluster, ModeloIA
 
 
 class TestRoot:
@@ -582,3 +583,341 @@ class TestCanarioDeDuracion:
 
         assert main.SCHEDULER_UMBRAL_CORRIDA_LARGA == 0.5
         alerta.assert_not_called()
+
+
+class TestSynthesizeConModelo:
+    """
+    `POST /synthesize?modelo_id=` — el modo "todas con el modelo que elijo".
+    Sin el parámetro tiene que quedar exactamente como estaba, porque es lo que
+    llama el scheduler.
+
+    **Estos tests mockean el servicio, así que cubren el cableado y el código de
+    estado, no lo que la respuesta dice.** Es la división correcta —acá se prueba
+    que el endpoint pase lo que tiene que pasar— pero conviene saber dónde
+    termina: lo que sale en el cuerpo lo prueban
+    `TestLasRespuestasDeSintesisNoNombranLaVariable` (sin mocks) y
+    `test_synthesis.TestLaCadenaConTraduccionRealDeExcepciones`.
+    """
+
+    def test_sin_el_parametro_no_le_pasa_ningun_modelo(self, client: TestClient):
+        """
+        La garantía para el scheduler: sin `modelo_id` el servicio arma la
+        cadena por su cuenta, igual que antes de multimodelo.
+        """
+        with patch("src.main.sintetizar_pendientes", return_value={}) as mock:
+            respuesta = client.post("/synthesize")
+
+        assert respuesta.status_code == 200
+        assert mock.call_args.kwargs["modelo"] is None
+
+    def test_con_modelo_id_le_pasa_esa_fila(self, client: TestClient, session):
+        fila = ModeloIA(
+            nombre="elegido", adaptador=Adaptador.GEMINI, modelo="m", activo=False
+        )
+        session.add(fila)
+        session.commit()
+        session.refresh(fila)
+
+        with patch("src.main.sintetizar_pendientes", return_value={}) as mock:
+            respuesta = client.post(f"/synthesize?modelo_id={fila.id}")
+
+        assert respuesta.status_code == 200
+        assert mock.call_args.kwargs["modelo"].nombre == "elegido"
+
+    def test_un_modelo_que_no_existe_es_404_y_no_sintetiza(self, client: TestClient):
+        """
+        Caer al default con un id equivocado sería la peor respuesta: gastaría
+        cuota del proveedor equivocado y lo dejaría escrito en `modelo_usado`.
+        """
+        with patch("src.main.sintetizar_pendientes") as mock:
+            respuesta = client.post("/synthesize?modelo_id=9999")
+
+        assert respuesta.status_code == 404
+        mock.assert_not_called()
+
+    @pytest.mark.parametrize("id_malo", ["0", "-1", "99999999999999999999999"])
+    def test_un_id_imposible_es_422(self, client: TestClient, id_malo):
+        with patch("src.main.sintetizar_pendientes") as mock:
+            respuesta = client.post(f"/synthesize?modelo_id={id_malo}")
+
+        assert respuesta.status_code == 422
+        mock.assert_not_called()
+
+
+class TestSynthesizeDeUnCluster:
+    """
+    `POST /clusters/{id}/synthesize` — el modo "paso a paso": alguien elige qué
+    cluster vale la pena y con qué proveedor.
+
+    Mismo alcance que la clase de arriba: **con el servicio mockeado se prueba el
+    cableado, no el contenido de la respuesta**. Que esa distinción importa está
+    medido: `test_sin_configurar_es_422_y_no_500` pasaba en verde mientras el
+    mensaje real filtraba el nombre de una variable de entorno, porque el
+    mensaje que asertaba lo ponía el propio mock.
+    """
+
+    def _cluster(self, session) -> int:
+        cluster = Cluster(titulo_evento="Un evento", estado="abierto")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+        return cluster.id
+
+    def test_le_pasa_ese_cluster_y_devuelve_su_resultado(
+        self, client: TestClient, session
+    ):
+        """
+        Cableado: que el endpoint le entregue al servicio el cluster que se pidió
+        y devuelva lo que el servicio contesta. Que la síntesis funcione es cosa
+        de `test_synthesis.py`.
+        """
+        cid = self._cluster(session)
+        resultado = {"creados": 2, "actualizados": 0, "descartados": 1}
+
+        with patch("src.main.sintetizar_cluster", return_value=resultado) as mock:
+            respuesta = client.post(f"/clusters/{cid}/synthesize")
+
+        assert respuesta.status_code == 200
+        assert respuesta.json() == {"status": "ok", "cluster_id": cid, **resultado}
+        assert mock.call_args[0][1].id == cid
+
+    def test_con_modelo_id_usa_esa_fila(self, client: TestClient, session):
+        cid = self._cluster(session)
+        fila = ModeloIA(
+            nombre="elegido", adaptador=Adaptador.GEMINI, modelo="m", activo=False
+        )
+        session.add(fila)
+        session.commit()
+        session.refresh(fila)
+
+        with patch("src.main.sintetizar_cluster", return_value={}) as mock:
+            respuesta = client.post(
+                f"/clusters/{cid}/synthesize?modelo_id={fila.id}"
+            )
+
+        assert respuesta.status_code == 200
+        assert mock.call_args[0][2].nombre == "elegido"
+
+    def test_sin_modelo_id_deja_que_lo_resuelva_el_servicio(
+        self, client: TestClient, session
+    ):
+        """
+        Se le pasa el centinela `_RESOLVER` y no `None`: `None` significa "no
+        hay modelo" y haría fallar la síntesis en vez de usar el activo.
+        """
+        from src.services.synthesis import _RESOLVER
+
+        cid = self._cluster(session)
+        with patch("src.main.sintetizar_cluster", return_value={}) as mock:
+            client.post(f"/clusters/{cid}/synthesize")
+
+        assert mock.call_args[0][2] is _RESOLVER
+
+    def test_un_cluster_que_no_existe_es_404(self, client: TestClient):
+        with patch("src.main.sintetizar_cluster") as mock:
+            respuesta = client.post("/clusters/9999/synthesize")
+
+        assert respuesta.status_code == 404
+        mock.assert_not_called()
+
+    def test_sin_configurar_es_422_y_no_500(self, client: TestClient, session):
+        """
+        Cubre el **código de estado**, y nada más que eso.
+
+        El mensaje que se inyecta acá es inventado y benigno, así que este test
+        no dice nada sobre lo que sale de verdad por ese `detalle` — de hecho
+        pasaba en verde mientras el mensaje real filtraba el nombre de una
+        variable de entorno. Lo que el contenido de la respuesta sí prueba está
+        en `TestLasRespuestasDeSintesisNoNombranLaVariable`, sin mocks.
+        """
+        from src.services.synthesis import SintesisSinConfigurar
+
+        cid = self._cluster(session)
+        with patch(
+            "src.main.sintetizar_cluster",
+            side_effect=SintesisSinConfigurar("no hay modelo activo"),
+        ):
+            respuesta = client.post(f"/clusters/{cid}/synthesize")
+
+        assert respuesta.status_code == 422
+
+    def test_el_bloqueo_de_contenido_es_422_con_su_propio_mensaje(
+        self, client: TestClient, session
+    ):
+        """
+        No es un fallo técnico sino el proveedor rechazando el contenido, y el
+        mensaje tiene que decirlo: con otro texto genérico, quien lo lea va a
+        buscar el problema en el motor.
+        """
+        from src.services.synthesis import SintesisBloqueada
+
+        cid = self._cluster(session)
+        with patch(
+            "src.main.sintetizar_cluster",
+            side_effect=SintesisBloqueada("filtro de seguridad"),
+        ):
+            respuesta = client.post(f"/clusters/{cid}/synthesize")
+
+        assert respuesta.status_code == 422
+        assert "bloqueó el contenido" in respuesta.json()["detalle"]
+
+    @pytest.mark.parametrize("id_malo", ["0", "-1", "99999999999999999999999"])
+    def test_un_id_de_cluster_imposible_es_422(self, client: TestClient, id_malo):
+        with patch("src.main.sintetizar_cluster") as mock:
+            respuesta = client.post(f"/clusters/{id_malo}/synthesize")
+
+        assert respuesta.status_code == 422
+        mock.assert_not_called()
+
+
+class TestLaSuiteNoPuedeGastarCuota:
+    """
+    La red de seguridad de `conftest.sin_credencial_de_ia`, que no la cubre
+    ningún otro test porque solo actúa cuando un parche está mal puesto.
+
+    Existe por un caso real: un parche equivocado dejó a `sintetizar_cluster`
+    resolviendo el modelo activo de la base, el adaptador leyó la credencial del
+    `.env` del desarrollador y le pegó a Gemini de verdad. En un proyecto con
+    límite de costos duro eso no puede depender de que ningún parche se
+    equivoque.
+    """
+
+    def test_ninguna_credencial_de_ia_queda_visible(self):
+        import os
+
+        assert [v for v in os.environ if v.startswith("MODELO_API_KEY")] == []
+
+    def test_tampoco_se_ve_el_env_del_desarrollador(self):
+        """
+        `_del_entorno` mira las dos puertas: el entorno del proceso y el `.env`
+        del directorio actual. La fixture cierra las dos.
+        """
+        from pathlib import Path
+
+        assert not Path(".env").exists()
+
+
+class TestLasRespuestasDeSintesisNoNombranLaVariable:
+    """
+    El invariante de la tanda 2, extendido a los endpoints de síntesis.
+
+    Estaba testeado solo para `GET /modelos` y `POST /modelos`, y por esa grieta
+    se coló: el campo `agotados` publicaba el mensaje entero de
+    `ProveedorNoConfigurado` —que nombra la variable de entorno— **en un 200**,
+    sin necesidad siquiera de provocar un error.
+
+    Por qué importa: quien sabe qué variable nombrar puede dar de alta un modelo
+    con `base_url` propio y `api_key_env` apuntando ahí, y el motor le entrega
+    la credencial del operador durante el sondeo. Con `API_TOKEN` sin definir
+    —configuración soportada— lo lee cualquiera que alcance el puerto.
+
+    **Estos tests NO mockean el servicio.** Los del endpoint que ya existían sí,
+    y por eso no vieron nada: `test_sin_configurar_es_422_y_no_500` inyecta un
+    mensaje inventado y benigno, así que verificaba el código de estado y
+    aparentaba verificar el contenido. Acá el mensaje tiene que nacer del camino
+    real.
+    """
+
+    @pytest.fixture
+    def motor_sin_credencial(self, session):
+        """
+        Un modelo activo cuya variable de entorno no existe, y un cluster
+        publicable de verdad. `conftest.sin_credencial_de_ia` ya garantiza que
+        la variable no esté ni en el entorno ni en un `.env` alcanzable.
+        """
+        from datetime import datetime
+
+        from src.models import Medio, Noticia
+
+        session.add(
+            ModeloIA(
+                nombre="titular",
+                adaptador=Adaptador.GEMINI,
+                modelo="un-modelo",
+                activo=True,
+                api_key_env="MODELO_API_KEY_INEXISTENTE",
+            )
+        )
+        cluster = Cluster(titulo_evento="Evento", estado="abierto")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        for i, nombre in enumerate(("Uno", "Dos")):
+            medio = Medio(
+                nombre=nombre,
+                url_base=f"https://{nombre}.test",
+                feeds_rss=[f"https://{nombre}.test/rss"],
+            )
+            session.add(medio)
+            session.commit()
+            session.refresh(medio)
+            session.add(
+                Noticia(
+                    medio_id=medio.id,
+                    cluster_id=cluster.id,
+                    titulo=f"Titulo {i}",
+                    url=f"https://{nombre}.test/{i}",
+                    guid=f"guid-{i}",
+                    contenido_limpio="Cuerpo suficientemente largo de la nota.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+        session.commit()
+        return cluster
+
+    def test_synthesize_no_publica_la_variable_en_su_200(
+        self, client: TestClient, motor_sin_credencial
+    ):
+        """El caso que se escapó: un 200, sin error de por medio."""
+        respuesta = client.post("/synthesize")
+
+        assert respuesta.status_code == 200
+        assert "MODELO_API_KEY_INEXISTENTE" not in respuesta.text
+        # Y el motivo igual se informa, en forma de categoría cerrada.
+        assert respuesta.json()["agotados"] == {"titular": "sin_configurar"}
+
+    def test_el_endpoint_por_cluster_no_publica_la_variable_en_su_422(
+        self, client: TestClient, motor_sin_credencial
+    ):
+        respuesta = client.post(f"/clusters/{motor_sin_credencial.id}/synthesize")
+
+        assert respuesta.status_code == 422
+        assert "MODELO_API_KEY_INEXISTENTE" not in respuesta.text
+        # Dice qué modelo y qué le pasa, sin decir dónde mirar la credencial.
+        assert "titular" in respuesta.json()["detalle"]
+
+    def test_el_detalle_completo_queda_en_el_log(
+        self, client: TestClient, motor_sin_credencial, caplog
+    ):
+        """
+        La otra mitad: sacarlo de la respuesta no puede costar el diagnóstico.
+        Quien opera el motor necesita saber qué variable falta; lo lee en el log.
+        """
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="src.services.synthesis"):
+            client.post("/synthesize")
+
+        assert "MODELO_API_KEY_INEXISTENTE" in caplog.text
+
+    def test_agotados_solo_lleva_categorias_cerradas(
+        self, client: TestClient, motor_sin_credencial
+    ):
+        """
+        `agotados` viaja en un 200, así que todo lo que entre ahí es público.
+        Un valor cerrado no puede filtrar por descuido; texto libre sí, y ya lo
+        hizo una vez.
+        """
+        from src.services.synthesis import (
+            AGOTADO_FALLOS_SEGUIDOS,
+            AGOTADO_SIN_CONFIGURAR,
+        )
+
+        agotados = client.post("/synthesize").json()["agotados"]
+
+        assert set(agotados.values()) <= {
+            AGOTADO_SIN_CONFIGURAR,
+            AGOTADO_FALLOS_SEGUIDOS,
+        }

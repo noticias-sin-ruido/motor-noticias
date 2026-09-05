@@ -1,6 +1,7 @@
 """
 Configuración y fixtures compartidas para todos los tests.
 """
+import os
 from contextlib import contextmanager
 from typing import Generator
 from unittest.mock import patch
@@ -68,6 +69,34 @@ def api_sin_token(monkeypatch):
     test y no ruido del entorno.
     """
     monkeypatch.setattr(settings, "API_TOKEN", None)
+
+
+@pytest.fixture(autouse=True)
+def sin_credencial_de_ia(monkeypatch, tmp_path):
+    """
+    Ningún test puede gastar la cuota real del proveedor de IA.
+
+    **Lo destapó un test que salió a internet de verdad**: un parche mal puesto
+    dejó a `sintetizar_cluster` resolviendo el modelo activo de la base, y el
+    adaptador leyó la credencial del `.env` del desarrollador y le pegó a Gemini.
+    Falló con un 404 del proveedor -- o sea que la llamada SALIÓ--, y en un
+    proyecto con límite de costos duro eso no puede depender de que ningún
+    parche se equivoque.
+
+    Se cierran las dos puertas por las que entra la credencial, porque
+    `_del_entorno` mira las dos: el entorno del proceso y el `.env` del
+    directorio actual. El `chdir` a un temporal es el mismo truco que
+    `test_modelos.sin_el_env_de_la_maquina` ya usaba en su archivo, subido acá
+    para que valga en toda la suite.
+
+    Los tests que necesitan una credencial se la ponen ellos con `monkeypatch`
+    -- se ejecutan después de esta fixture, así que la pisan sin problema-- y
+    los que no, fallan como "sin configurar", que es lo correcto.
+    """
+    monkeypatch.chdir(tmp_path)
+    for variable in list(os.environ):
+        if variable.startswith("MODELO_API_KEY"):
+            monkeypatch.delenv(variable, raising=False)
 
 
 @pytest.fixture(name="session")

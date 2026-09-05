@@ -5,16 +5,19 @@ Ver specs/roadmap.md, backlog punto 2, y `models/modelo_ia.py`.
 """
 import json
 import logging
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from sqlmodel import Session, select
 
 from ..models import Adaptador, ModeloIA, ModoEstructura
+from ..models.modelo_ia import VARIABLE_UNICA
 from .proveedores import (
     REGISTRO,
     AdaptadorNoImplementado,
     ErrorDeProveedor,
+    ProveedorNoConfigurado,
     RespuestaBloqueada,
+    leer_api_key,
 )
 from .proveedores.openai_compatible import TIMEOUT_SONDEO_SEGUNDOS
 
@@ -49,6 +52,72 @@ def modelo_activo(session: Session) -> Optional[ModeloIA]:
         .where(ModeloIA.activo.is_(True))
         .order_by(ModeloIA.prioridad, ModeloIA.id)
     ).first()
+
+
+def _tiene_credencial_propia(modelo: ModeloIA) -> bool:
+    """
+    Si este modelo puede autenticarse **por su cuenta**, y no con la del titular.
+
+    Dos condiciones, y las dos importan por motivos distintos:
+
+    - **Su `api_key_env` no es `VARIABLE_UNICA`.** Un suplente que comparte la
+      variable del titular comparte su credencial, y por lo tanto su CUOTA: caer
+      de Gemini a Gemini no sirve de nada cuando lo que se agotó es la cuota de
+      Gemini. No es un proxy de "el operador lo quiso": es lo único que hace que
+      el suplente sirva para algo.
+    - **Esa variable resuelve a un valor de verdad.** Se pregunta con
+      `leer_api_key`, que es quien va a leerla en serio después. Preguntarlo acá
+      por otro camino —mirando `os.environ` de una— sería una segunda respuesta
+      posible a la misma pregunta, y el día que difieran la cadena prometería un
+      suplente que después no puede autenticarse.
+
+    Configurar la variable ES el opt-in: no hace falta una columna que diga
+    quién es suplente, porque un proveedor que nadie configuró no puede entrar
+    aunque esté dado de alta.
+    """
+    if (modelo.api_key_env or "") == VARIABLE_UNICA:
+        return False
+    try:
+        leer_api_key(modelo)
+    except ProveedorNoConfigurado:
+        return False
+    return True
+
+
+def cadena_de_modelos(session: Session) -> List[ModeloIA]:
+    """
+    El activo primero, y detrás los suplentes con credencial propia.
+
+    Es la cadena que recorre `sintetizar_pendientes`: si el primero falla por
+    cuota o por configuración, el cluster se reintenta con el siguiente en vez
+    de perderse. Ver specs/roadmap.md, punto 6-bis.
+
+    **El activo encabeza sea cual sea su `prioridad`.** Es el default que eligió
+    el operador con `PATCH /modelos/{id}?activo=true`, y `prioridad` ordena a
+    los suplentes entre sí, no decide quién manda. Que un suplente con
+    `prioridad` más baja pudiera adelantarse al activo haría que prender un
+    modelo no signifique nada.
+
+    Devuelve lista vacía si no hay ninguno activo, que es "nadie eligió
+    proveedor" — el mismo estado que ya distingue `modelo_activo`, y que
+    `sintetizar_pendientes` reporta como configuración incompleta y no como
+    fallo.
+
+    **Sin `activo` no hay cadena.** Un suplente suelto, con credencial y sin
+    nadie prendido adelante, no sintetiza solo: eso volvería a poner al motor a
+    elegir proveedor por su cuenta, que es justo lo que el punto 2 sacó.
+    """
+    titular = modelo_activo(session)
+    if titular is None:
+        return []
+
+    suplentes = session.exec(
+        select(ModeloIA)
+        .where(ModeloIA.id != titular.id)
+        .order_by(ModeloIA.prioridad, ModeloIA.id)
+    ).all()
+
+    return [titular] + [m for m in suplentes if _tiene_credencial_propia(m)]
 
 
 # Qué hacer en lugar de cada adaptador que quedó reservado. Un mensaje genérico

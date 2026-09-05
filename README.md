@@ -180,7 +180,7 @@ Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opci
 
 ## API
 
-Quince endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
+Dieciséis endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -188,7 +188,8 @@ Quince endpoints. Los `POST` del pipeline son disparo manual de cada paso, que a
 | `POST` | `/ingest` | Descarga los feeds, limpia, deduplica y persiste |
 | `POST` | `/vectorize` | Vectoriza lo que tenga `embedding IS NULL`. Acepta `?limite=` |
 | `POST` | `/cluster` | Cierra vencidos, agrupa las sueltas y fusiona duplicados |
-| `POST` | `/synthesize` | Genera las síntesis de los clusters publicables |
+| `POST` | `/synthesize` | Genera las síntesis de los clusters publicables. Acepta `?modelo_id=` |
+| `POST` | `/clusters/{id}/synthesize` | Sintetiza **un** cluster puntual. Acepta `?modelo_id=` |
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
 | `POST` | `/purge` | Borra el cuerpo de las noticias huérfanas vencidas. **Irreversible**. Acepta `?solo_contar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |

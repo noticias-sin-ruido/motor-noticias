@@ -19,7 +19,7 @@ from .auth import RUTAS_ABIERTAS, avisar_si_esta_abierta, exigir_token
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
-from .models import Adaptador, Medio, ModeloIA
+from .models import Adaptador, Cluster, Medio, ModeloIA
 from .services.alerts import enviar_alerta
 from .services.medios import (
     FeedInservible,
@@ -28,9 +28,11 @@ from .services.medios import (
 )
 from .services.modelos import modelo_activo, sondear
 from .services.proveedores import (
+    VARIABLE_UNICA,
     ErrorDeProveedor,
     ProveedorNoConfigurado,
     leer_api_key,
+    validar_nombre_de_variable,
 )
 from .services.clustering import (
     agrupar_pendientes,
@@ -40,7 +42,13 @@ from .services.clustering import (
 from .services.ingestion import ingerir_todos_los_medios
 from .services.purga import purgar_cuerpos_vencidos
 from .services.search import buscar_noticias_similares, listar_clusters
-from .services.synthesis import sintetizar_pendientes
+from .services.synthesis import (
+    _RESOLVER,
+    SintesisBloqueada,
+    SintesisSinConfigurar,
+    sintetizar_cluster,
+    sintetizar_pendientes,
+)
 from .services.vectorization import vectorizar_pendientes
 from .services.webhook_delivery import entregar_pendientes
 from .tiempo import ahora_local
@@ -80,6 +88,48 @@ SCHEDULER_MARGEN_ATRASO_SEGUNDOS = 300
 # cambia, el umbral lo sigue solo. Al 50% todavía queda margen para reaccionar
 # antes de que las corridas empiecen a solaparse.
 SCHEDULER_UMBRAL_CORRIDA_LARGA = 0.5
+
+# --- Cotas de entrada (tanda 3 de la auditoría) ---
+
+# Techo de los `id` que llegan por la ruta.
+#
+# `medio.id` y `modelo_ia.id` son `integer` en Postgres —32 bits, consultado al
+# esquema vivo y no supuesto—, así que un `id` más grande no es "no encontrado"
+# sino un valor que la columna no puede ni representar. Sin la cota, `PATCH
+# /medios/99999999999999999999999` reventaba con `OverflowError` (medido en
+# SQLite, que es donde corre la suite): un 500 por una entrada mala, justo lo
+# que el resto de la API no hace. No filtra nada; contradice la regla, y la
+# regla es lo que hace que un 500 signifique "se rompió algo nuestro".
+#
+# `ge=1` del otro lado porque las secuencias arrancan en 1: un `id` negativo es
+# un error de quien llama y merece decirlo, no un 404 que sugiere que existía.
+MAX_ID = 2**31 - 1
+
+
+# Largo máximo de cualquier URL que entre por la API y se guarde.
+#
+# 2048 es el techo de hecho: es el límite histórico de Internet Explorer, y por
+# eso es el número bajo el que se quedó todo lo que quiere ser alcanzable. La
+# URL más larga del roster medido tiene 62 caracteres
+# (`ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml`), así que sobra por 33
+# veces. Sin esta cota se persistían 500 KB en `url_base` — comprobado antes del
+# arreglo, se guardaban y `GET /medios` los devolvía.
+MAX_LARGO_URL = 2048
+
+# Cuántos feeds distintos se aceptan por medio.
+#
+# El número lo fija el peor caso de latencia y no el gusto: el sondeo consulta
+# cada feed con `TIMEOUT_SONDEO_SEGUNDOS` (10 s), así que veinte feeds que no
+# respondan ocupan un worker 200 s. Es acotado y reportable; sin cota no lo era.
+#
+# Contra la realidad medida sobra: los 7 medios del roster usan **un** feed cada
+# uno, y el experimento más grande que se hizo —sumar feeds de sección a La
+# Nación y TN— llegó a 8. Se eligió el lado generoso porque desde la tanda 1
+# `POST /medios` pide token: el atacante anónimo ya no existe, y lo que esta
+# cota frena hoy es sobre todo un error de tipeo como el que destapó el ataque
+# (500 copias del mismo feed en un solo POST).
+MAX_FEEDS_POR_MEDIO = 20
+
 
 scheduler = AsyncIOScheduler()
 
@@ -390,8 +440,39 @@ def vectorize(
     return {"status": "ok", **stats}
 
 
+def _modelo_elegido(session: Session, modelo_id: Optional[int]) -> Optional[ModeloIA]:
+    """
+    El modelo que pidieron por id, o `None` si no pidieron ninguno.
+
+    Levanta `_SinEseModelo` si el id no existe, para que el endpoint conteste
+    404 en vez de sintetizar con otro. Que un id equivocado caiga al default
+    sería la peor respuesta posible acá: gastaría cuota del proveedor
+    equivocado y lo dejaría escrito en `modelo_usado`.
+    """
+    if modelo_id is None:
+        return None
+    elegido = session.get(ModeloIA, modelo_id)
+    if elegido is None:
+        raise _SinEseModelo(modelo_id)
+    return elegido
+
+
+class _SinEseModelo(Exception):
+    """El `modelo_id` que pidieron no existe. Ver `_modelo_elegido`."""
+
+    def __init__(self, modelo_id: int):
+        self.modelo_id = modelo_id
+        super().__init__(f"No existe el modelo {modelo_id}")
+
+
 @app.post("/synthesize")
-def synthesize(session: Session = Depends(get_session)):
+def synthesize(
+    # **Sin este parámetro es exactamente lo de hoy**, que es lo que llama el
+    # scheduler: se arma la cadena y encabeza el modelo activo. Con él se usa
+    # ése y solo ése, sin caer a ningún suplente. Ver `sintetizar_pendientes`.
+    modelo_id: Optional[int] = Query(None, ge=1, le=MAX_ID),
+    session: Session = Depends(get_session),
+):
     """
     Genera a demanda las síntesis de los clusters con material nuevo.
 
@@ -399,9 +480,78 @@ def synthesize(session: Session = Depends(get_session)):
     scheduler no corrió. Es idempotente — un cluster sin material nuevo desde su
     último intento no se vuelve a sintetizar, así que llamarlo dos veces seguidas
     no duplica publicaciones ni gasta de más.
+
+    `modelo_id` es el modo "todas con el modelo que elijo": sintetiza todo lo
+    pendiente con ese proveedor, sin cadena de fallback.
     """
-    stats = sintetizar_pendientes(session)
+    try:
+        elegido = _modelo_elegido(session, modelo_id)
+    except _SinEseModelo as error:
+        return JSONResponse(
+            status_code=404, content={"status": "error", "detalle": str(error)}
+        )
+
+    stats = sintetizar_pendientes(session, modelo=elegido)
     return {"status": "ok", **stats}
+
+
+@app.post("/clusters/{cluster_id}/synthesize")
+def synthesize_cluster(
+    cluster_id: int = Path(..., ge=1, le=MAX_ID),
+    modelo_id: Optional[int] = Query(None, ge=1, le=MAX_ID),
+    session: Session = Depends(get_session),
+):
+    """
+    Sintetiza **un** cluster puntual, opcionalmente con el modelo que se elija.
+
+    Es el modo "paso a paso": quien mira los clusters decide cuáles valen la
+    pena y con qué proveedor sintetizar cada uno. Sirve además para **volver a
+    sintetizar con otro modelo** algo que ya salió — las re-síntesis actualizan
+    o agregan ángulos, nunca reparten de nuevo, así que el `id` que el back-end
+    ya conoce no cambia.
+
+    **No pasa por `clusters_pendientes`**, y es a propósito: ese filtro existe
+    para que el barrido automático no gaste de más, pero acá hay alguien
+    eligiendo. Un cluster sin material nuevo se re-sintetiza igual si se lo
+    piden.
+
+    Sin `modelo_id` usa el activo. Con él, ése y solo ése: no hay cadena de
+    fallback cuando la elección fue explícita.
+    """
+    cluster = session.get(Cluster, cluster_id)
+    if cluster is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detalle": "No existe ese cluster"},
+        )
+
+    try:
+        elegido = _modelo_elegido(session, modelo_id)
+    except _SinEseModelo as error:
+        return JSONResponse(
+            status_code=404, content={"status": "error", "detalle": str(error)}
+        )
+
+    try:
+        resultado = sintetizar_cluster(session, cluster, elegido or _RESOLVER)
+    except SintesisSinConfigurar as error:
+        # 422 y no 500: falta configuración, no se rompió nada.
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+    except SintesisBloqueada as error:
+        # También 422, y con su propio mensaje: no es un fallo técnico sino el
+        # proveedor rechazando el contenido. No se prueba con otro — ver
+        # `_intentar_con_la_cadena`.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "status": "error",
+                "detalle": f"El proveedor bloqueó el contenido: {error}",
+            },
+        )
+
+    return {"status": "ok", "cluster_id": cluster_id, **resultado}
 
 
 @app.post("/deliver")
@@ -512,48 +662,6 @@ def clusters(
 # solo llega el operador. Ver specs/roadmap.md, punto 9.
 
 
-# --- Cotas de entrada (tanda 3 de la auditoría) ---
-
-# Techo de los `id` que llegan por la ruta.
-#
-# `medio.id` y `modelo_ia.id` son `integer` en Postgres —32 bits, consultado al
-# esquema vivo y no supuesto—, así que un `id` más grande no es "no encontrado"
-# sino un valor que la columna no puede ni representar. Sin la cota, `PATCH
-# /medios/99999999999999999999999` reventaba con `OverflowError` (medido en
-# SQLite, que es donde corre la suite): un 500 por una entrada mala, justo lo
-# que el resto de la API no hace. No filtra nada; contradice la regla, y la
-# regla es lo que hace que un 500 signifique "se rompió algo nuestro".
-#
-# `ge=1` del otro lado porque las secuencias arrancan en 1: un `id` negativo es
-# un error de quien llama y merece decirlo, no un 404 que sugiere que existía.
-MAX_ID = 2**31 - 1
-
-
-# Largo máximo de cualquier URL que entre por la API y se guarde.
-#
-# 2048 es el techo de hecho: es el límite histórico de Internet Explorer, y por
-# eso es el número bajo el que se quedó todo lo que quiere ser alcanzable. La
-# URL más larga del roster medido tiene 62 caracteres
-# (`ciudad.com.ar/arc/outboundfeeds/rss/?outputType=xml`), así que sobra por 33
-# veces. Sin esta cota se persistían 500 KB en `url_base` — comprobado antes del
-# arreglo, se guardaban y `GET /medios` los devolvía.
-MAX_LARGO_URL = 2048
-
-# Cuántos feeds distintos se aceptan por medio.
-#
-# El número lo fija el peor caso de latencia y no el gusto: el sondeo consulta
-# cada feed con `TIMEOUT_SONDEO_SEGUNDOS` (10 s), así que veinte feeds que no
-# respondan ocupan un worker 200 s. Es acotado y reportable; sin cota no lo era.
-#
-# Contra la realidad medida sobra: los 7 medios del roster usan **un** feed cada
-# uno, y el experimento más grande que se hizo —sumar feeds de sección a La
-# Nación y TN— llegó a 8. Se eligió el lado generoso porque desde la tanda 1
-# `POST /medios` pide token: el atacante anónimo ya no existe, y lo que esta
-# cota frena hoy es sobre todo un error de tipeo como el que destapó el ataque
-# (500 copias del mismo feed en un solo POST).
-MAX_FEEDS_POR_MEDIO = 20
-
-
 class AltaModelo(BaseModel):
     """Lo que hace falta para dar de alta un modelo. Ver `models/modelo_ia.py`."""
 
@@ -572,9 +680,20 @@ class AltaModelo(BaseModel):
     # por la API y se persiste. A dónde puede APUNTAR ya lo decide
     # `MODELO_HOSTS_PERMITIDOS` desde la tanda 2; esto es solo su largo.
     base_url: Optional[str] = Field(default=None, max_length=MAX_LARGO_URL)
-    # **No se pide `api_key_env`**: la credencial va siempre en la misma variable
-    # de entorno (`VARIABLE_UNICA`) y el operador no elige su nombre. Cambiar de
-    # proveedor es cambiar el **valor** de esa variable, no agregar otra.
+
+    # **El NOMBRE de la variable con la credencial, nunca la credencial.**
+    #
+    # Hasta multimodelo esto no se aceptaba: con un solo proveedor no hay nada
+    # que elegir, y no aceptarlo cerraba de paso la primitiva de exfiltración
+    # que la tanda 2 encontró. Ahora hace falta, porque una cadena de fallback
+    # solo sirve si el suplente tiene una credencial DISTINTA a la del titular
+    # -- si comparten variable, comparten cuota, y caer de uno al otro no
+    # resuelve nada. Ver `modelos.cadena_de_modelos`.
+    #
+    # Sigue sin poder nombrar cualquier variable: el validador de abajo lo acota
+    # a `MODELO_API_KEY` o la forma con sufijo.
+    api_key_env: str = Field(default=VARIABLE_UNICA, max_length=120)
+
     # Acotada: sin esto se aceptaba `9999.0` y se lo mandaba tal cual al
     # proveedor. El rango es el que aceptan en común los que nos importan.
     temperatura: float = Field(default=0.3, ge=0.0, le=2.0)
@@ -588,6 +707,26 @@ class AltaModelo(BaseModel):
     # tiene por qué saber si su proveedor acepta `response_format` o solo
     # tool-calling, y de hecho la documentación del proveedor puede mentirle.
     activar: bool = False
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _solo_nuestras_variables(cls, nombre: str) -> str:
+        """
+        Reusa la misma comprobación que hace la lectura, y falla antes de la red.
+
+        `leer_api_key` ya la corre, y el alta la alcanza igual porque `sondear`
+        construye el adaptador -- así que sin este validador la fila tampoco se
+        guardaría. Está igual por dos motivos: es un invariante de SEGURIDAD y
+        depender de un efecto secundario del sondeo significa que desaparece en
+        silencio el día que alguien saltee ese paso; y acá corta antes de
+        cualquier pedido al proveedor, en vez de después.
+        """
+        try:
+            return validar_nombre_de_variable(nombre)
+        except ProveedorNoConfigurado as error:
+            # Pydantic formatea `ValueError`; `ProveedorNoConfigurado` se le
+            # escaparía y saldría como un 500.
+            raise ValueError(str(error)) from error
 
 
 def _vista_publica(modelo: ModeloIA) -> dict:

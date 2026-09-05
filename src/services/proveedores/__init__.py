@@ -35,6 +35,7 @@ from .base import (
     RespuestaBloqueada,
     leer_api_key,
     validar_base_url,
+    validar_nombre_de_variable,
     validar_opciones,
 )
 from .gemini import GeminiNativo
@@ -63,6 +64,7 @@ __all__ = [
     "ProveedorNoConfigurado",
     "RespuestaBloqueada",
     "leer_api_key",
+    "validar_nombre_de_variable",
     "validar_base_url",
     "validar_opciones",
     "GeminiNativo",

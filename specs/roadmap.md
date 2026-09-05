@@ -251,17 +251,22 @@ Ver `change_logs.md`, "Backlog punto 3".
 
 **Se cruza con el punto 6-bis**: la cadena de fallback es una de las salidas posibles a este problema, y la otra mitad de la respuesta.
 
-### 6-bis. Multimodelo: varios proveedores vivos a la vez, y a cuál mandarle qué
+### 6-bis. Multimodelo: un modelo por cluster, y una cadena que no pierde la corrida ✅ COMPLETO, PARCIAL (05/09/2026)
 
-**Abierto el 21/08/2026, al decidir la credencial única de la etapa 2 del punto 2.** Ver `change_logs.md`.
+**Abierto el 21/08/2026** al decidir la credencial única de la etapa 2 del punto 2; cerrado en su mitad reactiva. Detalle completo en `change_logs.md`.
 
-El motor puede tener varias filas en `modelo_ia`, pero **una sola credencial configurada por vez**: `MODELO_API_KEY` tiene un solo valor, y una key de Groq no sirve en Gemini. Cambiar de proveedor es cambiar ese valor. Alcanza de sobra mientras cambiar de modelo sea algo raro, que es el caso.
+**El reencuadre que lo destrabó.** Este punto quedó frenado por un argumento correcto pero de alcance más chico del que parecía: *"para que la cadena sirva hay que decidir cuánto mandarle a cada proveedor según los créditos que le queden"*. Eso es cierto del **reparto proactivo** de carga, no del **fallback reactivo** — caer al siguiente cuando el primero falla no necesita saber cuánto crédito queda. Se hizo lo reactivo, y el bloqueo no aplicaba.
 
-Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el mismo instante**, que es lo que necesita la cadena de fallback: si el de `prioridad` 1 pega contra su rate limit, caer al 2 sin perder el trabajo de la corrida.
+**Qué quedó andando:**
 
-**Por qué no se hizo ahora, y el argumento es del usuario**: la cadena no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden — cuántos clusters van a uno y cuántos al otro—, y eso es lógica nueva de peso que no corresponde arrastrar dentro del desacoplamiento.
+- `POST /modelos` acepta `api_key_env`, acotado a `MODELO_API_KEY` o la forma con sufijo. Es el "exponer un campo en el alta" que este punto anticipaba, y la restricción sigue cerrando la primitiva de exfiltración de la tanda 2.
+- `modelos.cadena_de_modelos`: el activo encabeza y detrás van los suplentes **con credencial propia**. Compartir la variable del titular es compartir su cuota, así que un suplente que la comparte no serviría de suplente.
+- `sintetizar_pendientes` recorre esa cadena por cluster, con **cortocircuito**: dos fallos seguidos del mismo modelo lo sacan por lo que queda de la corrida. Sin eso, con la cuota agotada cada cluster paga sus 3 reintentos de `tenacity` antes de caer al suplente.
+- `POST /synthesize?modelo_id=` y `POST /clusters/{id}/synthesize?modelo_id=`. **El scheduler no cambió**: sigue llamando sin parámetros.
 
-**Lo que ya está puesto y no hay que rehacer**: la columna `prioridad` (hoy solo desempata), la columna `api_key_env` con su default, y `leer_api_key` aceptando la forma con sufijo (`MODELO_API_KEY_GROQ`). El día que se implemente, es **exponer un campo en el alta**, no migrar la tabla ni rehacer la validación. Las instancias que hoy tengan filas con nombres sufijados siguen funcionando sin tocar nada.
+**Lo que queda deliberadamente afuera**: el reparto proactivo de cupo (la mitad pesada, y sigue sin hacer falta), los hilos por modelo (ninguno de los dos modos de uso corre dos modelos a la vez, y la síntesis usa el 23% del ciclo), y la interfaz de escritorio, que se construye cuando exista la app.
+
+**Sin probar contra dos proveedores reales.** La cadena está verificada contra mocks y con mutación, pero no hay una segunda credencial configurada todavía. Es lo primero que hay que hacer el día que aparezca.
 
 **Lo que sí habría que revisar**: `PATCH ?activo=true` sondea contra el proveedor justamente porque con credencial única la variable no dice de quién es la key. Con nombres por proveedor esa comprobación vuelve a poder ser barata — pero conviene medir antes de aflojarla.
 
