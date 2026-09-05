@@ -86,6 +86,7 @@ sin_ruido/
 │
 ├── specs/                      # Fuente de verdad del proyecto
 │   ├── mission.md
+│   ├── conventions.md
 │   ├── roadmap.md
 │   ├── change_logs.md
 │   ├── tech_stack.md           # Este archivo
@@ -138,7 +139,7 @@ Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica
 4. **Scheduler embebido, un solo proceso** (diferido tras Fase 5 — ver roadmap.md, "Diferido a propósito"): si en el futuro se escala la API a varias réplicas, cada una levantaría su propio scheduler y pollearía los feeds por separado (N veces el mismo trabajo). Fase 5 fijó el despliegue en una sola réplica a propósito, así que esto sigue sin resolverse. Separar en proceso propio si eso llega a pasar.
 5. **Costo y rate limit del LLM de síntesis** (Fase 4): ✅ **decidido** — la síntesis se precalcula al alcanzar 2 medios, nunca on-demand por request, así que un pico de tráfico no dispara costo. Queda vigente el **rate limit**: en una corrida se sintetizan todos los clusters publicables de una (medido: 21), y el proveedor limita por minuto. Necesita backoff con `tenacity`, igual que la ingesta.
 6. **Modelo de embeddings en memoria** (Fase 3/5): `sentence-transformers` carga el modelo en RAM por proceso; con varios workers de Uvicorn eso multiplica el consumo de memoria. Decidir si se comparte un único proceso de embeddings o se acepta el costo por worker.
-7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `mission.md`, "BD y migraciones".
+7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `conventions.md`, "BD y migraciones".
 8. ~~**El pipeline se auto-repara pero es mudo**~~ ✅ **RESUELTO**: `services/alerts.py` avisa por mail ante el fallo de cualquier paso, con cooldown para no inundar la casilla, y en el scheduler cada paso corre aislado (la fusión es la única que corta la cadena, para no publicar duplicados). La contingencia de fondo sigue siendo la idempotencia de todos los pasos: un crash a mitad se recupera solo en la corrida siguiente. Queda pendiente el logging estructurado y las métricas, que cubre Monitoring en Fase 5.
 
 9. **`agrupar_pendientes` es cuadrático** (queda fuera de Fase 5 a propósito — es volumen de noticias, no deployment): compara cada noticia suelta contra todas las demás de la ventana. Medido: 3,6 s con ~200 sueltas; proyectado, ~14 s con 400 y cerca de un minuto con 800. Con 7 medios y ventana de 12 h no se llega ni cerca, pero es el primer lugar que se va a poner lento al sumar medios. La salida sería acotar los candidatos con el KNN de pgvector en vez de comparar contra todo (ver punto 3, que hoy es el único motivo por el que el índice no hace falta).

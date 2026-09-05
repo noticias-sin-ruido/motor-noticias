@@ -425,7 +425,8 @@ El *por qué* de cada decisión está escrito, no solo el *qué*:
 
 | Documento | Contenido |
 |---|---|
-| [specs/mission.md](specs/mission.md) | Visión del proyecto y reglas de desarrollo |
+| [specs/mission.md](specs/mission.md) | Qué es el proyecto, para quién, y qué NO hace |
+| [specs/conventions.md](specs/conventions.md) | Cómo se escribe código acá |
 | [specs/roadmap.md](specs/roadmap.md) | Las 5 fases, estado y backlog priorizado |
 | [specs/change_logs.md](specs/change_logs.md) | Decisiones de diseño: qué se evaluó, qué se descartó y por qué |
 | [specs/tech_stack.md](specs/tech_stack.md) | Stack y puntos de quiebre de escalabilidad a vigilar |

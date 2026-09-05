@@ -5,7 +5,7 @@ Dos ajustes sobre la plantilla que genera `alembic init`:
 
   1. La URL de conexión se toma de `src.config.settings` (o sea, del `.env`)
      en vez de `alembic.ini`. `alembic.ini` se commitea, así que no debe
-     contener credenciales -- ver specs/mission.md, "No commitear .env".
+     contener credenciales -- ver specs/conventions.md, "No commitear .env".
 
   2. `target_metadata` apunta a `SQLModel.metadata` para que `--autogenerate`
      detecte los cambios de los modelos.
