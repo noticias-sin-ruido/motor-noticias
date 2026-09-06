@@ -2846,3 +2846,38 @@ Es la contracara del error de arriba: un setup imposible tapaba un hallazgo en u
 775 tests (3 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**: sacar la guarda, hacer que `forzar` la saltee, y aflojar el predicado de `>=` a `>`.
 
 Los tests cuentan **llamadas reales al proveedor** y fallan si hay alguna: el mock de `llamar_modelo` levanta `AssertionError` si lo tocan.
+
+#### El efecto 2 se evaluó y NO se arregla, con el motivo escrito (05/09/2026)
+
+Tercero y último de los efectos de la amplificación de costo. A diferencia de los otros dos, **se decidió dejarlo como está**, y queda documentado para que la decisión no haya que volver a tomarla desde cero.
+
+**La afirmación era:** `_persistir` pone `enviado_backend = False` e `intentos_envio = 0` en toda actualización, así que repetir la re-síntesis reinicia el presupuesto de reintentos y `WEBHOOK_MAX_INTENTOS` deja de ser un techo real.
+
+Literalmente cierto. Lo que estaba mal era el **alcance de la consecuencia**.
+
+**Para qué existe el techo.** `entregar_sintesis` cuenta el intento haya salido bien o mal, y su docstring explica por qué: *"si el contador solo avanzara con el éxito, un back-end permanentemente caído nunca alcanzaría `WEBHOOK_MAX_INTENTOS` y el barrido lo reintentaría cada 15 minutos para siempre, sin que nadie se entere"*. Sus dos trabajos son **cortar el reintento silencioso** y **disparar la alerta**, que además va con `ignorar_cooldown=True` porque es terminal.
+
+**Por qué el reset no lo rompe: está acotado a 12 horas.** La cadena, leída en la fuente:
+
+1. El reset ocurre **solo** en la rama de actualización de `_persistir`, o sea cuando se actualiza un ángulo que ya existía.
+2. Para que el barrido re-sintetice, `clusters_pendientes` exige material nuevo **y** noticias sin ángulo que cubran `MIN_MEDIOS_CLUSTER` medios. Las dos condiciones necesitan **noticias nuevas**.
+3. Las noticias nuevas solo se asignan a clusters **`abierto`** (`_cargar_clusters_abiertos`).
+4. `cerrar_clusters_vencidos` cierra a las `HORAS_CLUSTER_ABIERTO` (12 h).
+
+Cerrado el cluster no entran noticias, no hay re-síntesis, el contador deja de resetearse, llega al techo y la alerta sale. Es la misma propiedad de "cluster congelado" que resultó decisiva para corregir el efecto 3.
+
+**Y además no molesta, por tres motivos:**
+
+- **La alarma es poblacional, no por síntesis.** Con el back-end caído, todas las que no se están actualizando llegan al techo igual y disparan el aviso. El operador se entera lo mismo.
+- **No cuesta nada.** Son requests HTTP al back-end propio, no llamadas al proveedor de IA.
+- **El comportamiento es defendible y no un descuido.** Si el cuerpo cambió es un payload distinto, y el back-end pudo haber rechazado el viejo y aceptar el nuevo. Darle presupuesto nuevo a contenido nuevo es lo correcto — que es exactamente lo que el comentario de `_persistir` argumenta.
+
+Sumado a que la guarda del efecto 1 ahora exige `forzar=true` para repetir sin material nuevo, el bucle a mano dejó de ser gratis.
+
+**Lo único que sí se pierde es observabilidad.** Volver a cero borra que esa síntesis ya había fallado antes, así que quien depure "por qué esto no se entregó" ve un contador que miente sobre el pasado. Si algún día molesta, el arreglo **no** es cambiar el comportamiento sino no perder el dato: un contador acumulado que nunca se resetee, o loguear el reset. No se hizo ahora porque agregar una columna para un problema que nadie tuvo es justamente lo que este repo decidió no hacer.
+
+**El criterio con el que se cerró** es el que la skill `medir-antes-de-resolver` acaba de incorporar: antes de aceptar una mejora, estimar lo que cuesta y dejar que eso realimente si hace falta. Acá el síntoma no apareció, el daño está acotado y es gratis, y el comportamiento se sostiene solo. La mejora no se justifica.
+
+---
+
+Con esto **el bloque de amplificación de costo queda cerrado**: efecto 1 arreglado (guarda de material nuevo con `forzar`), efecto 3 corregido y arreglado (guarda de medios mínimos, incondicional), efecto 2 evaluado y descartado como defecto.
