@@ -53,3 +53,14 @@ test_data/
 node_modules/
 dist/
 build/
+
+# La app de escritorio (backlog punto 14). La imagen del motor no la necesita
+# para nada, y sin esta línea el contexto de build se lleva 4,2 GB: los
+# artefactos de Rust en `app/src-tauri/target` pesan 4,1 GB solos, y el
+# `COPY . .` los metía adentro de la imagen. Medido, no estimado: la primera
+# reconstrucción después de crear `app/` murió con `error reading from server`.
+#
+# Ojo con las reglas de arriba: `node_modules/` matchea **solo en la raíz** del
+# contexto, no anidado. Para eso harían falta `**/node_modules`. Excluir `app/`
+# entero es más simple y más honesto — es otro proyecto que comparte el repo.
+app/

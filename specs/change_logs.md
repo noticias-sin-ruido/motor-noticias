@@ -3056,3 +3056,63 @@ El `rollback` del `except` no es cosmético: sin él la sesión queda inutilizab
 #### Verificación
 
 794 tests (1 nuevo), `ruff` limpio. **1 mutación y 1 detectada**: sacarle la guarda a `iniciar_corrida` hace caer el test nuevo.
+
+
+#### La imagen instalaba PyTorch con CUDA para no usarlo nunca (06/09/2026)
+
+Apareció construyendo la app de escritorio, y no tiene nada que ver con ella: es un problema del `Dockerfile` que estaba desde siempre y que nadie había mirado porque la imagen se reconstruye poco.
+
+**El síntoma:** dos reconstrucciones seguidas hubo que abortarlas porque el build se comía **10 GB de RAM**. Cortarlo a mano no era una anomalía del entorno — era lo único que se podía hacer.
+
+**La causa.** `requirements.txt` pide `sentence-transformers`, que arrastra `torch`. En Linux, pip resuelve por defecto la variante con CUDA:
+
+| Paquete | Peso |
+|---|---|
+| `torch` (CUDA) | 554 MB |
+| `nvidia_cudnn_cu13` | 553 MB |
+| `nvidia_nccl_cu13` | 216 MB |
+| `nvidia_cusparselt_cu13` | 170 MB |
+| + `cublas`, `cusolver`, `cufft`, `curand`, `cusparse`, `cuda-toolkit`, `triton`… | cientos más |
+
+Son **más de 2 GB de librerías de GPU**, y desempaquetarlas es lo que se comía la memoria.
+
+**Y no se usa ni una.** Dos comprobaciones, las dos sobre el código y no sobre la intuición:
+
+1. `services/vectorization.get_modelo()` construye el `SentenceTransformer` **sin `device=`**, y en todo `src/` no hay una sola mención a `cuda`, `device` ni `torch`.
+2. El `docker-compose.yml` **no le pasa ninguna placa** al contenedor: no hay `deploy.resources.devices` ni `runtime: nvidia`.
+
+O sea que el contenedor no podría usar una GPU aunque el código la pidiera, y el código no la pide.
+
+#### El arreglo, y por qué va en el Dockerfile
+
+Se instala la variante de CPU **antes** de los requirements. Cuando pip resuelve `sentence-transformers`, `torch` ya está satisfecho y no baja nada de CUDA:
+
+```dockerfile
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt && \
+    python -m spacy download es_core_news_md
+```
+
+**Va en el `Dockerfile` y no en `requirements.txt`** porque ese archivo lo comparte el entorno local de Windows, y no hay motivo para cambiarle el suyo por un problema que es de la imagen. Se evaluó ponerlo como `--extra-index-url` en el `.txt` y se descartó por eso.
+
+#### Medido antes de gastar la reconstrucción
+
+El build completo tarda y ya había fallado dos veces, así que el arreglo se comprobó primero con `pip install --dry-run`, que resuelve dependencias sin bajar los wheels:
+
+| | Paquetes que instalaría | De GPU |
+|---|---|---|
+| Índice por defecto | 29 | **23** |
+| Índice de CPU | 10 | **0** |
+
+Recién con eso a la vista se corrió el build largo. Terminó solo, sin abortar. Verificado después **dentro del contenedor corriendo**: `pip list` no encuentra un solo paquete de nvidia y `torch` reporta `2.14.0+cpu`. La imagen quedó en 3,13 GB.
+
+#### Dos hallazgos del mismo día, y una atribución equivocada
+
+**El contexto de build se había ido a 4,2 GB.** Crear `app/` para la app de escritorio metió `src-tauri/target` (4,1 GB) y `node_modules` (85 MB) adentro del contexto, porque el `COPY . .` los alcanzaba. Se agregó `app/` al `.dockerignore` — y de paso quedó anotado ahí que las reglas como `node_modules/` **matchean solo en la raíz** del contexto, no anidadas. Verificado construyendo una imagen de prueba que solo copia el contexto: pasó de 4,2 GB a **1,8 MB**.
+
+**La atribución equivocada.** Los dos primeros builds fallidos se le achacaron enteros a ese contexto. Con el contexto ya arreglado, el tercero igual se comió la RAM: la causa real era el `pip install` de CUDA. Los dos problemas eran ciertos, pero uno se llevó el crédito del otro. Vale anotarlo porque el patrón se repite: la primera causa plausible que aparece tapa a la que sigue, y solo se separan midiendo cada una por su lado.
+
+#### Y una consecuencia operativa que conviene recordar
+
+El bucle de reinicio que destapó todo esto no era un bug: **aplicar una migración desde el host deja la imagen atrás.** La base quedó marcada en `b963fe84825f` y la imagen no tenía ese archivo, así que el `alembic upgrade head` del arranque no encontraba la revisión y el contenedor moría en loop. Se arregla reconstruyendo, y es algo a tener presente cuando la app de escritorio levante contenedores por su cuenta.
