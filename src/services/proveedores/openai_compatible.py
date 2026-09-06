@@ -76,8 +76,20 @@ class OpenAICompatible:
 
     def __init__(self, modelo: ModeloIA):
         self.modelo = modelo
-        self.api_key = leer_api_key(modelo)
+        # **El host se valida ANTES que la credencial, y el orden es la
+        # defensa.** Al revés —como estaba—, `POST /modelos` se volvía un
+        # oráculo de qué variables `MODELO_API_KEY_*` existen en el servidor:
+        # una variable inexistente cortaba acá con "no está definida" antes
+        # de llegar a mirar el host, así que el mensaje de error revelaba solo
+        # con nombrar la variable, sin necesidad de un host permitido siquiera.
+        # Validando el host primero, cualquiera que pruebe con un host no
+        # confiable —el único caso que le importa a quien ataca, porque
+        # exfiltrar necesita esa parte igual— recibe siempre el mismo "host no
+        # declarado", exista la variable o no. Un operador legítimo, con un
+        # host ya permitido, sigue viendo el mensaje específico de credencial
+        # faltante: no se le saca diagnóstico real.
         self.url = f"{validar_base_url(modelo.base_url)}/chat/completions"
+        self.api_key = leer_api_key(modelo)
         validar_opciones(modelo.opciones, OPCIONES_ACEPTADAS, "El adaptador compatible")
 
     def _cuerpo(self, prompt: str, esquema: Type[BaseModel]) -> dict:

@@ -40,6 +40,21 @@ class Noticia(SQLModel, table=True):
     contenido_limpio: str = Field(sa_column=Column(Text, nullable=False))
     fecha_publicacion: datetime = Field(sa_column=Column(DateTime, nullable=False, index=True))
 
+    # Cuándo se purgó el cuerpo, o `None` si todavía lo tiene. Ver
+    # `services/purga.py` (backlog punto 8).
+    #
+    # `contenido_limpio` sigue siendo `NOT NULL` — una purgada guarda `''`, no
+    # `NULL` — y esta columna es la que distingue "se purgó el 4/9" de "nunca
+    # tuvo cuerpo" (que hoy no pasa: `ingestion.py` descarta antes de insertar
+    # cualquier nota sin `content:encoded`, salvo que venga por extracción). Sin
+    # esta marca, `''` sería ambiguo y la retención de texto de terceros
+    # dejaría de ser medible.
+    #
+    # Se lee junto con `contenido_limpio`, nunca sola: el par es lo que importa.
+    purgado_en: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime, nullable=True, index=True)
+    )
+
     # Vector semántico de la noticia, generado en la fase de vectorización.
     # Queda en None hasta que la noticia sea procesada.
     embedding: Optional[List[float]] = Field(

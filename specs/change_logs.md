@@ -2249,3 +2249,510 @@ Dos de esas mutaciones no se detectaban al principio, y por el mismo motivo: **l
 Una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*: **entidades HTML sin decodificar** llegando al producto. Medido sobre la base: 38 de 5.390 `contenido_limpio` (0,7%), y `titulo` ninguno. Quedó como punto 13 del backlog.
 
 Es el argumento entero de este punto en una línea: el defecto estaba ahí desde antes, y lo que faltaba para verlo era el log.
+
+---
+
+## Backlog punto 3: el alta de medios la hace el operador (03/09/2026)
+
+Hasta la 1.1.0 el roster vivía hardcodeado en `scripts/seed_medios.py`. El problema no era de comodidad sino de a quién le corresponde la decisión: **el repo aceptaba los términos de uso de siete medios argentinos en nombre de cualquiera que lo desplegara**. La revisión del 19-20/08 mostró que esos términos varían muchísimo —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario reserva TDM en su `robots.txt`— y que cuál es aceptable depende del uso que le dé cada operador.
+
+Se construyeron `GET /medios`, `POST /medios` y `PATCH /medios/{id}?activo=`.
+
+### Lo que ya estaba hecho y nadie había notado
+
+`Medio.activo` existe desde la Fase 1 y `ingerir_todos_los_medios` **ya filtraba por él** (`ingestion.py`, `select(Medio).where(Medio.activo.is_(True))`). O sea que la semántica "deshabilitar no es borrar" estaba implementada en el pipeline desde el principio y lo único que faltaba era el endpoint que diera vuelta la bandera. Encontrarlo cambió el tamaño del punto: la baja pasó de ser una funcionalidad a ser tres líneas más un test de integración que fija que la bandera efectivamente manda sobre lo que el motor sale a buscar.
+
+### Las cinco decisiones
+
+**1. El sondeo bloquea lo inservible e informa lo opinable.** Se evaluaron las tres posturas. Bloquear todo, como hace `POST /modelos`, es coherente con el precedente pero deja que un feed caído cinco minutos impida registrar un medio que el operador ya decidió sumar. Informar todo nunca traba, pero deja registrar un feed que da 404 permanente y enterarse quince minutos después por un mail de alerta.
+
+Se eligió el mixto, y el criterio para partirlo es **si hay algo que decidir**. Un feed que no responde, no parsea o no trae un solo item utilizable está roto y ninguna decisión lo arregla — el `/feed/internacionales` de Perfil da 404 aunque Perfil lo publique en su propia página de RSS. En cambio que un medio retenga el cuerpo, que su `robots.txt` sea restrictivo o que la ventana parezca archivo son cosas sobre las que el operador tiene algo que decir, y el motor no puede dictaminar por él sin volver a cometer el error que este punto vino a corregir.
+
+**Todos los feeds de la lista tienen que servir**, no alcanza con que sirva uno: la lista la manda el operador de forma explícita, así que uno roto es un error de tipeo que conviene ver ahora.
+
+**2. `extraer_por_url` la decide el operador; el sondeo solo informa.** Es la tentación obvia —el sondeo ya sabe si el feed trae `content:encoded`, prenderla sola sería un renglón— y se descartó a propósito. Esa bandera marca los medios donde el motor va a buscar a la página el cuerpo que el medio **eligió no publicar** en su feed, y cruzar esa línea es exactamente la decisión que este backlog le devuelve a quien acepta los términos.
+
+Se la contrastó con `modo_estructura` en `POST /modelos`, que sí se autodescubre, y la diferencia aguanta: allá lo que se descubre es un detalle técnico del protocolo (si el proveedor acepta `response_format` o solo tool-calling), acá lo que se decidiría es un permiso.
+
+**3. Campos nuevos: `idioma`, `pais`, `logo_url`.** El logo se guarda como URL y no como bytes: mantiene la base chica y sin datos binarios, y el costo asumido —que el logo deje de verse si el medio mueve el archivo— es de presentación, porque nada del pipeline lo mira.
+
+El sondeo los **propone** leyéndolos del canal RSS (`<language>` y `<image><url>`), pero el valor que se guarda es el que manda el operador: esos tags son opcionales y muchos feeds los traen mal o vacíos.
+
+Se evaluó también sumar `terminos_url` y `descripcion` para dejar auditable qué términos aceptó el operador, y quedó afuera de esta tanda.
+
+**4. No existe DELETE: la baja es `activo=False`.** Dos motivos que apuntan al mismo lado. El de producto: deshabilitar tiene que ser reversible sin perder nada, para apagar un medio hoy y volver a prenderlo el mes que viene. El de datos: `Noticia.medio_id` es `NOT NULL` con clave foránea a `medio.id` **sin cascada**, así que borrar un medio que ya ingirió algo violaría la restricción — y forzarlo con cascada se llevaría puestas noticias que quizá ya formaron clusters, se sintetizaron y se entregaron al back-end.
+
+**5. El alta deja el medio habilitado.** Diferencia deliberada con `POST /modelos`, donde `activar` es `False` por default. Allá prender un modelo **apaga a los demás** (la credencial es una sola, dos proveedores prendidos son un estado inusable), así que activar es un interruptor y encenderlo solo sería tomar una decisión ajena. Acá los medios conviven —el clustering *necesita* varios para encontrar el mismo hecho contado por distintas redacciones— y sumar uno es aditivo. Dar de alta un medio para después tener que acordarse de prenderlo sería ceremonia sin contenido.
+
+Por eso mismo `PATCH /medios/{id}` **no** apaga a los demás, a diferencia de su equivalente de modelos.
+
+### El SSRF: por qué el validador se revisó y no se copió
+
+El endpoint hace que el motor **pida una URL elegida por quien llama**, que es la definición de SSRF. El patrón ya estaba resuelto en `proveedores.base.validar_base_url`, y el roadmap avisaba que había que revisarlo y no copiarlo porque acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida.
+
+Al leerlo apareció la diferencia concreta. `proveedores.base.REDES_PROHIBIDAS` bloquea **solo link-local**, y su comentario explica que no bloquear los rangos privados fue deliberado: un modelo de IA en `localhost:11434` o un vLLM en la red interna es justamente el caso que ese backlog existe para habilitar, y encima es el escenario donde los cuerpos de los artículos no salen de la máquina.
+
+**Ese razonamiento no se traslada.** Un medio de noticias en `127.0.0.1` o en `10.0.0.5` no tiene ningún uso legítimo, y sin bloquearlos el endpoint sería un escáner de la red interna a pedido de quien llame: aunque el cuerpo no se devuelva, la diferencia entre "no responde" y "responde pero no es un feed" ya delata qué hay escuchando. Así que `medios.REDES_PROHIBIDAS` suma loopback, los tres rangos privados de IPv4, `fc00::/7` y `0.0.0.0/8`.
+
+Hay un test que fija la divergencia a propósito (`test_es_mas_estricto_que_el_de_proveedores_y_a_proposito`): comprueba que `validar_base_url` acepte `localhost` y que `validar_url_de_feed` lo rechace. Si alguien "unifica" los dos validadores, se cae y explica por qué no hay que hacerlo.
+
+**`url_base` pasa por el mismo validador que los feeds**, y no por simetría: el sondeo le pide `{url_base}/robots.txt`, así que sin validarlo el SSRF entraba por la puerta de al lado.
+
+### Dos hallazgos de leer el código antes de escribirlo
+
+**`_parser_robots` manda mails.** Reusarla tal cual para el sondeo habría hecho que cada alta contra un dominio caído le mandara un mail de alerta al operador — y que cualquiera con acceso al endpoint pudiera inundarle la casilla. Se extrajo `extraccion.leer_robots`, la parte pura sin caché ni alertas, y `_parser_robots` ahora la envuelve. La ingesta sigue alertando igual, que es lo correcto ahí: perder la cobertura de un medio entero sí es grave.
+
+**`_descargar_feed` no sirve para sondear.** Trae `@retry` de 3 intentos con backoff exponencial hasta 10 s —casi 20 s por feed— y acá hay una persona esperando la respuesta de un alta. El sondeo lleva política de red propia y más corta, con el mismo criterio que ya había tomado `extraccion._descargar_pagina` frente a la misma tentación.
+
+Lo que sí se reusa es `ingestion._parsear_entry`, aunque sea privado: **es la definición de qué cuenta como item utilizable**, y el sondeo tiene que contar exactamente lo mismo que después va a ingerir el pipeline. Una segunda copia del criterio haría que el alta prometiera items que la ingesta descarta.
+
+### La ventana temporal se mide sobre la fecha declarada
+
+`_parsear_entry` cae en `ahora_utc()` cuando el item no trae fecha, que es lo correcto para persistir pero daría una ventana de 0 h para un feed sin fechas — una medición inventada, justo la que el sondeo reporta. Se mide sobre `published_parsed` y, si no hay al menos dos fechas declaradas, se informa que no se pudo medir en vez de inventar un número.
+
+El umbral de "esto huele a archivo" quedó en 72 h, contra lo medido: los feeds generales que ya corren son ventanas móviles de 7 h (La Nación, Perfil) a 23 h (TN), mientras que los de sección guardan meses. Es un aviso y no un rechazo — un medio chico que publica dos notas por semana tiene una ventana ancha y es perfectamente legítimo.
+
+### Verificación
+
+604 tests (52 nuevos), `ruff` limpio, `alembic check` contra Postgres.
+
+**7 mutaciones, 7 detectadas.** Una de ellas encontró un test flojo antes de que llegara a `main`: la aserción del aviso "este feed no trae cuerpo" buscaba la subcadena `extraer_por_url`, que **también aparece en el otro aviso** —el de "solo algunos items traen cuerpo"—, así que borrar el primero pasaba desapercibido. Se ajustó a la parte distintiva del mensaje.
+
+### Lo que quedó afuera, a propósito
+
+**Retirar el roster del repo.** El roadmap lo pide, pero sacarlo obliga a resolver la migración de las instancias que hoy corren con siete medios cargados, y eso es una decisión aparte. `scripts/seed_medios.py` sigue existiendo y pasó a ser **datos de ejemplo**: se le reescribió el bloque de comentarios para que conserve el conocimiento medido que el alta por API no puede redescubrir sola —por qué Clarín, Ámbito y La Izquierda Diario quedan afuera, la trampa de los feeds de sección de TN, el `?outputType=xml` obligatorio de Ciudad Magazine— porque son juicios sobre términos de uso, no sobre feeds.
+
+**Editar los datos de un medio ya cargado.** No hay `PATCH` de metadatos: los siete medios que ya existían se quedan con `pais` en `None` hasta que alguien los complete, y `idioma`/`pais`/`logo_url` quedaron fuera de `CAMPOS_SINCRONIZADOS` del seed porque son datos descriptivos y no configuración de ingesta —el seed no debe pisar lo que el operador ajustó a mano—.
+
+### El ataque a los endpoints nuevos, y lo que encontró (03/09/2026)
+
+Antes de commitear el punto 3 se atacaron los tres endpoints en vez de revisarlos de a ojo: servicio señuelo en loopback, ataques corriendo contra el motor vivo, y verificación en un contenedor `python:3.12-slim` de lo que no reproducía en Windows. Aparecieron seis cosas; se arreglaron tres en esta tanda y las otras quedan anotadas abajo.
+
+#### 1. SSRF por redirect — `follow_redirects=True` hacía de adorno al validador
+
+El agujero real y verificado: `validar_url_de_feed` aprueba la URL que le mandan, y **httpx después se va sola a donde diga el `Location`**, sin que nadie revalide. Un host público que responda `302 -> http://169.254.169.254/latest/meta-data/` atravesaba el filtro entero. En la prueba, el motor leyó el cuerpo de un servicio en `127.0.0.1` cuya URL directa el validador sí rechazaba.
+
+**Se evaluaron las dos salidas y se midió antes de elegir.**
+
+*Rechazar el redirect y pedirle al operador la URL final* era más simple y de superficie cero — no hay cadena que validar, así que no hay validador de cadena que se equivoque— y además dejaría mejor dato persistido: los feeds que redirigen pagan un salto en cada uno de los 96 ciclos diarios.
+
+Se descartó por lo que dijo la medición sobre los 8 feeds del roster: **3 redirigen** (TN, El Cronista y Revista Gente, que además cambia de dominio a `revistagente.com`), o sea que habría dado de baja tres medios en producción. Y sobre todo por *por qué* redirigen: TN y El Cronista **ya migraron a Arc**, y ese 301 es lo que mantiene viva la URL que tenemos sembrada. Fijar la URL final nos rompería en la mudanza siguiente, en silencio.
+
+**Elegido: seguir los redirects con un bucle propio que valida cada salto** (`bajar_siguiendo_redirects`). Tope de 5 saltos —ninguno de los 3 reales pasa de 1—, detección de bucles, y `urljoin` para resolver un `Location` relativo. La URL inicial se revalida aunque el llamador ya lo haya hecho, para que la función sea segura la llame quien la llame.
+
+**No cierra el TOCTOU**, y está dicho en el código: entre validar la IP y conectar hay una segunda resolución de DNS. Es el mismo límite que `proveedores.base` ya asume; cerrarlo exige conectar a la IP validada preservando Host y SNI, artillería desproporcionada para un motor de un operador.
+
+#### 2. `leer_robots` tenía el mismo agujero, y la salida obvia lo habría roto
+
+También usaba `follow_redirects=True`, y le llega un `url_base` recién mandado por quien llama al alta. La salida evidente era `follow_redirects=False`, y la medición la descartó: **el `robots.txt` de Revista Gente redirige** (1 de 8 medidos). Cortarlos de plano habría dejado ese medio sin poder leer su `robots.txt` — o sea sin extracción, fallando cerrado, con un mail de alerta por ciclo. Usa el mismo bucle validado, con import local para no armar ciclo (el recurso que ya usa `search.listar_clusters`).
+
+#### 3. Una IPv4 escondida en una IPv6 se colaba entera
+
+`::ffff:127.0.0.1` apunta a loopback, pero como objeto es un `IPv6Address`, y `IPv6Address in IPv4Network("127.0.0.0/8")` da `False`. Pasaba el filtro.
+
+**En Windows no conecta y parecía inofensivo.** Se verificó dentro de `python:3.12-slim`, que es el destino real de despliegue: **pasa el filtro y conecta**. Es la clase de hallazgo que se pierde si uno se conforma con que no reproduzca en la máquina de desarrollo.
+
+Entró junto con el punto 1 y no como tanda aparte porque sin esto el arreglo del redirect es evitable: alcanza con redirigir a `http://[::ffff:127.0.0.1]/`.
+
+El arreglo cambió la forma de preguntar. **La regla de fondo pasó a ser `is_global`, en positivo**: un medio de noticias vive en una dirección ruteable en internet, punto. Enumerar rangos malos es una carrera que se pierde, y se perdió en el acto — la primera versión del filtro dejaba pasar `100.64.0.1` (CGNAT) porque **en Python 3.13 `is_private` da `False` ahí**. La lista explícita se conserva igual, por dos motivos: es la parte auditable, y cubre `64:ff9b::/96` (NAT64), lo único que `is_global` considera global aunque encapsule una IPv4.
+
+#### Lo que resistió el ataque
+
+Vale anotarlo para no volver a probarlo:
+
+- **XXE**: `<!ENTITY xxe SYSTEM "file:///...">` volvió como el literal `&xxe;`. feedparser no resuelve entidades externas.
+- **Bomba de entidades** (billion laughs): "undefined entity", no expande.
+- **Notación decimal/hex/octal de IP**: parecía evasión en Windows, pero en Linux `getaddrinfo("2130706433")` devuelve `127.0.0.1`, así que el validador sí la ve. Falsa alarma — se verificó antes de anotarla.
+- Inyección SQL, mass assignment (`extra="forbid"`), y las formas directas de SSRF que el validador ya bloqueaba.
+- **La extracción de artículos** (`extraccion.py`) toma URLs del feed, o sea contenido de terceros, y también sigue redirects — pero está protegida por su propia exigencia: pide poder leer el `robots.txt` del destino y falla cerrado si no puede, así que un `169.254.169.254` metido en un feed no llega a pedirse.
+
+#### Lo que la prueba de mutación enseñó sobre las capas
+
+14 mutaciones, **13 detectadas**. La que no se detecta está etiquetada como tal: romper el desenvolvimiento de IPv4-en-IPv6 no reabre nada, porque `is_global` ya las rechaza por su cuenta. Es capa redundante haciendo su trabajo, no un hueco — y se mantiene igual porque `ipaddress` **ya cambió de semántica una vez y nos mordió** (el CGNAT), así que apoyar una defensa en una sola propiedad de la librería estándar es la apuesta que acabamos de perder.
+
+Una mutación sí destapó un hueco real: **`follow_redirects=True` no se detectaba**, porque todos los tests mockean `httpx.get` entero y el mock ignora ese kwarg. Habrían quedado en verde con el agujero abierto en producción. Se agregó un test que mira el kwarg y no el resultado.
+
+#### Lo que quedó abierto, y por qué
+
+Tres hallazgos del mismo ataque **no** se arreglaron acá, para no mezclar tandas:
+
+- **Amplificación de pedidos.** `feeds_rss` no tiene techo de elementos ni deduplica. Medido lineal: 12 copias del mismo feed = 12 pedidos reales. Con 10.000 entradas, un solo POST convierte al motor en un ariete contra un tercero con nuestra identidad en el User-Agent, y bloquea un worker sincrónico por horas.
+- **Campos sin techo y `logo_url` sin validar.** Se persistieron 500 KB de `url_base` y 500 KB de `logo_url`, este último empezando con `javascript:`. `GET /medios` lo devuelve tal cual: es XSS almacenado esperando a la interfaz de escritorio.
+- **`PATCH /medios/{id}` con un `id` mayor que bigint da 500** (desborde en Postgres). No filtra nada, pero contradice la regla de que una entrada mala es 4xx con mensaje.
+
+### Tanda 2 de la auditoría: la credencial de IA no sale hacia un host sin declarar (03/09/2026)
+
+**Cierra SR-01**, el hallazgo crítico. `POST /modelos` le mandaba `MODELO_API_KEY` como Bearer al `base_url` que le indicaran —dos veces, una por cada mecanismo de estructura que prueba el sondeo— **antes de saber si el proveedor servía**. Verificado con un captor local, que registró la llegada de la credencial sin imprimir su valor. El alta devolvía 422 y no guardaba nada, pero la key ya había viajado.
+
+`validar_base_url` bloqueaba solo link-local, y eso era deliberado: el comentario decía que un modelo en `localhost:11434` es el caso que el punto 2 existe para habilitar. Lo que faltaba no era bloquear más adentro sino **mirar hacia afuera**.
+
+#### La decisión: lista blanca, con la regla invertida
+
+Se evaluaron tres formas.
+
+*Prohibir loopback y privadas, como en `services/medios.py`*, era lo simétrico. Se descartó rápido: mata el modelo local —el único escenario donde los cuerpos de los artículos no salen de la máquina— y **no arregla lo que importa**, porque la exfiltración hacia un host externo seguiría permitida. Habría sido gastar el cambio en el lado equivocado.
+
+*Sondear en dos pasos, primero sin credencial*, no necesita configuración nueva. Se descartó porque casi todos los proveedores contestan 401 sin key, así que el primer paso no distingue un destino sano de uno hostil — y encima no impide que alguien confirme igual hacia un host malicioso.
+
+**Elegido: `MODELO_HOSTS_PERMITIDOS`.** Un destino público tiene que estar declarado; la red interna no. Lo importante es que **la regla queda invertida respecto de `medios.py`**, y eso no es una inconsistencia sino la consecuencia de que se protege otra cosa: allá lo interno es lo sospechoso porque el riesgo es que nos usen de escáner de la red; acá lo interno es lo confiable porque el riesgo es que la credencial se vaya lejos. Los dos comentarios se remiten mutuamente para que nadie los "unifique".
+
+#### Arranca vacía, y el error dice qué agregar
+
+Fue decisión del usuario entre tres opciones. Sembrarla con los proveedores conocidos no rompía nada, pero era el repo decidiendo a quién confiarle la credencial del operador — exactamente lo que el punto 3 acababa de corregir para los medios. Hacerla opt-in como `API_TOKEN` era coherente con `auth.py`, pero ahí el riesgo es exponer un servicio y acá es filtrar tu propia credencial por un error de tipeo: un default inseguro pesa distinto.
+
+Vacía, entonces, con el mismo criterio de "informar, no decidir" que el alta de medios. El 422 no dice "no permitido" sino la línea exacta:
+
+```
+MODELO_HOSTS_PERMITIDOS=ya.declarado.test,nuevo.test
+```
+
+**Rompe configuración al actualizar**, y va avisado: una instancia que use `openai_compatible` contra un proveedor público deja de sintetizar hasta declarar su host. La que corría acá no se vio afectada —su modelo activo es el Gemini nativo, que no usa `base_url`— pero su `groq-qwen` apagado sí necesita la declaración para volver a prenderse.
+
+#### Los detalles que se decidieron y por qué
+
+**Comparación exacta, no por sufijo.** Declarar `openai.com` no habilita `openai.com.atacante.net` ni `evil.openai.com`, y un homógrafo con cirílico no coincide con el host latino. Cada endpoint regional se declara aparte: explícito es el punto.
+
+**Se normaliza caja, punto final y se ignora el puerto.** DNS no distingue mayúsculas, `api.groq.com.` es el mismo host, y si confiás en un host el puerto no cambia a quién le hablás.
+
+**Un host que no resuelve cuenta como público**, o sea que hay que declararlo. Es fallar cerrado: desde el validador no se distingue un `.local` que resolverá por mDNS al hacer el request de un dominio que todavía no existe pero existirá mañana, y lo que está en juego es una credencial. El mensaje de error lo dice, para que un problema de DNS no se lea como un problema de lista.
+
+**La lista habilita, no levanta las otras defensas.** Declarar `169.254.169.254` no alcanza: link-local se comprueba antes y sigue bloqueado. Hay un test que lo fija.
+
+#### Lo que el arreglo NO cierra, dicho con todas las letras
+
+La credencial **sigue saliendo hacia loopback y hacia la red interna sin declaración**, y se comprobó volviendo a correr el captor: recibió el Bearer igual. Es el precio elegido, y es el correcto — quien pueda levantar un servicio en tu máquina ya tiene tu máquina, y la red interna es justamente lo que esta funcionalidad existe para soportar.
+
+#### Un defecto de la suite que destapó el `.env`
+
+Al definir `API_TOKEN` en la tanda 1, **63 tests de endpoints pasaron a fallar con 401**. No estaba mal el código: el resultado de la suite dependía de si quien la corría tenía un token configurado. `test_modelos.sin_el_env_de_la_maquina` ya aislaba las credenciales, pero esta variable se le había escapado.
+
+Se agregó `api_sin_token` como fixture `autouse` en `conftest.py`, que la neutraliza para todos los tests; `test_auth.py` la pisa con sus propias fixtures, porque ahí el token es el objeto del test y no ruido del entorno. Comprobado corriendo la suite con `API_TOKEN` y `MODELO_HOSTS_PERMITIDOS` forzados desde el entorno a valores distintos: 642 pasando igual.
+
+#### Verificación
+
+642 tests (13 nuevos), `ruff` limpio, **6 mutaciones y 6 detectadas** sobre la comprobación nueva —incluidas la coincidencia por sufijo, la pérdida de normalización y el host que no resuelve—. Y el ataque original repetido contra el código parcheado, esta vez **con un token válido**, o sea en el peor caso: `https://proveedor-malicioso.test/v1` rechazado con 422 y la línea que falta.
+
+### Tanda 3 de la auditoría: lo que entra por la API tiene forma y tiene techo (04/09/2026)
+
+Cierra los **cuatro hallazgos menores** que quedaron anotados al final de la tanda 1. Ninguno filtraba datos, y por eso fueron a una tanda aparte; lo que tenían en común es que el motor aceptaba y **persistía** entradas que después alguien más iba a tener que interpretar o renderizar. Los cuatro se reprodujeron contra el motor antes de tocar nada y se volvieron a correr después.
+
+#### El más importante no es el que más ruido hacía
+
+`logo_url` aceptaba `javascript:alert(document.cookie)`, lo guardaba, y `GET /medios` lo devolvía intacto. No es un problema del motor —el motor nunca baja esa URL— y por eso el escáner de la tanda 1 lo dejó al final de la lista: **es XSS almacenado esperando a que exista un visor**, y el visor es justamente la aplicación de escritorio que se está evaluando. Un hallazgo que hoy no hace nada y que se dispara solo el día que se escriba la pantalla de fuentes es peor que uno ruidoso, porque para entonces nadie va a estar mirando este endpoint.
+
+Se cierra con `validar_url_de_logo`, que exige http o https. **Comprueba la forma y no la red, y la diferencia con `validar_url_de_feed` es deliberada:** el feed lo baja el motor, así que ahí `REDES_PROHIBIDAS` cierra un SSRF real; el logo lo pide el navegador de quien mire la interfaz, y a esa altura la dirección privada que alcanza es la suya. Resolver DNS acá sería pagar una consulta de red en cada alta para defender algo que no existe, y encima rompería un logo servido desde la intranet de quien despliega esto. Hay un test que fija las dos mitades: `http://192.168.1.10/logo.png` entra como logo y sigue rechazado como feed.
+
+Las tres comprobaciones que no tocan la red —esquema, dominio, credenciales embebidas— se extrajeron a `_validar_forma_de_url` y ahora las comparten los dos. La alternativa era una segunda copia de la lista de esquemas peligrosos, que es la clase de duplicado que se desincroniza el día que haya que agregar uno.
+
+#### La amplificación: deduplicar primero, y después medir
+
+`feeds_rss` no deduplicaba ni tenía techo. Medido: 500 copias de la misma URL en un solo POST daban **501 pedidos reales** al mismo servidor —lineal, uno por copia— con nuestro User-Agent puesto, y la fila quedaba con las 500 repetidas adentro.
+
+El orden de las dos operaciones fue la decisión, y va al revés de lo obvio: **primero se deduplica y después se mide el techo.** Una lista pegada con repetidas pide pocos feeds distintos aunque sea larga; cortarla primero por largo la rechazaría entera y obligaría al operador a limpiarla a mano para descubrir que siempre estuvo dentro del límite. Así, las 500 copias entran como un feed y cuestan un pedido.
+
+El techo quedó en **20 feeds distintos**, y lo fija el peor caso de latencia y no el gusto: el sondeo consulta cada feed con 10 s de timeout, así que veinte que no respondan ocupan un worker 200 s — acotado y reportable, que es lo que antes no era. Contra la realidad medida sobra: los 7 medios del roster usan **un** feed cada uno y el experimento más grande que se hizo llegó a 8. Se eligió el lado generoso a propósito, porque desde la tanda 1 `POST /medios` pide token: **el atacante anónimo ya no existe**, y lo que esta cota frena hoy es sobre todo el error de tipeo que destapó el ataque.
+
+Se deduplica **en dos lugares, y no es redundancia**: `AltaMedio` lo hace para que la fila quede limpia, y `sondear` lo hace de nuevo porque cubre el otro camino — `PATCH` sondea la lista **guardada**, que en una fila anterior a esta versión, o cargada por `scripts/seed_medios.py` (que no deduplica), puede traer repetidas. Sin la segunda, rehabilitar esa fila reabría la amplificación entera. Hay un test por cada camino.
+
+#### Las cotas de largo, y dónde se traza la línea
+
+Se persistieron 500 KB en `url_base` y otros 500 KB en `logo_url`. El techo quedó en **2048 caracteres** para toda URL que entre por la API: es el límite histórico de Internet Explorer, y por eso es el número bajo el que se quedó todo lo que quiere ser alcanzable. La URL más larga del roster tiene 62 caracteres, así que entra 33 veces.
+
+Va en el **elemento** de `feeds_rss` y no solo en la lista, porque sin eso un único feed de 500 KB seguía pasando. Y se le puso la misma cota a `base_url` de `AltaModelo`, que tenía el mismo agujero: a dónde puede apuntar ya lo decide `MODELO_HOSTS_PERMITIDOS` desde la tanda 2, pero su largo no lo decidía nadie.
+
+`idioma` y `pais` pasaron de `max_length` a `pattern`. Ocho caracteres alcanzan para `<script>` —que es exactamente el largo de `idioma`—, y son códigos y no texto libre, así que la forma se puede exigir entera: BCP-47 corto y ISO 3166-1 alfa-2.
+
+**`nombre` queda como texto libre, y es la línea.** Se acotan las URLs y los códigos porque son valores con forma, y en el caso del logo porque el esquema es la parte ejecutable. `nombre` es texto para mostrar: escaparlo al renderizar es trabajo de quien lo renderiza, y filtrarlo acá rompería un medio que se llame `Página/12` o `AM 750 & Co.`. Hay un test que lo fija, para que la próxima pasada de seguridad no lo "arregle".
+
+#### Los dos 500 por una entrada mala
+
+`PATCH /medios/{id}` y `PATCH /modelos/{id}` con un id más grande que la columna reventaban con `OverflowError` — medido en SQLite, que es donde corre la suite. No filtraba nada; contradecía la regla de que una entrada mala es 4xx con mensaje, y esa regla es lo que hace que un 500 signifique "se rompió algo nuestro".
+
+Ambos `id` son `integer` de 32 bits, consultado al esquema vivo de Postgres y no supuesto (`information_schema.columns` sobre `medio` y `modelo_ia`), así que la cota es `2**31 - 1`. Y `ge=1` del otro lado, porque las secuencias arrancan en 1 y un id negativo es un error de quien llama, no un 404 que sugiere que alguna vez existió. Un id válido que no está sigue siendo 404: hay un test que separa "imposible" de "no está".
+
+`POST /vectorize?limite=-1` devolvía `{"pendientes": -1}` con un 200. No vectorizaba nada, pero **informaba un número imposible como si lo hubiera medido**, que es lo que lo vuelve un problema y no una curiosidad. `/search` y `/clusters` ya acotaban su `limite` desde la Fase 4; a este endpoint se le había pasado. Queda `ge=1` sin techo, porque el backlog real ya lo acota y pedir de más no cuesta nada.
+
+#### Verificación
+
+687 tests (45 nuevos), `ruff` limpio, `alembic check` contra Postgres sin operaciones pendientes (la tanda no toca el esquema).
+
+**18 mutaciones y 18 detectadas.** Se rompió a propósito cada protección nueva, incluidas las tres que no son evidentes: invertir el orden de dedup y techo, sacarle la cota al elemento de la lista dejándosela a la lista, y hacer que el logo resuelva DNS como el feed. Las dos primeras las cazó un test distinto del que estaba escrito para ellas —`-x` corta en el primer fallo—, así que se volvieron a correr dirigidas contra su propio test para confirmar que no era casualidad.
+
+Y **los cuatro ataques repetidos contra el motor vivo**, sobre Postgres real, por HTTP de verdad y con token válido (el peor caso: atacante autenticado). Las 500 copias del feed de Perfil ahora se guardan como una y cuestan un pedido; 21 feeds distintos dan 422 nombrando el límite; `javascript:` y `data:text/html` en el logo dan 422 diciendo que el campo es el logo; los 500 KB dan `string_too_long`; y los seis `id` imposibles contra los dos `PATCH`, más `?limite=-1` y `?limite=0`, dan 422 en vez de 500. En la misma corrida se comprobó que lo legítimo sigue pasando: alta real de Perfil (50 items, 1 aviso), y el ciclo de deshabilitar y rehabilitar. Las filas de prueba se borraron después; la base quedó con los 8 medios que ya tenía.
+
+
+### Backlog punto 8: purga de cuerpos — borrar el texto ajeno una vez que cumplió su función (04/09/2026)
+
+**Cierra el punto 8 del backlog, parcialmente y a propósito.** El alcance es solo las noticias huérfanas —sin cluster, con su ventana ya vencida—; los clusters cerrados y entregados quedan afuera, aunque son candidatos por el mismo argumento de antigüedad. Es una segunda población con su propia condición de seguridad (la re-síntesis), y mezclarla acá habría resuelto dos problemas con una sola comprobación. Queda anotada como tanda aparte en `roadmap.md`.
+
+Medido antes de tocar nada: **22 MB de texto de terceros**, de los cuales **4.083 noticias (69%) ya habían vencido la ventana de 7 días** sin haber formado cluster nunca. Después de purgar: **6,58 MB**, **15,5 MB liberados**. Se corrió de verdad contra la base de producción, no solo contra los tests — ver "Verificación en vivo" más abajo.
+
+#### La decisión que definió el punto 4 del plan: medir antes de escribir código
+
+El plan original dejaba abierto cómo resolver el único consumidor que sí lee el corpus entero, `get_vectorizador` (TF-IDF de `preprocessing.py`), con dos caminos: excluir las purgadas del corpus, o dejar que aporten solo su título. Antes de elegir se armaron los dos vectorizadores contra la base real y se corrió `_terminos_propios` —lo que sale publicado como "qué destacó cada medio"— sobre 15 clusters ya sintetizados (38 pares cluster×medio):
+
+| | Vocabulario | Cambio de código |
+|---|---|---|
+| Hoy (cuerpo completo) | 109.127 términos | — |
+| Excluir del corpus | 29.679 términos | filtro en el `select` + resincronizar el disparador de reajuste |
+| Dejar que degrade solo | 32.457 términos | **ninguno** |
+
+El segundo camino no necesita tocar `preprocessing.py`: la línea que arma el corpus ya es `f"{n.titulo}. {n.contenido_limpio}"`, así que una fila con `contenido_limpio=''` se reduce sola a "solo título". Es la consecuencia automática de la **marca** elegida (`purgado_en` + `contenido_limpio=''`) y no una decisión aparte. Ganó por ser al mismo tiempo el más simple —cero código— y el que evita el riesgo que el propio plan había anotado: si el corpus excluyera filas, el conteo `total` que dispara el reajuste (línea 100) tendría que mirar exactamente el mismo filtro, y desincronizarlos sería el bug silencioso de siempre. Confirmado contra la base real después de purgar: **38.730 términos** (más que la simulación porque el corte real usó 7 días y no "toda huérfana", así que quedaron más noticias recientes aportando cuerpo completo).
+
+En los 38 pares revisados, `_terminos_propios` cambió en todos —nunca es idéntico al de hoy— pero los términos siguieron siendo coherentes con el tema de cada cluster; el "núcleo común" (lo que comparten los medios) se mantuvo prácticamente estable entre las tres variantes.
+
+#### La condición de seguridad que no estaba en el plan original
+
+`_limite_de_purga` no usa `DIAS_RETENCION_CUERPO` solo: usa `max(DIAS_RETENCION_CUERPO * 24, HORAS_CLUSTER_ABIERTO)`. La razón es un caso real y no una cautela decorativa: `HORAS_CLUSTER_ABIERTO` es configurable por el operador, y el propio comentario de `DIAS_RETENCION_CUERPO` invita a subirlo como la recuperación ante un problema (es lo que ya hace `HORAS_MAXIMAS_SIN_SINTETIZAR` con la síntesis). Si `HORAS_CLUSTER_ABIERTO` quedara alguna vez por encima de los 7 días de default, un límite de purga fijo le comería el cuerpo a noticias que `agrupar_pendientes` todavía considera candidatas a cluster — la purga rompiendo el clustering, en silencio. El `max()` hace que ese error de configuración no pueda pasar, en vez de confiar en que dos números configurados por separado se mantengan en el orden correcto. Hay dos tests que fijan exactamente este borde, subiendo `HORAS_CLUSTER_ABIERTO` a 300 h y comprobando que una huérfana de 200 h sobrevive mientras una de 310 h no.
+
+#### Qué sobrevive y qué no
+
+Se borra **solo `contenido_limpio`**, nunca la fila: sobreviven título, URL, guid, fecha, medio y el `embedding`, así que `GET /search` no se entera. La marca es `purgado_en` (nueva columna, migración `5a246beb14bd`) más `contenido_limpio=''` — no alcanza con la cadena vacía sola, porque sin la fecha no se puede distinguir "se purgó" de "nunca tuvo cuerpo" (que hoy no pasa: la ingesta descarta antes de insertar cualquier nota sin cuerpo, salvo por extracción).
+
+**Es irreversible, y se documentó así antes de escribir el endpoint.** El texto no vuelve —la ventana del feed que lo trajo ya pasó, ni re-ingiriendo se recupera— y el costo real no es perderlo para el producto (ya cumplió, se vectorizó antes de que este paso corra) sino no poder revectorizar si algún día cambia `EMBEDDING_MODEL`. Por eso `POST /purge?solo_contar=true` existe como primera clase: mide exactamente la misma condición sin escribir, para comprobar el alcance contra datos reales antes de tocarlos.
+
+`purgar_cuerpos_vencidos` corre como último paso de `_job_ingesta_programada`, después de la entrega — a propósito, para que nada de la corrida dependa de que haya pasado antes — y es idempotente por construcción: `purgado_en IS NULL` en la condición hace que correrla de más no tenga costo.
+
+#### Un defecto que destapó la propia disciplina de mutación, dos veces
+
+Al mutar a propósito el `session.commit()` (romperlo para confirmar que algún test lo cazaba), no lo cazó nada. La causa es del entorno de tests y no del código: la base SQLite en memoria usa una sola conexión (`StaticPool`), así que `session.refresh()` ve la escritura pendiente aunque nunca se haya confirmado — no hay una segunda conexión real contra la que distinguir "escrito" de "confirmado". El síntoma que sí importa (que la corrida siguiente, con una sesión nueva, no vea el cambio) no es observable en ese entorno. Se agregó un test que espía `session.commit` directamente (`patch.object(session, "commit", wraps=session.commit)`), primer caso de este patrón en la suite: verificar que el método se llamó es lo único equivalente que el entorno permite comprobar.
+
+**El segundo hallazgo fue un defecto del propio proceso de mutación, no del código.** El primer intento de correr la tanda de mutaciones se mató por timeout a mitad de una corrida, y quedó una mutación real aplicada y sin restaurar: el endpoint `POST /purge` había quedado con `solo_contar=False` hardcodeado, ignorando el parámetro de la query. La revisión posterior del diff lo encontró antes de commitear nada — ahí es donde sirvió releer el propio cambio en vez de confiar en que "la suite ya había pasado en verde" (había pasado, pero *antes* de que el script de mutaciones corrompiera el archivo). Corregido, y la tanda completa se volvió a correr desde una base confirmada limpia.
+
+#### Verificación
+
+707 tests (20 nuevos), `ruff` limpio, `alembic check` contra Postgres sin operaciones pendientes. **12 mutaciones y 12 detectadas** sobre `purga.py` y su cableado —incluidas las tres no evidentes: el `max()` de la ventana de seguridad, el orden solo-contar/escritura, y el `commit()` recién descripto—.
+
+**Verificación en vivo, contra la base de producción real:**
+1. `pg_dump` completo antes de tocar nada (22,3 MB, formato custom, verificado con `pg_restore --list`).
+2. `solo_contar=true`: 4.083 noticias, 16.246.730 bytes — coincidió exacto con la corrida real.
+3. Purga real: `{"evaluadas": 4083, "purgadas": 4083, "bytes_liberados": 16246730}`.
+4. Confirmado contra la base: `noticia` sigue en 5.880 filas (nada se borró), texto total 22 MB → 6,58 MB, y **`purgadas_con_cluster = 0`** — ninguna noticia agrupada fue tocada.
+5. Segunda corrida: `{"evaluadas": 0, "purgadas": 0}` — idempotente contra datos reales.
+6. Spot-check de filas purgadas: título y `embedding` intactos, `contenido_limpio` vacío.
+7. `get_vectorizador` reconstruido contra la base ya purgada: 38.730 términos, sin excepciones.
+8. `agrupar_pendientes` corrido contra el estado post-purga: sin excepciones.
+
+**Deliberadamente no se corrió `/synthesize` ni `/deliver`** como parte de esta verificación: el primero gasta la cuota de la API de síntesis y el segundo entregaría al back-end real, y ninguno de los dos hace falta para confirmar que la purga no rompió el pipeline — `agrupar_pendientes` y `get_vectorizador` ya lo prueban sin gastar nada.
+
+
+#### Revisión independiente antes de commitear, y las correcciones que salieron de ella (04/09/2026)
+
+Se pidió una revisión con un modelo distinto (Opus, sin el contexto de esta sesión) enfocada en un solo criterio: qué podía causar pérdida de información valiosa, dado que la purga es irreversible por diseño. Corrió mutaciones reales contra una copia del repo y auditó la corrida en producción con SQL de solo lectura, sin tocar nada. Encontró un hallazgo urgente, uno de alcance ya ejecutado, y varios menores. Los primeros dos se resolvieron con las decisiones del usuario; los menores se corrigieron todos.
+
+**El hallazgo urgente: `_condicion_de_purga` no exigía `embedding IS NOT NULL`.** El docstring del módulo daba por sentado que toda huérfana "ya se vectorizó antes de que este paso corra" — una suposición sobre el orden del pipeline, no algo que la consulta obligara. Si la vectorización fallara alguna corrida (`_correr_paso` está diseñado para que un paso roto avise y siga, no para frenar el job), esa noticia queda sin `embedding` y sin cluster posible para siempre —`agrupar_pendientes` exige el embedding—, y a los 7 días la purga le habría borrado el cuerpo igual: el único insumo del que sale ese embedding, justo cuando más hace falta para reintentar. Se agregó `Noticia.embedding.is_not(None)` a la condición. **Costo cero sobre lo ya purgado**: auditado contra la base real antes de tocar el código, 0 filas en ese estado.
+
+**El hallazgo de alcance ya ejecutado: 238 de las 4.083 filas purgadas eran notas sin hecho** (111 opinión, 80 recetas, 46 horóscopo, 1 juegos) — las que `categorias.py` excluye del agrupamiento a propósito y que ese mismo módulo promete conservar disponibles para que el back-end decida qué hacer con ellas. Nunca pueden agruparse, así que son huérfanas para siempre y quedaron adentro del alcance de "solo huérfanas" sin que nadie lo pensara como una decisión aparte. **Se evaluó y se decidió no revertir**: el back-end nunca leyó `contenido_limpio` (`GET /search` no lo devuelve, y no hay otro consumidor), así que la letra de la promesa de `categorias.py` sigue en pie aunque el espíritu no se haya discutido a tiempo. Queda anotado acá para que la próxima vez que se toque el alcance de esta purga, se decida a propósito y no por default. El backup (`pre_purga_20260904.dump`) sigue disponible si en algún momento se necesitara revertir específicamente esas 238 filas.
+
+**Las cuatro correcciones menores, todas aplicadas:**
+
+- **Los "bytes" contaban caracteres, no bytes.** `func.length()` de Postgres sobre `text` cuenta caracteres; con acentos y eñes de sobra en español, subestimaba el texto real liberado (verificado: `"ñññ"` da 3 con `length` y 6 con `octet_length`, tanto en Postgres como en el SQLite de los tests). Cambiado a `func.octet_length`. Los `16.246.730` que quedaron documentados arriba, de la corrida real, están subestimados por este motivo — no se recalculan retroactivamente porque el texto que los generó ya no existe para volver a medirlo.
+- **`purgadas` se copiaba del `SELECT COUNT` en vez de leer el `rowcount` real del `UPDATE`.** Son la misma condición evaluada dos veces con una ventana de tiempo en el medio; una purga concurrente sobre alguna de las mismas filas haría que el conteo previo sobrestimara lo que esta corrida tocó de verdad. Ahora `purgadas` sale de `resultado_update.rowcount`. `bytes_liberados` se queda atado al `SELECT` de arriba a propósito —no hay forma de medir el largo de un texto después de blanquearlo—, así que en el caso raro de una purga concurrente esa cifra queda como aproximación mientras `purgadas` es exacto.
+- **El comentario de `_limite_de_purga` comparaba 7 contra 12 en vez de 168 contra 12** (le faltaba el `*24` en la comparación, aunque el código sí lo tenía). Corregido en el código y en el docstring de la clase de test que lo ejercita — es exactamente el comentario que alguien podría usar para "simplificar" el código mal el día de mañana.
+- **La migración `5a246beb14bd` afirmaba que había dos consultas usando el índice; hay una sola.** Corregido el docstring, y se anotó que con ~30% de la tabla en `NULL`, Postgres probablemente prefiera un seq scan para ese `IS NULL` de todos modos — no se creó un índice parcial sin medir primero que haga falta, siguiendo la misma regla de "medir antes de resolver" del resto del backlog.
+
+**Cobertura agregada junto con las correcciones**: un test que prueba que una huérfana sin `embedding` no se purga; uno que confirma el conteo en octetos y no en caracteres; uno que fuerza (con un `session.exec` espiado) que `rowcount` difiera del conteo previo y confirma que `purgadas` sigue al primero; dos tests de punta a punta contra `POST /purge` **sin mockear el servicio** — cerraban un hueco real: los tres tests previos del endpoint mockeaban `purgar_cuerpos_vencidos` entero, así que nada probaba la garantía de `solo_contar=true` a través del camino HTTP completo; y `test_corre_los_ocho_pasos` pasó a verificar también el ORDEN de ejecución (que la purga corre último), no solo que cada paso se llamó una vez — antes hubiera pasado igual si alguien la movía al principio del job.
+
+**Verificación**: 712 tests (5 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes. **4 mutaciones y 4 detectadas** sobre las cuatro correcciones —sacar el chequeo de embedding, volver a `length`, volver a usar `evaluadas` como `purgadas`, y mover la purga al principio del job—. Confirmado con un dry-run contra Postgres real después de aplicar todo: `{"evaluadas": 0, ...}`, consistente con que ya no queda nada pendiente de purgar desde la corrida del punto anterior.
+
+
+### Backlog punto 6-bis: multimodelo — un modelo por cluster, y una cadena que no pierde la corrida (05/09/2026)
+
+**Cierra 6-bis en su mitad reactiva.** El motor pasa de sintetizar todo con un modelo a poder elegir uno por cluster, y de perder la corrida cuando el proveedor falla a caer al siguiente.
+
+#### El reencuadre que lo destrabó
+
+Este punto estuvo frenado desde el 21/08 por un argumento que era correcto pero de alcance más chico del que aparentaba: *"la cadena no termina en «si falla, probá el siguiente»; para que sirva de verdad hay que decidir cuánto mandarle a cada proveedor según los créditos que le queden"*.
+
+Eso es cierto del **reparto proactivo** de carga, y no del **fallback reactivo**. Caer al siguiente cuando el primero ya falló no necesita saber cuánto crédito queda: la información llega sola, en forma de error. Separadas las dos mitades, la reactiva se podía hacer sin tocar la pesada — que sigue sin hacer falta.
+
+#### La mitad del trabajo ya estaba hecha
+
+Leer el código antes de planificar cambió el tamaño del punto. Ya existían, sin que hiciera falta migración ni esquema nuevo:
+
+- `sintetizar_cluster(session, cluster, modelo)` **ya recibía el modelo por parámetro**, con un centinela `_RESOLVER` puesto justamente para poder pasarlo resuelto.
+- `leer_api_key` **ya aceptaba la forma con sufijo** (`MODELO_API_KEY_GROQ`), con un comentario que decía "es lo que va a necesitar el punto de multimodelo".
+- `Sintesis.modelo_usado` ya guardaba qué modelo produjo cada síntesis, y **se actualiza en una re-síntesis**.
+- `modelo_activo` ya toleraba varias filas activas y desempataba de forma determinista.
+
+Lo que faltaba era chico: que el alta aceptara el campo, armar la cadena, recorrerla, y exponerlo por API.
+
+#### Las decisiones
+
+**`activo` sigue significando "el default desatendido".** Hay uno solo, `_apagar_los_demas` se queda, y el scheduler no se enteró del cambio: sigue llamando a `sintetizar_pendientes(session)` sin parámetros. Se evaluó la alternativa —varios activos más una columna `es_default`— y se descartó: cambia el significado de un endpoint que ya está en uso y pide migración, a cambio de nada que esto necesite.
+
+**La cadena la forman el activo y los suplentes con credencial propia**, no todos los modelos dados de alta. El criterio no es un proxy de la intención del operador: es lo único que hace que el suplente sirva. Un modelo que comparte `api_key_env` con el titular comparte su credencial y por lo tanto su **cuota** — caer de Gemini a Gemini no resuelve nada cuando lo agotado es la cuota de Gemini. Como efecto, configurar la variable con sufijo **es** el opt-in, y no hace falta una columna que diga quién es suplente.
+
+**El activo encabeza aunque su `prioridad` sea peor.** `prioridad` ordena a los suplentes entre sí; si pudiera adelantarse al activo, prender un modelo dejaría de significar algo.
+
+**El cortocircuito, y por qué son dos fallos y no uno.** Un modelo que falla sale de la cadena por lo que queda de la corrida. Sin eso, con la cuota del titular agotada cada cluster paga sus 3 reintentos de `tenacity` con espera creciente hasta 30 s antes de caer al suplente: con 26 clusters, minutos de sleeps puros por corrida. Es el mismo modo de falla que ya se había corregido una vez, cuando `SintesisSinConfigurar` dejó de reintentarse.
+
+Dos y no uno porque un fallo suelto puede ser un JSON mal armado de ese cluster puntual, y sacar al titular por eso cambiaría de proveedor —y con él lo que queda escrito en `modelo_usado`— por una casualidad. El costo del segundo intento está acotado: ~60 s en el peor caso, sobre un ciclo de 15 minutos. `SintesisSinConfigurar` es la excepción y agota de una, porque una credencial que falta no se arregla entre un cluster y el siguiente.
+
+**Qué cae al siguiente y qué no:**
+
+| Fallo | ¿Cae? | Por qué |
+|---|---|---|
+| Rate limit u otro error del proveedor | Sí | Es el caso que la cadena existe para cubrir |
+| `SintesisSinConfigurar` | Sí, y agota de una | Antes cortaba la corrida entera; con cadena significa "usá el siguiente" |
+| `SintesisBloqueada` | **No** | El proveedor rechazó el contenido por sus filtros. Buscar otro que sí lo acepte es rodear una negativa de seguridad, y además destruye la señal: su propio docstring dice que si pasa seguido, lo que informa es que el producto no puede cubrir cierto material, y eso es una decisión de producto |
+
+**Un `modelo_id` explícito apaga la cadena.** Si alguien eligió un modelo, caer en silencio a otro contradice la elección, y dejaría en `modelo_usado` una serie histórica que dice que se usó uno que nadie pidió — justo la comparación que esa columna existe para habilitar. Por lo mismo, un `modelo_id` que no existe es **404 y no se sintetiza**: caer al default gastaría cuota del proveedor equivocado.
+
+**Concurrencia: secuencial.** Se evaluó un hilo por modelo y se descartó por ahora, con dos razones medidas. Ninguno de los dos modos de uso corre dos modelos a la vez —"paso a paso" es un cluster y un modelo; "todas con el default" es un solo modelo—, y la síntesis de 24 ángulos usa el 23% del ciclo de 15 minutos. Además el costo es concreto: la `Session` de SQLAlchemy no es thread-safe, así que cada hilo necesitaría la suya, y el `expunge` anti-N+1 y el commit por cluster habría que rediseñarlos. Se retoma con el síntoma, no antes.
+
+#### Dos hallazgos del camino
+
+**Una regresión propia, cazada por los tests que ya estaban.** Al reescribir el bucle, el cluster que destapaba el agotamiento de la cadena quedaba contado como `fallido`, cuando lo que pasó fue que el motor se quedó sin proveedores. Es el mismo diagnóstico engañoso que este archivo ya documenta dos veces —"apunta a un problema con los clusters cuando el problema es la configuración"— y lo agarró el test que se había escrito la primera vez.
+
+**Un agujero preexistente, más serio: la suite podía gastar la cuota real.** `test_synthesis.py` no aislaba el `.env` (solo lo hacía `test_modelos.py`, en su propio archivo), así que un test que llegara a `llamar_modelo` de verdad leía la credencial del desarrollador. Lo destapó un parche mal puesto de esta misma tanda: el test le pegó a Gemini y falló con un 404 **del proveedor**, o sea que la llamada salió. En un proyecto con límite de costos duro eso no puede depender de que ningún parche se equivoque.
+
+Se agregó `conftest.sin_credencial_de_ia`, `autouse` para toda la suite, que cierra las dos puertas por las que entra la credencial: el entorno del proceso y el `.env` del directorio actual (`_del_entorno` mira las dos). Mismo criterio que `api_sin_token`, que ya existía por un problema de la misma familia.
+
+#### Verificación
+
+756 tests (44 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes — esta tanda no toca el esquema.
+
+**15 mutaciones y 15 detectadas.** Dos no se detectaban en la primera pasada, y las dos eran informativas:
+
+- **El validador de `api_key_env` en el alta** es indetectable desde el endpoint, porque `leer_api_key` vuelve a validar dentro del sondeo y sacarlo da exactamente el mismo 422. Es una capa redundante a propósito —lo que aporta es no depender de un efecto secundario del sondeo— así que se le escribió un test que la ejercita **en aislamiento**, sobre el modelo Pydantic, donde la otra capa no la tapa.
+- **La fixture que impide gastar cuota** no la cubría nada, porque solo actúa cuando un parche está mal puesto. Ahora hay dos tests que comprueban directamente que ninguna credencial queda visible durante la suite.
+
+**Lo que NO está verificado, dicho de frente: la cadena nunca corrió contra dos proveedores reales.** Hace falta una segunda credencial de un proveedor distinto en `MODELO_API_KEY_<SUFIJO>`, y hoy no hay ninguna configurada. Todo lo de arriba está probado contra mocks y con mutación, que prueba que la lógica hace lo que dice — no que el segundo proveedor conteste. Es lo primero que hay que hacer el día que aparezca esa credencial, y conviene hacerlo sobre **un cluster puntual** con `POST /clusters/{id}/synthesize`: es una llamada al proveedor, no veintiséis.
+
+
+#### Corrección: el punto 6-bis publicaba el nombre de la variable de entorno (05/09/2026)
+
+Una revisión independiente con otro modelo, antes de commitear, encontró que la tanda anterior **reabría por la puerta de al lado la fuga que la tanda 2 había cerrado**. Verificado corriendo sondas contra `TestClient`, no deducido.
+
+**Lo que salía, y en un 200:**
+
+```
+POST /synthesize -> 200
+{... "agotados": {"titular-groq": "configuracion: titular-groq: La variable
+ 'MODELO_API_KEY_GROQ' no está definida o está vacía. …"}}
+```
+
+`agotados` es un campo nuevo de 6-bis y llevaba el mensaje entero de `ProveedorNoConfigurado`, que nombra la variable de entorno. El mismo dato salía por el `detalle` del 422 de `POST /clusters/{id}/synthesize`.
+
+**Por qué importa, y por qué es peor de lo que parecía.** Es exactamente lo que `_vista_publica` filtra de `GET /modelos` desde la tanda 2, con el mismo modelo de amenaza: quien sabe qué variable nombrar puede dar de alta un modelo con `base_url` propio y `api_key_env` apuntando ahí, y el motor le entrega la credencial del operador durante el sondeo. Con `API_TOKEN` sin definir —configuración soportada y documentada— lo lee cualquiera que alcance el puerto. Y a diferencia del 422, el 200 **no requiere provocar ningún error**: es el endpoint que menos sospecha levanta.
+
+**Un tercer camino, preexistente:** el mensaje del placeholder interpolaba el **valor** de la variable (`base.py`), y ese mensaje llega al 422 de `POST /modelos`. Que un placeholder empiece con `tu_` acota el daño pero no lo cierra — es una convención de nombres, no una garantía.
+
+#### El arreglo, en la frontera y no en cada consumidor
+
+Tres cambios, todos sobre el mismo principio, que además ya estaba escrito en este repo: **al log lo que sirve para diagnosticar, a la respuesta lo que se puede decir sin abrir una puerta.** Es la regla que `modelos.sondear` aplica y documenta para el cuerpo del proveedor; a esta rama se le había escapado.
+
+1. **`llamar_modelo` sanea al convertir la excepción.** `ProveedorNoConfigurado` se loguea entero y se re-levanta como un mensaje que dice qué modelo falla y que el detalle está en el log. Se separó de `AdaptadorNoImplementado`, que **sí viaja entero** y no es una excepción a la regla: su mensaje dice qué adaptador falta y qué usar en su lugar, sin nombrar variables ni configuración del operador.
+2. **`agotados` lleva categorías cerradas** (`sin_configurar`, `fallos_seguidos`) en vez de texto libre. Sanear la frontera ya cerraba la fuga; esto hace que el campo **no pueda volver a filtrar** por un mensaje que mañana se vuelva sensible, y de paso es lo que una interfaz necesita para mostrar el motivo sin parsear prosa.
+3. **El valor de la variable no se interpola nunca**, ni siquiera el del placeholder. El operador sabe qué puso ahí; no hace falta devolvérselo.
+
+#### Los dos huecos de método que lo dejaron pasar
+
+**El invariante no estaba testeado donde hacía falta.** "Ninguna respuesta publica `api_key_env`" tenía tests para `GET /modelos` y `POST /modelos`, y para ningún otro endpoint. Por esa grieta entraron los dos caminos. Ahora hay una clase de tests que lo verifica **sin mocks**, sobre el camino real, más uno que comprueba la otra mitad: que el detalle completo **sí** siga estando en el log, porque sacarlo de la respuesta no puede costar el diagnóstico.
+
+**Y un test que aparentaba cubrir el camino.** `test_sin_configurar_es_422_y_no_500` inyecta un mensaje inventado y benigno y asertaba sobre él, así que pasaba en verde mientras el mensaje real filtraba. Es el caso de "mock que tapa el camino real": verificaba el código de estado y parecía verificar el contenido. Se le sacó la aserción sobre el mensaje y se le escribió en el docstring qué cubre y qué no, con el puntero a los tests que sí lo cubren.
+
+#### Verificación
+
+761 tests (5 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**: devolver el mensaje entero a `agotados`, sacar el saneo de la frontera, y volver a interpolar el valor de la variable. La tercera no se detectaba con los tests nuevos —nada ejercitaba el camino del placeholder por HTTP— y se le escribió el suyo antes de darla por cerrada.
+
+Corregido además el conteo de tests de la entrada anterior, que decía 746: son 756, y la aritmética del propio archivo lo delataba (712 + 44).
+
+#### El patrón de fondo: tests que pasan porque el mock les da la respuesta (05/09/2026)
+
+La fuga de arriba no se escapó por falta de tests: se escapó porque **el test que cubría ese camino mockeaba el servicio que estaba probando**, así que el mensaje sobre el que asertaba lo ponía el propio mock. Pasaba en verde con la fuga abierta.
+
+Se revisó el patrón en toda la suite de endpoints en vez de arreglar solo ese caso.
+
+**El relevamiento salió mejor de lo temido.** De los 50 tests de `test_api.py`, la enorme mayoría son de **cableado** —"¿le llega el parámetro al servicio?", "¿devuelve sus stats?", "¿un id imposible es 422 sin llamar a nadie?"— y ahí mockear es correcto **y completo**: lo que el test promete es exactamente lo que puede probar. Solo tres asertan sobre el contenido de la respuesta, y de esos uno era el que fallaba.
+
+**El hueco real era otro, y estructural.** `TestCadenaDeFallback` mockea `sintetizar_cluster` entero. Es la decisión correcta para probar la lógica de la cadena —qué cae al siguiente, qué agota un modelo, qué corta la racha— pero por eso mismo **nunca ejercita** el camino que va de `leer_api_key` a `ProveedorNoConfigurado` a `SintesisSinConfigurar`, que es justamente donde se construía el mensaje que filtraba. La cadena estaba probada como lógica y no como integración.
+
+Se agregó `TestLaCadenaConTraduccionRealDeExcepciones`, donde el único mock es la frontera de red: resolver la credencial, levantar, traducir, caer y sanear son el código real. **Verificado que sirve**: se reintrodujeron las dos mutaciones de la fuga y las cazó las dos, o sea que ahora hay dos capas independientes que la ven.
+
+**Un hallazgo del propio test.** El primer intento montaba dos modelos con variables inexistentes para forzar dos fallos de credencial, y no entró ninguno a la cadena: `_tiene_credencial_propia` filtra a los suplentes cuya variable no resuelve, así que **"un suplente sin credencial" es un estado que no existe**. La cadena solo puede tener suplentes que sí pueden autenticarse. Quedó escrito en la fixture, porque es una propiedad del diseño que no era evidente.
+
+**Y las clases mockeadas ahora dicen hasta dónde llegan.** No se desmockeó nada que estuviera bien mockeado —eso habría sido cambiar tests correctos por tests lentos— pero cada clase apunta a dónde se prueba lo que ella no puede probar. Un test que dice qué cubre vale más que uno que aparenta cubrir todo.
+
+#### Las seis afirmaciones pendientes, verificadas — y las dos que se arreglaron (05/09/2026)
+
+La tanda del 6-bis cerró con **seis afirmaciones de la revisión independiente sin verificar**, dicho de frente en el commit: después de que dos de diez no resistieran, ninguna merecía crédito hasta comprobarla. Se comprobaron las seis.
+
+**El paso cero fue recuperar el texto literal**, y no es ceremonia. Las seis estaban resumidas por mí, no en las palabras del revisor — y una de las dos que se había caído lo hizo justamente por un encuadre mal parafraseado. Verificar sobre la paráfrasis era arriesgarse al mismo error, así que se fue a buscar el reporte original al transcript de la sesión antes de tocar nada.
+
+**El método: cada afirmación se resuelve por algo que corre**, o por lectura contra la fuente cuando la pregunta es de criterio y no de comportamiento — diciendo cuál de las dos fue. Es la contracara del error que hizo caer a las dos primeras: el revisor había probado lo que su propio mock devolvía.
+
+| Afirmación | Cómo se resolvió | Estado |
+|---|---|---|
+| Amplificación de costo en `/clusters/{id}/synthesize` | Sonda con contador | **Confirmada**: 5 POST = 5 llamadas al proveedor |
+| Reset de `enviado_backend`/`intentos_envio` | Lectura + sonda | **Confirmada, y deliberada** — el comentario de `_persistir` ya la explica |
+| Re-síntesis de un cluster `descartado` | Sonda | **Confirmada**: 200, y la síntesis queda lista para entregar |
+| `ErrorDeProveedor` → 500 | Sonda | **Confirmada, y peor**: no había ni handler genérico |
+| `POST /modelos` como oráculo de variables | Sonda comparativa | **Confirmada**, impacto bajo |
+| Siete comentarios desactualizados | Lectura mecánica | **Confirmados los siete**, palabra por palabra |
+
+**Y una séptima que se reabrió.** El hallazgo del "modelo apagado que entra a la cadena" se había descartado por encuadre equivocado, y al releer el reporte literal resultó que **el descarte respondía a una versión más débil de la afirmación que la que el revisor había corrido**. Lo que no significa nada es que un no-titular esté en `activo=False` — eso es cierto por construcción, porque `_apagar_los_demas` garantiza como mucho un activo. Lo que sí importa es lo otro: si el operador reemplaza un titular que resultó malo prendiendo otro, el viejo **vuelve solo a la cadena como suplente** si tiene credencial propia, contradiciendo el docstring de `activar_modelo`, que promete que apagar es la marcha atrás. Verificado con sonda. Queda anotado, sin arreglar todavía: cambiar qué significa `activo` es una decisión de producto y merece su propia discusión.
+
+Lo que **no** se pudo verificar sigue sin verificarse, y se dice: la sub-afirmación de que las re-síntesis duplican ángulos depende de si el modelo obedece la instrucción en prosa del prompt —`construir_prompt` sí le manda los `id` de los ángulos existentes— y eso no se prueba con un mock que ya decidió desobedecerla.
+
+#### Corrección 1: `POST /modelos` era un oráculo de qué variables existen
+
+`OpenAICompatible.__init__` leía la credencial **antes** de validar el host. Como una variable inexistente cortaba ahí, el mensaje de error revelaba si esa variable existía en el servidor **sin necesidad de un host permitido**: bastaba con nombrarla. Dos 422 distinguibles, corridos y comparados.
+
+Se invirtió el orden. Ahora cualquiera que pruebe con un host no confiable —el único caso que le sirve a quien ataca, porque exfiltrar necesita ese host igual— recibe siempre el mismo "host no declarado", exista la variable o no. Un operador legítimo, con su host ya declarado, sigue viendo el mensaje específico de credencial faltante: **no se le sacó diagnóstico, se le sacó al desconocido**.
+
+Se evaluó la alternativa —un mensaje genérico en el 422— y se descartó: cierra el síntoma dejando el orden intacto, y le cuesta al operador la pista de cuál de los dos problemas tiene.
+
+**El arreglo destapó un tercer hueco de aislamiento en la suite.** `test_synthesis.py` construye modelos con `base_url="https://proveedor.test/v1"` y **nunca declaraba `MODELO_HOSTS_PERMITIDOS`**. Hasta el reorden nunca se notó, porque la credencial fallaba primero y el chequeo de host no llegaba a correr. Invertido el orden, el resultado de ese test pasó a depender de lo que hubiera en el `.env` real de la máquina. Es la misma familia que `sin_credencial_de_ia` y `api_sin_token`, que nacieron las dos de un problema idéntico: **un test no puede depender de una variable que nadie en ese archivo pidió**. Se le agregó al archivo su propia fixture `hosts_declarados`, como la que `test_modelos.py` ya tenía.
+
+#### Corrección 2: un 429 del proveedor terminaba en un 500 sin manejar
+
+`llamar_modelo` traducía todo `ErrorDeProveedor` a un `ValueError` pelado para que `tenacity` lo reintentara. `sintetizar_pendientes` lo atrapaba igual —su `except Exception` no distingue—, pero `POST /clusters/{id}/synthesize` solo atajaba `SintesisSinConfigurar` y `SintesisBloqueada`. Resultado: **un rate limit del proveedor, que es la condición más esperable de ese endpoint, salía como un 500 sin cuerpo** — justo lo que este archivo ya documentó al fijar `MAX_ID` que un 500 no puede significar.
+
+Se agregó `SintesisFallida`, que es lo que queda de un `ErrorDeProveedor` cuando los tres intentos se agotaron, y el endpoint la traduce a 422. **El retry no cambió**: la clase nueva tampoco está en `retry_if_not_exception_type`, así que se sigue reintentando exactamente igual; lo único que cambia es qué queda cuando los reintentos terminan.
+
+Se evaluó atrapar `ValueError` a secas en el endpoint —una línea en vez de una clase— y se descartó por lo de siempre en este repo: taparía un bug propio que levante `ValueError` por otro motivo y lo reportaría como "el proveedor tuvo un problema", que es un diagnóstico que manda a buscar el error al lugar equivocado.
+
+#### Verificación
+
+768 tests (5 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes.
+
+**2 mutaciones y 2 detectadas**: revertir el orden en `OpenAICompatible.__init__` (lo caza el test nuevo del oráculo, levantando la excepción equivocada) y sacar el `except SintesisFallida` del endpoint (lo caza el test de endpoint, con el 500 sin manejar de vuelta). Las dos se restauraron y se re-corrió la suite entera después.
+
+Las sondas de las seis afirmaciones se re-corrieron contra el código ya arreglado: el oráculo devuelve mensajes idénticos para variable existente e inexistente, y el endpoint devuelve 422 con los tres reintentos de `tenacity` corridos de verdad.
+
+**Un error propio, encontrado revisando el diff antes de commitear.** Al insertar el test nuevo, un `Edit` empujó la línea `mock.assert_not_called()` del test vecino hasta el final del mío; al ver el `NameError` se la tomó por un resto de copy-paste y se la borró, sacándole en silencio una aserción a un test que ya existía. Lo delató `ruff` con un `F841` sobre una variable que quedó sin usar, y el `git diff` contra `HEAD` mostró qué había pasado. Queda como recordatorio de por qué el diff se lee antes de commitear y no después.
+
+#### Lo que la realidad dijo sobre el multimodelo (05/09/2026)
+
+La cadena de fallback sigue **sin probarse contra dos proveedores reales**, y ahora se sabe por qué con datos y no por falta de intentos:
+
+- **`groq-qwen` no sirve en el tier gratuito.** Con el host declarado y la credencial válida, el sondeo pega contra un techo de **1000 tokens de salida por minuto** para `qwen/qwen3.6-27b`. Con `max_tokens` acotado a 900 el primer mecanismo devuelve un JSON inválido —no le alcanza para armarlo— y el segundo ya no entra en la cuota del mismo minuto. Una síntesis real necesita bastante más que eso.
+- **`gemini-3.8-flash` está saturado del lado de Google**: `503 UNAVAILABLE` en 3 de 3 intentos a lo largo de varios minutos, con dos credenciales distintas. Que el problema es del modelo y no de la cuenta quedó aislado con un control: la misma credencial nueva sondeó bien contra `gemini-3.5-flash-lite`, y el titular con la credencial vieja respondió al primer intento en el mismo momento.
+
+Como efecto de la prueba, `gemini-3.8-flash` quedó apuntando a `MODELO_API_KEY_GEMINI2` en vez de compartir la variable del titular — que era lo que lo dejaba fuera de la cadena por `_tiene_credencial_propia`. Está cargada y lista para el día que Google libere capacidad. **No hay endpoint para cambiar `api_key_env` de una fila ya creada**: el `PATCH` solo acepta `activo`, así que se hizo por SQL directo. Vale anotarlo como hueco de la API, no como decisión.
+
+#### Una trampa de sesión que el `expunge` no cubre
+
+Una corrida completa del pipeline a mano falló en la síntesis con `DetachedInstanceError`, y **reproducida en aislamiento** resultó ser una precondición que nadie había escrito: `sintetizar_pendientes(session, modelo)` no tolera un `ModeloIA` cargado **antes** de otros pasos que commitean. Con `expire_on_commit=True` ese objeto queda expirado, y el `expunge` de adentro —que existe para evitar el N+1— lo desprende *sin valores*, así que el primer acceso a un atributo revienta.
+
+Ningún camino de producción la pisa hoy: `POST /synthesize?modelo_id=` carga el modelo justo antes de llamar. Pero **el caso de uso para el que se construyó 6-bis sí la pisaría**: una app de escritorio que orquesta pasos y después elige modelo es exactamente un llamador que sostiene ese objeto a través de commits. El propio código ya advierte de esta trampa para su orden interno (`synthesis.py`, "es la misma trampa que ya está documentada más arriba"), pero la advertencia no cubre la precondición del llamador. Es la tercera vez que esta trampa aparece en el repo.
+
+#### La corrida completa, con los números
+
+Corrida real de punta a punta con el modelo titular, **sin el paso de entrega al back-end**, para tener números frescos:
+
+| Paso | Resultado |
+|---|---|
+| Ingesta | 363 noticias nuevas de 7 medios, 30 duplicadas, 0 feeds fallados — 72,1 s |
+| Vectorización | 363 de 363 — 11,4 s |
+| Cierre de vencidos | 63 evaluados → 53 procesados, 10 descartados |
+| Agrupamiento | 27 clusters creados, 158 sin match |
+| Fusión | 27 evaluados → 1 fusionado |
+| Síntesis | **26 de 26**, 30 ángulos creados, 0 fallidos, 0 bloqueados, 0 descartados |
+| Purga (solo contar) | 1 huérfana, 1.711 bytes, 0 purgadas |
+
+**Las mediciones viejas se sostienen**, que es lo que esta corrida venía a comprobar: **9,2 s por cluster** contra los ~8,7 s que este archivo ya tenía anotados, y **26,7% del ciclo** de 15 minutos para 26 clusters contra el 23% que se había medido para 24. La estimación con la que se descartaron los hilos por modelo era buena.
+
+`agotados` quedó vacío y `por_modelo` en `{'gemini-por-defecto': 26}`: la cadena **no se activó ni una vez**, así que esta corrida no dice nada sobre el fallback. Lo único que probó es que el titular solo alcanza.

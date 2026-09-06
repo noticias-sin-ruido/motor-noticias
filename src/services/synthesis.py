@@ -40,7 +40,7 @@ from ..models import (
 )
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO, ESTADO_PROCESADO
-from .modelos import construir, modelo_activo
+from .modelos import cadena_de_modelos, construir, modelo_activo
 from .preprocessing import construir_evidencia
 from .proveedores import (
     AdaptadorNoImplementado,
@@ -133,6 +133,27 @@ class SintesisSinConfigurar(Exception):
     Cubre dos casos que se arreglan igual —tocando configuración, no
     esperando—: que no haya ningún modelo activo en `modelo_ia`, y que el que
     está activo no tenga credencial o pida un adaptador que no existe.
+    """
+
+
+class SintesisFallida(Exception):
+    """
+    El proveedor tuvo un problema técnico y `tenacity` ya agotó los reintentos.
+
+    Es lo que queda de un `ErrorDeProveedor` (un 429, un JSON mal armado, un
+    `base_url` que dejó de responder) después de los 3 intentos de
+    `llamar_modelo` — reintentar de nuevo con la misma entrada tiene el mismo
+    chance de andar que el intento siguiente del scheduler, no uno mejor.
+
+    **Antes de que existiera esta clase, ese caso subía como un `ValueError` a
+    secas.** `sintetizar_pendientes` lo atrapaba igual —un `except Exception`
+    genérico no distingue—, pero `POST /clusters/{id}/synthesize` solo
+    atajaba `SintesisSinConfigurar` y `SintesisBloqueada`, así que un rate
+    limit del proveedor —la condición más esperable de ese endpoint— salía
+    como un 500 sin manejar: exactamente lo que `main.py` documenta que un 500
+    no puede significar ("se rompió algo nuestro", no "el proveedor tuvo un
+    problema pasajero"). El mensaje ya viene saneado desde `llamar_modelo`, así
+    que exponerlo en un 4xx no reabre ninguna fuga.
     """
 
 
@@ -606,17 +627,44 @@ def llamar_modelo(prompt: str, modelo: ModeloIA) -> RespuestaSintesis:
         return construir(modelo).generar(prompt, RespuestaSintesis)
     except RespuestaBloqueada as error:
         raise SintesisBloqueada(str(error)) from error
-    except (ProveedorNoConfigurado, AdaptadorNoImplementado) as error:
-        # **No se reintenta.** Una credencial que falta o un adaptador que no
-        # existe no se arreglan solos en el intento siguiente. Sin esta rama
-        # eran tres intentos con espera creciente por cluster — con 37 clusters,
-        # entre 2 y 4 minutos de sleeps puros por corrida, más un traceback por
-        # cada uno, y todo contado como "fallido" en vez de "mal configurado".
+    except ProveedorNoConfigurado as error:
+        # **No se reintenta**, por lo mismo que el adaptador de abajo: una
+        # credencial que falta no se arregla sola en el intento siguiente. Sin
+        # esta rama eran tres intentos con espera creciente por cluster — con 37
+        # clusters, entre 2 y 4 minutos de sleeps puros por corrida, más un
+        # traceback por cada uno, y todo contado como "fallido" en vez de "mal
+        # configurado".
+        #
+        # **El mensaje original se queda en el log y NO viaja.** Nombra la
+        # variable de entorno (`MODELO_API_KEY_GROQ`), y ese dato es la mitad de
+        # una cadena de exfiltración: quien sabe qué variable nombrar puede dar
+        # de alta un modelo con `base_url` propio y `api_key_env` apuntando ahí,
+        # y el motor le entrega la credencial en el sondeo. Es exactamente lo
+        # que `_vista_publica` filtra de `GET /modelos` desde la tanda 2, y esta
+        # excepción lo estaba sacando por la puerta de al lado: termina en el
+        # `detalle` de un 422 y en el campo `agotados` de un 200.
+        #
+        # Mismo criterio que `modelos.sondear` con el cuerpo del proveedor: al
+        # log lo que sirve para diagnosticar, a la respuesta lo que se puede
+        # decir sin abrir una puerta.
+        logger.error(f"{modelo.nombre} no puede autenticarse: {error}")
+        raise SintesisSinConfigurar(
+            f"{modelo.nombre} no tiene su credencial configurada. Cuál es la "
+            f"variable que falta queda en el log del motor, no en esta "
+            f"respuesta."
+        ) from error
+    except AdaptadorNoImplementado as error:
+        # Éste sí viaja entero, y no es una excepción a la regla de arriba: su
+        # mensaje dice qué adaptador falta, cuáles hay y qué usar en su lugar.
+        # No nombra variables del entorno ni la configuración del operador.
         raise SintesisSinConfigurar(f"{modelo.nombre}: {error}") from error
     except ErrorDeProveedor as error:
-        # Este sí se deja subir como error común para que `tenacity` reintente:
-        # un 429 o un JSON mal armado se arreglan solos.
-        raise ValueError(f"{modelo.nombre}: {error}") from error
+        # `SintesisFallida` no está en `retry_if_not_exception_type` de arriba,
+        # así que esto SIGUE reintentándose igual que antes —el cambio no toca
+        # el comportamiento de `tenacity`, solo lo que queda cuando los 3
+        # intentos se agotan—: un 429 o un JSON mal armado se arreglan solos
+        # en el intento siguiente, y recién si los tres fallan esto sube.
+        raise SintesisFallida(f"{modelo.nombre}: {error}") from error
 
 
 def _sin_acentos(texto: str) -> str:
@@ -889,13 +937,135 @@ def sintetizar_cluster(session: Session, cluster: Cluster, modelo=_RESOLVER) -> 
     return stats
 
 
-def sintetizar_pendientes(session: Session) -> dict:
+# Fallos seguidos del mismo modelo que lo sacan de la cadena por el resto de la
+# corrida.
+#
+# **El cortocircuito no es opcional, y el número sale de una cuenta.** Con la
+# cuota del titular agotada y sin esto, CADA cluster paga los 3 reintentos de
+# `tenacity` con espera creciente hasta 30 s antes de caer al suplente: con 26
+# clusters son minutos de sleeps puros por corrida. Es el mismo modo de falla
+# que ya se corrigió una vez, cuando `SintesisSinConfigurar` dejó de
+# reintentarse.
+#
+# **Dos y no uno**: un fallo suelto puede ser un JSON mal armado de ese cluster
+# puntual, y sacar al titular por eso cambiaría de proveedor —y con él lo que
+# queda escrito en `modelo_usado`— por una casualidad. Dos seguidos del mismo
+# modelo ya son un patrón. El costo del segundo intento está acotado: ~60 s en
+# el peor caso, sobre un ciclo de 15 minutos.
+#
+# `SintesisSinConfigurar` **no** cuenta acá: agota al modelo de una, porque una
+# credencial que falta o un adaptador que no existe no se arreglan entre un
+# cluster y el siguiente.
+FALLOS_SEGUIDOS_PARA_AGOTAR = 2
+
+# Por qué un modelo se cayó de la cadena, en el campo `agotados` de las stats.
+#
+# **Son categorías y no el mensaje del error, y eso es la defensa.** `agotados`
+# viaja en el cuerpo de un 200 de `POST /synthesize`, así que todo lo que entre
+# acá es público. La primera versión metía el mensaje entero, y como el de
+# `ProveedorNoConfigurado` nombra la variable de entorno, ese 200 publicaba el
+# dato que `_vista_publica` filtra de `GET /modelos` desde la tanda 2 — sin
+# necesidad siquiera de provocar un error.
+#
+# Un valor cerrado no puede volver a filtrar por descuido, y de paso es lo que
+# una interfaz necesita para mostrar el motivo sin parsear prosa. El detalle
+# completo queda en el log.
+AGOTADO_SIN_CONFIGURAR = "sin_configurar"
+AGOTADO_FALLOS_SEGUIDOS = "fallos_seguidos"
+
+
+def _intentar_con_la_cadena(
+    session: Session,
+    cluster: Cluster,
+    disponibles: List[ModeloIA],
+    agotados: Dict[str, str],
+    fallos_seguidos: Dict[str, int],
+) -> Tuple[Optional[dict], Optional[ModeloIA], Optional[str]]:
+    """
+    Intenta un cluster con cada modelo de la cadena hasta que alguno lo saque.
+
+    Devuelve `(resultado, modelo, motivo)`. Con `motivo` en `None` salió bien;
+    `"bloqueado"` es que el proveedor rechazó el contenido y `"sin_salida"` es
+    que ninguno de la cadena pudo.
+
+    **Qué cae al siguiente y qué no**, que es la decisión de fondo de esta
+    función:
+
+    - `SintesisBloqueada` **no cae**. El proveedor rechazó el contenido por sus
+      filtros; buscar otro que sí lo acepte es rodear una negativa de seguridad.
+      Y además destruiría la señal: que esto pase seguido informa que el
+      producto no puede cubrir cierto material, y ésa es una decisión de
+      producto, no un fallo técnico a sortear.
+    - `SintesisSinConfigurar` **cae, y agota al modelo de una**. Hasta
+      multimodelo cortaba la corrida entera; con cadena significa "usá el
+      siguiente".
+    - Cualquier otro fallo **cae**, y suma al contador del cortocircuito.
+
+    `agotados` y `fallos_seguidos` los mantiene el llamador entre clusters: son
+    el estado de la corrida, no de este cluster.
+    """
+    for modelo in disponibles:
+        try:
+            resultado = sintetizar_cluster(session, cluster, modelo)
+        except SintesisBloqueada as error:
+            session.rollback()
+            logger.warning(
+                f"Cluster {cluster.id} bloqueado por {modelo.nombre}: {error}. "
+                f"No se prueba con otro proveedor: es una negativa de contenido, "
+                f"no una falla tecnica."
+            )
+            return None, None, "bloqueado"
+        except SintesisSinConfigurar as error:
+            session.rollback()
+            agotados[modelo.nombre] = AGOTADO_SIN_CONFIGURAR
+            logger.error(
+                f"{modelo.nombre} sale de la cadena por lo que queda de la "
+                f"corrida: {error}"
+            )
+            continue
+        except Exception as error:
+            session.rollback()
+            seguidos = fallos_seguidos.get(modelo.nombre, 0) + 1
+            fallos_seguidos[modelo.nombre] = seguidos
+            logger.exception(
+                f"Fallo la sintesis del cluster {cluster.id} con "
+                f"{modelo.nombre} ({seguidos} seguido/s): {error}"
+            )
+            if seguidos >= FALLOS_SEGUIDOS_PARA_AGOTAR:
+                agotados[modelo.nombre] = AGOTADO_FALLOS_SEGUIDOS
+                logger.error(
+                    f"{modelo.nombre} sale de la cadena por lo que queda de la "
+                    f"corrida: {seguidos} fallos seguidos."
+                )
+            continue
+
+        # Salio bien: se corta la racha. Sin esto, dos fallos separados por
+        # veinte clusters exitosos agotarian al modelo como si fueran seguidos.
+        fallos_seguidos[modelo.nombre] = 0
+        return resultado, modelo, None
+
+    return None, None, "sin_salida"
+
+
+def sintetizar_pendientes(
+    session: Session, modelo: Optional[ModeloIA] = None
+) -> dict:
     """
     Sintetiza todos los clusters con material nuevo suficiente.
 
     Un cluster que falla no arrastra a los demás: se registra y se sigue. La
     corrida siguiente lo reintenta sola, porque la marca solo se escribe cuando
     la síntesis llegó a persistirse.
+
+    **Sin `modelo` arma la cadena de fallback** (`cadena_de_modelos`): el activo
+    al frente y detrás los suplentes con credencial propia. Es lo que corre el
+    scheduler, que no recibe ningún parámetro.
+
+    **Con `modelo` usa ése y solo ése, sin cadena.** Si alguien eligió un modelo
+    para esta corrida, caer en silencio a otro contradice la elección — y
+    dejaría en `modelo_usado` una serie histórica que dice que se usó uno que
+    nadie pidió, que es justamente la comparación que esa columna existe para
+    habilitar. Falla y lo dice.
     """
     # **El modelo se resuelve ANTES de barrer los caducados**, y el orden
     # importa. El barrido marca como vencido lo que pasó
@@ -907,7 +1077,7 @@ def sintetizar_pendientes(session: Session) -> dict:
     # Se corta antes de barrer, así que nada caduca por una causa que el motor
     # ya sabe cuál es. Los clusters quedan intactos y entran en carrera solos en
     # cuanto haya un modelo prendido.
-    modelo = modelo_activo(session)
+    cadena = [modelo] if modelo is not None else cadena_de_modelos(session)
 
     stats = {
         "vencidos_sin_publicar": 0,
@@ -924,6 +1094,12 @@ def sintetizar_pendientes(session: Session) -> dict:
         # autenticarse. Ninguna de las dos cuenta como cluster fallido.
         "sin_modelo": False,
         "sin_credencial": False,
+        # Con quién se sintetizó cada cosa, y quién se cayó de la cadena. Sin
+        # esto una corrida que terminó en el suplente se ve idéntica a una
+        # normal, y el operador se entera de que su titular está agotado recién
+        # cuando mira `modelo_usado` fila por fila.
+        "por_modelo": {},
+        "agotados": {},
     }
 
     # **Se corta acá y no cluster por cluster.** Sin modelo no hay síntesis
@@ -935,7 +1111,7 @@ def sintetizar_pendientes(session: Session) -> dict:
     # Antes esta rama no existía porque `None` significaba "usá Gemini". Ahora
     # significa "nadie eligió proveedor", que es un estado de configuración y
     # tiene que decirse como tal.
-    if modelo is None:
+    if not cadena:
         stats["sin_modelo"] = True
         logger.error(
             "No hay ningún modelo activo en `modelo_ia`, así que no se sintetiza "
@@ -960,8 +1136,21 @@ def sintetizar_pendientes(session: Session) -> dict:
     #
     # Es la misma trampa que ya está documentada más arriba, en
     # `descartar_vencidos_sin_sintetizar`.
-    session.expunge(modelo)
-    logger.info(f"Sintetizando con {modelo.nombre} ({modelo.modelo})")
+    #
+    # Con cadena vale para todos sus miembros y no solo para el titular: el
+    # suplente se toca recién cuando el titular falla, o sea despues de varios
+    # commits, y para entonces ya estaria expirado.
+    for miembro in cadena:
+        session.expunge(miembro)
+
+    titular, *suplentes = cadena
+    if suplentes:
+        logger.info(
+            f"Sintetizando con {titular.nombre} ({titular.modelo}); "
+            f"de suplentes: {', '.join(m.nombre for m in suplentes)}"
+        )
+    else:
+        logger.info(f"Sintetizando con {titular.nombre} ({titular.modelo})")
 
     # Recién con un modelo prendido se cierra la cuenta de lo que caducó: si no,
     # lo que quedó fuera de plazo desaparece sin que nadie se entere.
@@ -970,45 +1159,52 @@ def sintetizar_pendientes(session: Session) -> dict:
     pendientes = clusters_pendientes(session)
     stats["pendientes"] = len(pendientes)
 
+    # Estado de la corrida, no de un cluster: quién se cayó de la cadena y por
+    # qué, y cuántos fallos seguidos lleva cada uno. Ver
+    # `FALLOS_SEGUIDOS_PARA_AGOTAR`.
+    agotados: Dict[str, str] = stats["agotados"]
+    fallos_seguidos: Dict[str, int] = {}
+
     for cluster in pendientes:
-        try:
-            resultado = sintetizar_cluster(session, cluster, modelo)
-        except SintesisBloqueada as error:
-            session.rollback()
+        disponibles = [m for m in cadena if m.nombre not in agotados]
+
+        resultado, usado, motivo = _intentar_con_la_cadena(
+            session, cluster, disponibles, agotados, fallos_seguidos
+        )
+
+        if motivo == "bloqueado":
             stats["bloqueados"] += 1
-            logger.warning(f"Cluster {cluster.id} bloqueado por el proveedor: {error}")
             continue
-        except SintesisSinConfigurar as error:
-            # **Corta la corrida entera, no solo este cluster**, por el mismo
-            # motivo que el chequeo de modelo activo de más arriba: una
-            # credencial que falta o un adaptador que no existe no se arreglan
-            # entre un cluster y el siguiente.
+
+        if motivo == "sin_salida":
+            # **Que la cadena se haya vaciado NO es un cluster fallido.** Si
+            # todos quedaron agotados, lo que pasó es que el motor se quedó sin
+            # proveedores, y contarlo como fallo del cluster apunta a un
+            # problema con los clusters cuando el problema es la configuración —
+            # el mismo diagnóstico engañoso que ya se corrigió dos veces, para
+            # "no hay ninguna fila activa" y para "la fila está pero no tiene
+            # con qué autenticarse".
             #
-            # Sin esta rama caía en el `except` genérico de abajo: 17 clusters,
-            # 17 tracebacks y 17 "fallidos" para una sola causa — que apunta a
-            # un problema con los clusters cuando el problema es la
-            # configuración del motor. Es el mismo diagnóstico engañoso que ya
-            # se había corregido para el caso "no hay ninguna fila activa", y
-            # que se le escapaba al caso "la fila está pero no tiene con qué
-            # autenticarse".
-            #
-            # Los clusters quedan sin marca, así que entran en carrera solos en
-            # la corrida siguiente.
-            session.rollback()
-            stats["sin_credencial"] = True
-            logger.error(
-                f"Se corta la síntesis: {error}. Los {len(pendientes)} clusters "
-                f"pendientes quedan intactos y se reintentan solos cuando la "
-                f"configuración esté."
-            )
-            break
-        except Exception as error:
-            session.rollback()
+            # Se corta acá y no al principio de la vuelta siguiente para que el
+            # cluster que destapó el agotamiento tampoco quede contado como
+            # fallido. Los clusters pendientes quedan sin marca, así que entran
+            # en carrera solos en la corrida siguiente.
+            if all(m.nombre in agotados for m in cadena):
+                stats["sin_credencial"] = True
+                logger.error(
+                    f"Se corta la síntesis: no queda ningún modelo en pie "
+                    f"({agotados}). Los clusters pendientes quedan intactos y "
+                    f"se reintentan solos cuando la configuración esté."
+                )
+                break
+
+            # Quedan proveedores en pie y este cluster igual no salió: ése sí es
+            # un fallo del cluster, y la corrida sigue.
             stats["fallidos"] += 1
-            logger.exception(f"Falló la síntesis del cluster {cluster.id}: {error}")
             continue
 
         stats["sintetizados"] += 1
+        stats["por_modelo"][usado.nombre] = stats["por_modelo"].get(usado.nombre, 0) + 1
         for clave in ("creados", "actualizados", "descartados"):
             stats[clave] += resultado[clave]
 

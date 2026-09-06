@@ -53,6 +53,10 @@ sin_ruido/
 │   └── services/
 │       ├── __init__.py
 │       ├── ingestion.py        # Pipeline de ingesta RSS (Fase 2)
+│       ├── extraccion.py       # Segunda via: cuerpo desde la pagina (backlog 1)
+│       ├── medios.py           # Alta de medios: sondeo del feed + SSRF (backlog 3)
+│       ├── modelos.py          # Elegir y sondear el modelo de IA (backlog 2)
+│       ├── proveedores/        # Adaptadores de IA: gemini, openai_compatible
 │       ├── vectorization.py    # Embeddings de noticias (Fase 3)
 │       ├── clustering.py       # Agrupamiento incremental + fusión + cierre (Fase 3)
 │       ├── preprocessing.py    # Evidencia (TF-IDF + NER) para el prompt (Fase 4)
@@ -61,7 +65,8 @@ sin_ruido/
 │       ├── topicos.py          # Taxonomía cerrada + sección declarada por el medio (Fase 4)
 │       ├── webhook_delivery.py # Entrega firmada de las síntesis al back-end (Fase 4)
 │       ├── alerts.py           # Avisos por mail ante fallo de cualquier paso
-│       └── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
+│       ├── search.py           # Búsqueda semántica y listado de clusters (Fase 3)
+│       └── purga.py            # Borra el cuerpo de las huérfanas vencidas (backlog 8)
 │
 ├── alembic/                    # Migraciones de esquema
 │   ├── env.py                  # Toma DATABASE_URL de src.config
@@ -115,8 +120,8 @@ Medio (1) ─────→ (∞) Noticia
                        └─→ Cluster (1) ─────→ (∞) Sintesis ────────┘
 ```
 
-- **Medio**: Fuente de noticias. 7 activos: La Nación, TN, El Cronista, Perfil (generales) + Revista Gente, Revista Paparazzi, Ciudad Magazine (espectáculos). Perfil entra por la segunda vía de ingesta: su RSS no trae el cuerpo, se extrae desde la URL
-- **Noticia**: Artículo individual con `embedding` (Vector 384 dims)
+- **Medio**: Fuente de noticias. **El roster lo maneja el operador** por `POST /medios` desde el punto 3 del backlog; `scripts/seed_medios.py` quedó como datos de ejemplo. Campos: `nombre` (único), `url_base`, `feeds_rss`, `activo`, `extraer_por_url`, `idioma`, `pais`, `logo_url`. **`activo=False` es la baja** — no hay borrado, porque `Noticia.medio_id` es NOT NULL con FK sin cascada. 7 activos: La Nación, TN, El Cronista, Perfil (generales) + Revista Gente, Revista Paparazzi, Ciudad Magazine (espectáculos). Perfil entra por la segunda vía de ingesta: su RSS no trae el cuerpo, se extrae desde la URL
+- **Noticia**: Artículo individual con `embedding` (Vector 384 dims). `purgado_en` (backlog punto 8): `None` mientras conserva su `contenido_limpio`; una fecha una vez que `services/purga.py` se lo borró (guarda `''`, no `NULL` — la columna es lo que distingue "se purgó" de "nunca tuvo cuerpo")
 - **Cluster**: El hecho y toda su cobertura. Agrupa por similitud semántica buscando no perder cobertura; **no** es la unidad que se publica
 - **Sintesis**: Un **ángulo** del cluster (el hecho, sus consecuencias, las reacciones) con su resumen neutro y comparativa de enfoques. Un cluster produce varias, y separarlas requiere leer los textos — lo hace el modelo en Fase 4
 - **SintesisNoticia**: Qué noticias respaldan cada ángulo. Es muchos-a-muchos porque una nota puede sostener varios ángulos, y es tabla (y no una lista JSON) porque de este join sale el `count(distinct medio_id)` que decide si el ángulo se publica
@@ -234,6 +239,7 @@ En el código no se usa `datetime.utcnow()` —deprecado desde Python 3.12— si
 - `MODELO_API_KEY` — la credencial del proveedor de IA que el operador haya configurado en `modelo_ia` (desde el punto 2 del backlog). **Reemplazó a `GEMINI_API_KEY`**, que ya no se lee: al actualizar hay que renombrar la variable en el `.env`, con el mismo valor
 - `ENVIRONMENT` — `development` | `production`. **Ya no controla el eco de SQL**: eso pasó a `LOG_SQL` (ver el punto 12 del backlog)
 - `API_TOKEN` — token de operador. Definido, los endpoints exigen `Authorization: Bearer` (menos la salud y la documentación); sin definir, la API queda abierta y el motor lo avisa al arrancar. **Opcional a propósito** (ver `src/auth.py`)
+- `MODELO_HOSTS_PERMITIDOS` — a qué hosts **públicos** se les puede entregar la credencial de IA en el sondeo de `POST /modelos`. **Vacía por defecto**: un destino público sin declarar se rechaza con la línea exacta que hay que agregar. La red interna no necesita declararse — es el caso del modelo local. La regla queda **invertida** respecto de `services/medios.py`, y a propósito: allá lo interno es lo sospechoso (que no nos usen de escáner), acá es lo confiable (que la credencial no se vaya lejos)
 - `LOG_LEVEL` — detalle de los logs, `INFO` por defecto. En INFO se ve qué hizo cada paso del pipeline y **qué fracción del ciclo consumió la corrida**, que es el número con el que se calibra `INGEST_INTERVAL_MINUTES`. Un valor mal escrito no impide arrancar: se usa INFO y se avisa
 - `LOG_SQL` — el SQL sentencia por sentencia, apagado por defecto. Va aparte de `LOG_LEVEL` porque son miles de líneas por ciclo
 - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `ALERT_EMAIL_TO` — alertas de fallo de ingesta (ver `change_logs.md`, Fase 2)

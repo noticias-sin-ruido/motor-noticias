@@ -8,7 +8,9 @@ La 1.1.0 cerró **los puntos 1, 2, 10 y 12** del backlog de abajo: segunda vía 
 
 **Es 1.1.0 y no 2.0.0 por decisión, no por descuido.** Para quien consume el motor no cambió nada; lo que rompe es la *configuración* de quien actualiza un despliegue existente (las variables `GEMINI_*` ya no se leen, y la migración deja la fila de `modelo_ia` apagada, así que la síntesis no corre hasta activarla). Eso va avisado en grande en el README, en vez de escondido en un número.
 
-**Siguiente:** el punto 3 (que el alta de medios la haga el operador), que el punto 10 acaba de desbloquear.
+**El punto 3 se cerró el 03/09/2026** (el alta de medios la hace el operador): `GET/POST/PATCH /medios`, con sondeo del feed antes de aceptar y baja reversible. El roster deja de ser del repo — aunque `seed_medios.py` sobrevive como datos de ejemplo.
+
+**Siguiente:** sin definir. Los candidatos son el punto 13 (entidades HTML, barato y visible para el lector), el 11 (la URL del webhook la configura el operador) y el 4 (el cuadrático de `agrupar_pendientes`, que todavía no lo dispara nada).
 
 **Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `MODELO_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
@@ -205,30 +207,33 @@ Detalle de las decisiones en `change_logs.md`. Dos que conviene tener a mano:
 >
 > **Nada de eso reemplaza la autenticación**, que llegó en el punto 10: con `API_TOKEN` definido, estos endpoints la exigen. **Sin token la API queda abierta a propósito** —es la elección de quien despliega— y ahí sigue valiendo que quien pueda hacer POST puede apuntar `base_url` a su propio servidor y quedarse con la key de IA del operador.
 
-### 3. El alta de medios la hace el operador, no el repo
+### 3. El alta de medios la hace el operador, no el repo ✅ COMPLETO (03/09/2026)
 
-Hoy `scripts/seed_medios.py` trae siete medios argentinos hardcodeados. Eso significa que **el repo acepta los términos de uso de esos siete en nombre de quien lo despliegue**, y esa no es una decisión que le corresponda: quien puede aceptarlos es el operador de la instancia.
+**Cerrado el 03/09/2026.** Hasta acá `scripts/seed_medios.py` traía siete medios argentinos hardcodeados, o sea que **el repo aceptaba sus términos de uso en nombre de quien lo desplegara**. La revisión del 19-20/08 lo dejó a la vista: los términos varían muchísimo entre medios —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario reserva TDM en su `robots.txt`— y cuál es aceptable depende del uso que le dé cada operador.
 
-La revisión de términos del 19-20/08 lo dejó a la vista: varían muchísimo entre medios —Clarín licencia solo títulos y links, Perfil pide links de vuelta, Ámbito no tiene contrato de reuso, La Izquierda Diario bloquea crawlers de IA— y cuál es aceptable depende del uso que le dé cada operador. Ver `change_logs.md`.
+**Qué se construyó.** Tres endpoints: `GET /medios`, `POST /medios` y `PATCH /medios/{id}?activo=`. El modelo `Medio` sumó `idioma`, `pais` y `logo_url`, y su `nombre` pasó a ser único.
 
-**Qué se construye**: endpoints de alta, baja y listado de medios con su lógica de persistencia. El roster deja de venir en el repo.
+**El alta no es un CRUD.** Antes de guardar nada sondea los feeds e informa qué hay del otro lado: cuántos items traen, cuántos con `content:encoded`, qué ventana temporal cubren, y qué dice el `robots.txt`. Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí vos"*.
 
-**La decisión de diseño que importa**: el endpoint **no puede ser un CRUD que registra lo que le mandan**. Todo lo aprendido en la etapa 5 dice que tiene que sondear e informar antes de aceptar:
+Y **bloquea lo inservible pero informa lo opinable**, que fue la decisión de diseño principal. Un feed que no responde, no parsea o no trae un item utilizable devuelve 422: está roto y ninguna decisión lo arregla. Que el medio retenga el cuerpo, que su `robots.txt` sea restrictivo o que la ventana parezca archivo viajan en `avisos` y **no impiden el alta**, porque son cosas sobre las que el operador tiene algo que decir — y dictaminar por él sería volver a cometer el error que este punto vino a corregir.
 
-- ¿El feed responde? (`/feed/internacionales` de Perfil da 404, y está publicado en su propia página de RSS)
-- ¿Trae `content:encoded`? Determina si hace falta `extraer_por_url` — la bandera que marca los medios donde vamos a buscar el cuerpo que ellos eligieron no publicar
-- ¿Qué dice su `robots.txt`? `crawl-delay`, bloqueos de crawlers de IA, reservas de TDM
-- ¿Cuántos ítems trae y qué ventana temporal cubren? Distingue una ventana móvil de un archivo
+**`extraer_por_url` la sigue decidiendo el operador.** El sondeo detecta si el feed trae el cuerpo y lo informa, pero no prende la bandera solo: marca los medios donde el motor va a buscar a la página el cuerpo que el medio *eligió no publicar*, y cruzar esa línea es justamente la decisión que este backlog devuelve.
 
-Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí vos"*, que es la delegación informada. Un CRUD pelado dejaría dar de alta un medio con extracción sin que el operador se entere de que ese medio licencia solo títulos y links.
+**Deshabilitar no es borrar, y no existe DELETE.** `PATCH /medios/{id}?activo=false` deja el medio con todo lo suyo —noticias, clusters, síntesis entregadas— y solo hace que la ingesta deje de traer sus feeds; se puede volver a habilitar cuando sea. No hay borrado porque `Noticia.medio_id` es `NOT NULL` con clave foránea sin cascada: borrar un medio que ya ingirió violaría la restricción, y forzarlo se llevaría puestas noticias que quizá ya se entregaron al back-end.
 
-**Tres cuidados:**
+Hallazgo que achicó el punto: **`Medio.activo` existía desde la Fase 1 y `ingerir_todos_los_medios` ya filtraba por él**. La semántica de la baja estaba implementada en el pipeline desde el principio; lo único que faltaba era el endpoint que diera vuelta la bandera.
 
-1. **El roster actual carga conocimiento medido** que no se puede perder: la trampa de los feeds de sección de TN (responden 200 pero ignoran la sección), el `?outputType=xml` obligatorio de Ciudad Magazine, y la lección de que el feed general ya cubre lo fresco. Pasa a documentación de ejemplos; no se borra.
-2. **Migración**: la instancia que corre hoy tiene siete medios cargados. Sacar el seed no puede dejarla vacía.
-3. **Seguridad**: hace que el motor **busque una URL arbitraria a pedido de quien llame**, o sea SSRF y uso del motor como proxy hacia terceros. **La autenticación ya está** (punto 10), así que lo que queda es la validación del destino, que se diseña con el endpoint y no después. El patrón está hecho en `proveedores/base.validar_base_url`, pero acá el destino es *cualquier sitio web* y no un endpoint de API con forma conocida: hay que revisarlo, no copiarlo.
+**El SSRF se cerró revisando, no copiando.** El patrón estaba en `proveedores.base.validar_base_url`, pero ese bloquea *solo* link-local a propósito —un modelo de IA en `localhost:11434` es el caso que aquel backlog existe para habilitar—. Un medio de noticias en `127.0.0.1` no tiene uso legítimo, así que `medios.REDES_PROHIBIDAS` suma loopback y los rangos privados. Hay un test que fija la divergencia para que nadie "unifique" los dos validadores. `url_base` pasa por el mismo filtro: el sondeo le pide su `robots.txt`.
 
-**Va después del punto 2**, por decisión del usuario.
+**Verificado**: 629 tests (77 nuevos), `ruff` limpio, `alembic check` contra Postgres, **14 mutaciones y 13 detectadas** (la restante es capa redundante, anotada como tal), y una prueba punta a punta contra la red real —el 404 de `/feed/internacionales` de Perfil rechazado, los intentos de SSRF rechazados, un alta real con su sondeo (20 items, 0 con cuerpo, ventana 30,9 h) y el ciclo completo de deshabilitar y rehabilitar—.
+
+**Lo que quedó afuera, a propósito**: retirar el roster del repo (obliga a resolver la migración de las instancias que ya corren con siete medios cargados) y editar los datos de un medio ya cargado (no hay `PATCH` de metadatos, así que los siete existentes se quedan con `pais` en `None`). `scripts/seed_medios.py` sobrevive como **datos de ejemplo**, con su bloque de comentarios reescrito para conservar el conocimiento medido que el alta por API no puede redescubrir sola.
+
+**Se atacaron los endpoints antes de commitear**, en vez de revisarlos de a ojo. Aparecieron tres agujeros reales y se cerraron: SSRF por redirect (`follow_redirects=True` dejaba a httpx irse sola al `Location` sin revalidar), el mismo agujero en `leer_robots`, y una IPv4 escondida en IPv6 (`::ffff:127.0.0.1`) que atravesaba el filtro — verificado en `python:3.12-slim` porque en Windows no reproducía.
+
+Después se atacaron **los catorce endpoints**, no solo los nuevos, y de ahí salieron tres tandas más de arreglos. La 1 definió `API_TOKEN`, que cerró de una el CSRF sobre los endpoints caros. La 2 acotó a dónde puede apuntar `base_url`, que le entregaba la credencial de IA a cualquier host que le nombraran. La 3 cerró los cuatro hallazgos menores que quedaban: la amplificación por `feeds_rss` sin techo ni dedup (500 copias de una URL daban 501 pedidos reales), los campos sin cota con `logo_url` aceptando `javascript:` —XSS almacenado esperando a la aplicación de escritorio—, el 500 por `id` fuera de rango en los dos `PATCH`, y el `limite` negativo que `/vectorize` informaba como si lo hubiera medido. **No queda ningún hallazgo del ataque sin cerrar**; el detalle de cada tanda está en `change_logs.md`.
+
+Ver `change_logs.md`, "Backlog punto 3".
 
 ### 4. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
 
@@ -246,17 +251,32 @@ Así el alta pasa de *"registrá esto"* a *"esto es lo que encontramos, decidí 
 
 **Se cruza con el punto 6-bis**: la cadena de fallback es una de las salidas posibles a este problema, y la otra mitad de la respuesta.
 
-### 6-bis. Multimodelo: varios proveedores vivos a la vez, y a cuál mandarle qué
+### 6-bis. Multimodelo: un modelo por cluster, y una cadena que no pierde la corrida ✅ COMPLETO, PARCIAL (05/09/2026)
 
-**Abierto el 21/08/2026, al decidir la credencial única de la etapa 2 del punto 2.** Ver `change_logs.md`.
+**Abierto el 21/08/2026** al decidir la credencial única de la etapa 2 del punto 2; cerrado en su mitad reactiva. Detalle completo en `change_logs.md`.
 
-El motor puede tener varias filas en `modelo_ia`, pero **una sola credencial configurada por vez**: `MODELO_API_KEY` tiene un solo valor, y una key de Groq no sirve en Gemini. Cambiar de proveedor es cambiar ese valor. Alcanza de sobra mientras cambiar de modelo sea algo raro, que es el caso.
+**El reencuadre que lo destrabó.** Este punto quedó frenado por un argumento correcto pero de alcance más chico del que parecía: *"para que la cadena sirva hay que decidir cuánto mandarle a cada proveedor según los créditos que le queden"*. Eso es cierto del **reparto proactivo** de carga, no del **fallback reactivo** — caer al siguiente cuando el primero falla no necesita saber cuánto crédito queda. Se hizo lo reactivo, y el bloqueo no aplicaba.
 
-Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el mismo instante**, que es lo que necesita la cadena de fallback: si el de `prioridad` 1 pega contra su rate limit, caer al 2 sin perder el trabajo de la corrida.
+**Qué quedó andando:**
 
-**Por qué no se hizo ahora, y el argumento es del usuario**: la cadena no termina en "si falla, probá el siguiente". Para que sirva de verdad hay que decidir *cuánto* mandarle a cada proveedor según los créditos que le queden — cuántos clusters van a uno y cuántos al otro—, y eso es lógica nueva de peso que no corresponde arrastrar dentro del desacoplamiento.
+- `POST /modelos` acepta `api_key_env`, acotado a `MODELO_API_KEY` o la forma con sufijo. Es el "exponer un campo en el alta" que este punto anticipaba, y la restricción sigue cerrando la primitiva de exfiltración de la tanda 2.
+- `modelos.cadena_de_modelos`: el activo encabeza y detrás van los suplentes **con credencial propia**. Compartir la variable del titular es compartir su cuota, así que un suplente que la comparte no serviría de suplente.
+- `sintetizar_pendientes` recorre esa cadena por cluster, con **cortocircuito**: dos fallos seguidos del mismo modelo lo sacan por lo que queda de la corrida. Sin eso, con la cuota agotada cada cluster paga sus 3 reintentos de `tenacity` antes de caer al suplente.
+- `POST /synthesize?modelo_id=` y `POST /clusters/{id}/synthesize?modelo_id=`. **El scheduler no cambió**: sigue llamando sin parámetros.
 
-**Lo que ya está puesto y no hay que rehacer**: la columna `prioridad` (hoy solo desempata), la columna `api_key_env` con su default, y `leer_api_key` aceptando la forma con sufijo (`MODELO_API_KEY_GROQ`). El día que se implemente, es **exponer un campo en el alta**, no migrar la tabla ni rehacer la validación. Las instancias que hoy tengan filas con nombres sufijados siguen funcionando sin tocar nada.
+**Lo que queda deliberadamente afuera**: el reparto proactivo de cupo (la mitad pesada, y sigue sin hacer falta), los hilos por modelo (ninguno de los dos modos de uso corre dos modelos a la vez, y la síntesis usa el 23% del ciclo), y la interfaz de escritorio, que se construye cuando exista la app.
+
+**Sin probar contra dos proveedores reales, y ahora se sabe por qué** (05/09/2026). La cadena está verificada contra mocks y con mutación. Se intentó probarla de verdad y los dos candidatos fallaron por motivos ajenos al motor:
+
+- **`groq-qwen`**: credencial válida y host declarado, pero el tier gratuito topea en **1000 tokens de salida por minuto** para `qwen/qwen3.6-27b`. Ni siquiera el pedido mínimo del sondeo entra. Requeriría plan pago.
+- **`gemini-3.8-flash`**: `503 UNAVAILABLE` en 3 de 3 intentos con dos credenciales distintas. Aislado con un control —la misma credencial nueva sondeó bien contra `gemini-3.5-flash-lite`—, así que es el modelo y no la cuenta. Quedó apuntando a `MODELO_API_KEY_GEMINI2`, listo para cuando Google libere capacidad.
+
+**Lo que quedó abierto de la verificación de hallazgos** (05/09/2026), confirmado con sondas pero sin arreglar:
+
+- **Amplificación de costo**: `POST /clusters/{id}/synthesize` no tiene guarda de idempotencia — N llamadas son N llamadas al proveedor. Se le suma que cada una resetea `enviado_backend`/`intentos_envio` (deliberado, pero el efecto combinado no se evaluó) y que **no mira el estado del cluster**: uno `descartado` se sintetiza igual y queda listo para entregar.
+- **Qué significa `activo=False` con multimodelo**: un modelo que el operador apaga —reemplazándolo por otro— vuelve solo a la cadena como suplente si tiene credencial propia, contradiciendo el docstring de `activar_modelo`. Es una decisión de producto, no un parche.
+- **No hay forma de cambiar `api_key_env` de una fila ya creada**: el `PATCH` solo acepta `activo`. Hoy se resuelve por SQL directo.
+- **Una precondición no escrita**: `sintetizar_pendientes(session, modelo)` no tolera un `ModeloIA` cargado antes de pasos que commitean (queda expirado, y el `expunge` interno lo desprende sin valores). Ningún camino de producción la pisa hoy, **pero la app de escritorio de este mismo punto sí la pisaría**.
 
 **Lo que sí habría que revisar**: `PATCH ?activo=true` sondea contra el proveedor justamente porque con credencial única la variable no dice de quién es la key. Con nombres por proveedor esa comprobación vuelve a poder ser barata — pero conviene medir antes de aflojarla.
 
@@ -264,15 +284,15 @@ Lo que ese diseño deja afuera es tener **dos proveedores distintos vivos en el 
 
 Tres puntos de `tech_stack.md` (1, 4 y 6: engine de BD síncrono, scheduler embebido, modelo de embeddings en memoria por worker) comparten la misma condición: importan si el despliegue pasa de una réplica a varias, no por la cantidad de medios que se ingieran con la réplica única actual. Fase 5 fijó a propósito un solo proceso Uvicorn sin `--workers`; mientras eso no cambie, estos tres quedan correctamente diferidos.
 
-### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función
+### 8. Purga de cuerpos — borrar el texto ajeno una vez que cumplió su función ✅ COMPLETO, PARCIAL (04/09/2026)
 
-**Último en la lista a propósito: hoy no genera inconvenientes.** No son tantas noticias y el espacio que ocupan tampoco aprieta. Se hace cuando alguna de las dos cosas cambie.
+**Cerrado para las noticias huérfanas; la población agrupada queda afuera a propósito.** `services/purga.py` borra `contenido_limpio` —nunca la noticia— de lo que nunca formó cluster y ya venció su ventana. Corrido de verdad contra la base real: **22 MB de texto ajeno → 6,58 MB**, 4.083 noticias purgadas (el MB liberado está subestimado: la primera versión medía caracteres y no bytes, corregido después — ver más abajo). Detalle completo, incluida la medición que decidió el corpus de TF-IDF y la verificación en vivo con backup previo, en `change_logs.md`.
 
-Borrar **solo `contenido_limpio`** —no la noticia— cuando su cluster ya cerró, se sintetizó y se entregó, más un margen. Medido al 20/08/2026: **17,5 MB de texto ajeno**, del cual el **71% (3.186 de 4.485) es de artículos que nunca formaron cluster y ya no pueden formarlo**, porque quedaron fuera de la ventana.
+**Revisión independiente antes de commitear** (mismo día): encontró que la condición de purga no exigía que la noticia estuviera vectorizada —cerrado, sin costo sobre lo ya purgado— y que 238 de las 4.083 filas purgadas eran notas sin hecho (opinión, recetas, horóscopo) que `categorias.py` promete mantener disponibles para el back-end. Se decidió no revertirlas —el back-end nunca leyó ese campo— pero queda anotado como una decisión de alcance que se tomó por default y no a propósito. Detalle completo en `change_logs.md`.
 
-Sobrevive todo lo demás —título, URL, fecha, categoría y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
+Sobrevive todo lo demás —título, URL, fecha, medio y el `embedding`—, así que `GET /search` no se entera y las noticias siguen existiendo como registro.
 
-**Rompe un solo consumidor**: el corpus de TF-IDF ajusta sobre `select(Noticia)` sin filtro ([preprocessing.py:105](src/services/preprocessing.py#L105)). Hay que decidir entre incluir las purgadas solo con título o excluirlas con una ventana móvil.
+**Lo que queda deliberadamente afuera de esta tanda**: los clusters cerrados, sintetizados y entregados, que son candidatos por el mismo argumento de antigüedad. Es una segunda población con su propia condición de seguridad —la re-síntesis: `clusters_pendientes` puede reabrir un cluster viejo si llega material nuevo de un medio que ya estaba— y mezclarla acá habría resuelto dos problemas con una sola comprobación. Queda como tanda aparte, sin medir todavía cuánto libera.
 
 **El costo real de purgar** no es perder el texto para el producto —ya cumplió— sino **no poder revectorizar si algún día se cambia `EMBEDDING_MODEL`**: habría que re-ingerir, y lo que salió de la ventana del feed no vuelve.
 

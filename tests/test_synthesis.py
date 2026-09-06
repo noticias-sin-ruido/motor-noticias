@@ -26,6 +26,7 @@ from src.models import (
 )
 from src.services import synthesis
 from src.services.proveedores import (
+    PREFIJO_API_KEY_ENV,
     AdaptadorNoImplementado,
     ErrorDeProveedor,
     ProveedorNoConfigurado,
@@ -55,6 +56,28 @@ MODELO = ModeloIA(
 
 
 @pytest.fixture(autouse=True)
+def hosts_declarados(monkeypatch):
+    """
+    Declara `proveedor.test` en `MODELO_HOSTS_PERMITIDOS`, para todo el archivo.
+
+    **Sin esto, el resultado de un test podía depender de lo que hubiera de
+    verdad en el `.env` del desarrollador.** Lo destapó invertir el orden de
+    `OpenAICompatible.__init__` (host antes que credencial, para cerrar un
+    oráculo -- ver `test_modelos.TestElHostSeValidaAntesQueLaCredencial`):
+    `TestLaCadenaConTraduccionRealDeExcepciones` construye modelos con
+    `base_url="https://proveedor.test/v1"`, y hasta ese cambio el chequeo de
+    host nunca se ejecutaba en esos tests porque la credencial fallaba
+    primero. Al invertirse el orden, el host pasó a validarse de verdad, y
+    como este archivo -- a diferencia de `test_modelos.py`, que ya tiene su
+    propia `hosts_declarados` -- nunca lo declaraba, el resultado pasaba a
+    depender de si `MODELO_HOSTS_PERMITIDOS` en el `.env` real incluía o no
+    ese host. Mismo criterio que `conftest.sin_credencial_de_ia`: el test no
+    puede depender de una variable que nadie en este archivo pidió.
+    """
+    monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "proveedor.test")
+
+
+@pytest.fixture(autouse=True)
 def modelo_configurado(session: Session):
     """
     Deja un modelo activo en la base, para todos los tests del archivo.
@@ -66,9 +89,10 @@ def modelo_configurado(session: Session):
     poner una guarda en producción para sostener una situación que en
     producción no existe.
 
-    No vuelve ciegos a los tests de la rama contraria: los dos que prueban qué
-    pasa **sin** modelo activo parchean `modelo_activo`, y ese parche gana
-    porque se aplica más adentro.
+    No vuelve ciegos a los tests de la rama contraria: los que prueban qué pasa
+    **sin** proveedor parchean el seam que corresponda —`cadena_de_modelos`
+    para `sintetizar_pendientes`, `modelo_activo` para `sintetizar_cluster`— y
+    ese parche gana porque se aplica más adentro.
     """
     fila = ModeloIA(
         nombre="modelo-de-prueba",
@@ -1127,6 +1151,9 @@ class TestManejoDeFallos:
             "pendientes": 2, "sintetizados": 1, "creados": 1,
             "actualizados": 0, "descartados": 0, "bloqueados": 0, "fallidos": 1,
             "sin_modelo": False, "sin_credencial": False,
+            # El que salió bien quedó atribuido, y nadie se cayó de la cadena:
+            # un fallo suelto no alcanza para agotar a un modelo.
+            "por_modelo": {"modelo-de-prueba": 1}, "agotados": {},
         }
 
     def test_el_cluster_que_fallo_se_reintenta(self, session: Session, medios):
@@ -1182,11 +1209,16 @@ class TestLlamarModelo:
         assert proveedor.generar.call_count == 1
 
     def test_un_error_del_proveedor_se_reintenta(self):
-        """Un 429 o un JSON mal armado se arreglan solos en el intento siguiente."""
+        """
+        Un 429 o un JSON mal armado se arreglan solos en el intento siguiente,
+        y si los tres fallan queda `SintesisFallida` -- no un `ValueError` a
+        secas, que es lo que dejaba `POST /clusters/{id}/synthesize` sin nada
+        que atajarlo y terminaba en un 500 sin manejar.
+        """
         proveedor = self._proveedor(side_effect=ErrorDeProveedor("HTTP 429"))
 
         with patch.object(synthesis, "construir", return_value=proveedor):
-            with pytest.raises(ValueError):
+            with pytest.raises(synthesis.SintesisFallida):
                 synthesis.llamar_modelo("un prompt", MODELO)
 
         assert proveedor.generar.call_count == 3
@@ -1218,6 +1250,9 @@ class TestLlamarModelo:
         cluster = crear_cluster(session)
         crear_noticia(session, medios[0], 1, cluster)
 
+        # `sintetizar_cluster` resuelve por su cuenta con `modelo_activo` (el
+        # centinela `_RESOLVER`), no con la cadena: la cadena la arma
+        # `sintetizar_pendientes`. Cada uno se parchea en su propio seam.
         with patch.object(synthesis, "modelo_activo", return_value=None):
             with pytest.raises(synthesis.SintesisSinConfigurar):
                 synthesis.sintetizar_cluster(session, cluster)
@@ -1236,7 +1271,7 @@ class TestLlamarModelo:
             crear_noticia(session, medios[0], i * 2 + 1, cluster)
             crear_noticia(session, medios[1], i * 2 + 2, cluster)
 
-        with patch.object(synthesis, "modelo_activo", return_value=None):
+        with patch.object(synthesis, "cadena_de_modelos", return_value=[]):
             with patch.object(synthesis, "construir") as construir:
                 stats = synthesis.sintetizar_pendientes(session)
 
@@ -1299,7 +1334,7 @@ class TestLlamarModelo:
         session.add(viejo)
         session.commit()
 
-        with patch.object(synthesis, "modelo_activo", return_value=None):
+        with patch.object(synthesis, "cadena_de_modelos", return_value=[]):
             with patch.object(synthesis, "enviar_alerta") as alerta:
                 stats = synthesis.sintetizar_pendientes(session)
 
@@ -1415,3 +1450,322 @@ class TestDescartarVencidosNoEscala:
             synthesis.descartar_vencidos_sin_sintetizar(session)
 
         assert muchos["n"] == pocos["n"]
+
+
+class TestCadenaDeFallback:
+    """
+    Multimodelo (punto 6-bis): si el titular falla, el cluster se reintenta con
+    el suplente en vez de perderse. Ver `synthesis._intentar_con_la_cadena`.
+    """
+
+    @pytest.fixture
+    def suplente(self, session: Session, monkeypatch) -> ModeloIA:
+        """
+        Un segundo modelo **con credencial propia**, que es lo que lo hace
+        entrar a la cadena. Compartir la variable del titular sería compartir su
+        cuota, y entonces no serviría de suplente.
+        """
+        variable = f"{PREFIJO_API_KEY_ENV}SUPLENTE"
+        monkeypatch.setenv(variable, "clave-del-suplente")
+        fila = ModeloIA(
+            nombre="suplente",
+            adaptador=Adaptador.GEMINI,
+            modelo="otro-modelo",
+            activo=False,
+            api_key_env=variable,
+        )
+        session.add(fila)
+        session.commit()
+        session.refresh(fila)
+        return fila
+
+    def _un_cluster(self, session, medios, n=1):
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], n, cluster)
+        crear_noticia(session, medios[1], n + 1, cluster)
+        return cluster
+
+    def _resultado(self):
+        return {"creados": 1, "actualizados": 0, "descartados": 0}
+
+    def _por_modelo(self, reglas):
+        """
+        Reemplaza a `sintetizar_cluster` decidiendo por el nombre del modelo.
+
+        `reglas` mapea nombre -> excepción a levantar; los que no están salen
+        bien. Deja registrado el orden real de intentos, que es lo que estos
+        tests miran.
+        """
+        intentos = []
+
+        def falso(_session, _cluster, modelo):
+            intentos.append(modelo.nombre)
+            problema = reglas.get(modelo.nombre)
+            if problema is not None:
+                raise problema
+            return self._resultado()
+
+        return falso, intentos
+
+    def test_el_fallo_del_titular_cae_al_suplente(self, session, medios, suplente):
+        self._un_cluster(session, medios)
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": RuntimeError("429 rate limit")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert intentos == ["modelo-de-prueba", "suplente"]
+        assert stats["sintetizados"] == 1
+        assert stats["fallidos"] == 0
+        assert stats["por_modelo"] == {"suplente": 1}
+
+    def test_sin_configurar_tambien_cae_al_suplente(self, session, medios, suplente):
+        """
+        Hasta multimodelo esto cortaba la corrida entera, y era lo correcto con
+        un solo proveedor: una credencial que falta no se arregla entre un
+        cluster y el siguiente. Con cadena significa "usá el que sigue".
+        """
+        self._un_cluster(session, medios)
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": synthesis.SintesisSinConfigurar("falta la key")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert intentos == ["modelo-de-prueba", "suplente"]
+        assert stats["sintetizados"] == 1
+        assert stats["sin_credencial"] is False
+
+    def test_el_bloqueo_de_contenido_no_se_prueba_con_otro(
+        self, session, medios, suplente
+    ):
+        """
+        **La excepción deliberada.** El proveedor rechazó el contenido por sus
+        filtros; buscar otro que sí lo acepte es rodear una negativa de
+        seguridad, y destruye la señal de que el producto no puede cubrir cierto
+        material — que es una decisión de producto, no un fallo a sortear.
+        """
+        self._un_cluster(session, medios)
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": synthesis.SintesisBloqueada("policiales")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert intentos == ["modelo-de-prueba"], "no tenía que probar el suplente"
+        assert stats["bloqueados"] == 1
+        assert stats["sintetizados"] == 0
+
+    def test_dos_fallos_seguidos_sacan_al_titular_de_la_cadena(
+        self, session, medios, suplente
+    ):
+        """
+        **El cortocircuito.** Sin esto, con la cuota del titular agotada cada
+        cluster paga sus 3 reintentos de `tenacity` antes de caer al suplente.
+        Del tercer cluster en adelante el titular ya no se intenta.
+        """
+        for i in range(3):
+            self._un_cluster(session, medios, n=i * 2 + 1)
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": RuntimeError("429 rate limit")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert intentos == [
+            "modelo-de-prueba", "suplente",
+            "modelo-de-prueba", "suplente",
+            "suplente",
+        ]
+        assert "modelo-de-prueba" in stats["agotados"]
+        assert stats["sintetizados"] == 3
+        assert stats["por_modelo"] == {"suplente": 3}
+
+    def test_un_exito_corta_la_racha(self, session, medios, suplente):
+        """
+        Dos fallos separados por un éxito no son "seguidos". Sin el reset, un
+        modelo sano se caería de la cadena por dos casualidades lejanas.
+        """
+        for i in range(3):
+            self._un_cluster(session, medios, n=i * 2 + 1)
+
+        intentos = []
+        vueltas = {"n": 0}
+
+        def falso(_session, _cluster, modelo):
+            intentos.append(modelo.nombre)
+            if modelo.nombre == "modelo-de-prueba":
+                vueltas["n"] += 1
+                # Falla en el 1er y 3er intento suyo, funciona en el 2do.
+                if vueltas["n"] != 2:
+                    raise RuntimeError("timeout")
+            return self._resultado()
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["agotados"] == {}, "el éxito del medio corta la racha"
+        assert intentos.count("modelo-de-prueba") == 3
+
+    def test_un_modelo_explicito_no_cae_al_suplente(self, session, medios, suplente):
+        """
+        Elegir un modelo es elegirlo: caer en silencio a otro dejaría en
+        `modelo_usado` una serie histórica que dice que se usó uno que nadie
+        pidió, que es justo la comparación que esa columna existe para habilitar.
+        """
+        self._un_cluster(session, medios)
+        titular = session.exec(
+            select(ModeloIA).where(ModeloIA.nombre == "modelo-de-prueba")
+        ).one()
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": RuntimeError("429 rate limit")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session, modelo=titular)
+
+        assert intentos == ["modelo-de-prueba"], "no había cadena que recorrer"
+        assert stats["sintetizados"] == 0
+        # Un fallo suelto es un cluster fallido, no falta de proveedor: el
+        # modelo todavía no está agotado (hace falta el segundo seguido).
+        assert stats["fallidos"] == 1
+        assert stats["sin_credencial"] is False
+
+    def test_el_suplente_sin_credencial_propia_no_entra(self, session, medios):
+        """
+        El otro lado de `cadena_de_modelos`: sin variable propia no hay cadena,
+        así que el fallo del titular se cuenta como fallo del cluster, igual que
+        antes de multimodelo.
+        """
+        session.add(
+            ModeloIA(
+                nombre="mismo-proveedor",
+                adaptador=Adaptador.GEMINI,
+                modelo="otro",
+                activo=False,
+            )
+        )
+        session.commit()
+        self._un_cluster(session, medios)
+        falso, intentos = self._por_modelo(
+            {"modelo-de-prueba": RuntimeError("429 rate limit")}
+        )
+
+        with patch.object(synthesis, "sintetizar_cluster", side_effect=falso):
+            stats = synthesis.sintetizar_pendientes(session)
+
+        assert intentos == ["modelo-de-prueba"], "el que comparte credencial no entra"
+        assert stats["fallidos"] == 1
+
+
+class TestLaCadenaConTraduccionRealDeExcepciones:
+    """
+    La cadena recorrida **sin mockear `sintetizar_cluster`**, para que corra la
+    traducción real de excepciones y el `rollback` entre modelos.
+
+    `TestCadenaDeFallback` prueba la lógica de la cadena —qué cae, qué agota, qué
+    corta la racha— y para eso mockea el servicio entero, que es lo correcto:
+    aísla la decisión. Pero por eso mismo **nunca ejercita** el camino que va de
+    `leer_api_key` a `ProveedorNoConfigurado` a `SintesisSinConfigurar`, que es
+    justamente donde vivía la fuga del nombre de la variable: un test en verde
+    con el servicio mockeado no puede ver qué mensaje se construye de verdad.
+
+    Acá el único mock es la frontera de red del adaptador. Todo lo de adentro
+    —resolver la credencial, levantar, traducir, caer al siguiente, sanear— es
+    el código real.
+    """
+
+    def _modelo(self, nombre: str, variable: str) -> ModeloIA:
+        return ModeloIA(
+            nombre=nombre,
+            adaptador=Adaptador.OPENAI_COMPATIBLE,
+            modelo="un-modelo",
+            base_url="https://proveedor.test/v1",
+            activo=False,
+            api_key_env=variable,
+        )
+
+    @pytest.fixture
+    def sin_credencial(self, session: Session, medios) -> None:
+        """
+        El modelo activo del archivo apunta a `VARIABLE_UNICA`, que
+        `conftest.sin_credencial_de_ia` deja sin valor. Alcanza: lo que se
+        ejercita es el camino real desde `leer_api_key`.
+
+        **No se agrega un suplente a propósito.** El primer intento de escribir
+        este test puso dos modelos con variables inexistentes, y no entró
+        ninguno de los dos a la cadena: `_tiene_credencial_propia` filtra a los
+        suplentes cuya variable no resuelve, así que un suplente "sin
+        credencial" es un estado que no existe. La cadena solo puede tener
+        suplentes que SÍ pueden autenticarse.
+        """
+        cluster = crear_cluster(session)
+        crear_noticia(session, medios[0], 1, cluster)
+        crear_noticia(session, medios[1], 2, cluster)
+        session.commit()
+
+    def test_la_corrida_corta_por_el_camino_real(
+        self, session: Session, sin_credencial
+    ):
+        """
+        Sin mockear el servicio: `leer_api_key` levanta de verdad,
+        `llamar_modelo` traduce de verdad y la cadena corta de verdad.
+        """
+        stats = synthesis.sintetizar_pendientes(session)
+
+        assert stats["agotados"] == {"modelo-de-prueba": "sin_configurar"}
+        assert stats["sin_credencial"] is True
+        # No es un cluster fallido: es el motor sin proveedores.
+        assert stats["fallidos"] == 0
+
+    def test_el_nombre_de_la_variable_no_llega_a_las_stats(
+        self, session: Session, sin_credencial
+    ):
+        """
+        Las stats se expanden en el cuerpo del 200 de `POST /synthesize`, así
+        que todo lo que entre acá es público. Con el servicio mockeado esto no
+        se puede ver: el mensaje lo pone el mock.
+        """
+        stats = synthesis.sintetizar_pendientes(session)
+
+        assert "MODELO_API_KEY" not in str(stats)
+
+    def test_el_mensaje_real_no_nombra_la_variable(self, session: Session):
+        """
+        **El test que faltaba.** El mensaje que llega hasta acá es el que
+        construye `llamar_modelo` de verdad, no uno inventado por un mock — que
+        es exactamente por qué el test mockeado de `test_api.py` pasaba en verde
+        mientras el real filtraba el nombre de la variable de entorno.
+        """
+        with pytest.raises(synthesis.SintesisSinConfigurar) as capturado:
+            synthesis.llamar_modelo(
+                "un prompt",
+                self._modelo("solo", f"{PREFIJO_API_KEY_ENV}NO_EXISTE_UNO"),
+            )
+
+        mensaje = str(capturado.value)
+        assert "NO_EXISTE_UNO" not in mensaje
+        assert "solo" in mensaje, "tiene que decir qué modelo falla"
+
+    def test_el_adaptador_que_no_existe_si_dice_cual_es(self, session: Session):
+        """
+        La otra rama de `SintesisSinConfigurar`, y la contracara: este mensaje
+        **sí** viaja entero. No nombra variables ni configuración del operador
+        — dice qué adaptador falta y qué usar en su lugar, que es lo que el
+        operador necesita para arreglarlo.
+        """
+        modelo = ModeloIA(
+            nombre="con-adaptador-reservado",
+            adaptador=Adaptador.ANTHROPIC,
+            modelo="un-modelo",
+        )
+
+        with pytest.raises(synthesis.SintesisSinConfigurar) as capturado:
+            synthesis.llamar_modelo("un prompt", modelo)
+
+        assert "anthropic" in str(capturado.value)

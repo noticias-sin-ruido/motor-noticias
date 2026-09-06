@@ -72,6 +72,30 @@ def key(monkeypatch):
     monkeypatch.setenv(VARIABLE_UNICA, "clave-de-prueba")
 
 
+@pytest.fixture(autouse=True)
+def hosts_declarados(monkeypatch):
+    """
+    Declara los hosts ficticios de este archivo en `MODELO_HOSTS_PERMITIDOS`.
+
+    Desde la tanda 2 de la auditoría, un `base_url` público tiene que estar
+    declarado o el motor se niega a mandarle la credencial. Todos los hosts de
+    prueba de acá (`proveedor.test` y compañía) son públicos a los ojos del
+    validador —no resuelven, y eso cuenta como público a propósito—, así que sin
+    esta fixture fallarían 92 tests por una razón que no es la que están
+    probando.
+
+    Es `autouse` y no una fixture opcional por el mismo criterio que
+    `sin_el_env_de_la_maquina`: el test que se olvide de pedirla rompe por un
+    motivo equivocado. Los que prueban la protección en sí la pisan con su
+    propio `monkeypatch`.
+    """
+    monkeypatch.setattr(
+        settings,
+        "MODELO_HOSTS_PERMITIDOS",
+        "proveedor.test,x.test,proxy.test,mio.test,interno.test",
+    )
+
+
 def _modelo(**kwargs) -> ModeloIA:
     datos = {
         "nombre": "prueba",
@@ -105,8 +129,8 @@ class TestCredenciales:
 
     def test_una_fila_nueva_apunta_a_la_variable_unica(self):
         """
-        El default de la columna, que es **la única forma en que las filas
-        consiguen su `api_key_env`** desde que el alta dejó de aceptarlo.
+        El default de la columna: una instalación de un solo proveedor no
+        nombra la variable en ninguna parte y todas sus filas caen acá.
         """
         assert ModeloIA(nombre="x", adaptador=Adaptador.GEMINI, modelo="m").api_key_env == (
             VARIABLE_UNICA
@@ -253,6 +277,126 @@ class TestValidacionDeBaseUrl:
         escenario donde los cuerpos de los artículos no salen de la máquina.
         """
         assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+
+class TestHostsDeclarados:
+    """
+    La credencial de IA no sale hacia un host que el operador no declaró.
+
+    Cierra SR-01 de la auditoría del 03/09/2026, que estaba **verificado con un
+    captor**: `POST /modelos` le mandaba `MODELO_API_KEY` como Bearer al
+    `base_url` que le indicaran —dos veces, una por cada mecanismo de estructura
+    que prueba el sondeo— antes de saber siquiera si el proveedor servía.
+    """
+
+    def test_un_host_publico_sin_declarar_no_recibe_la_credencial(self, key, monkeypatch):
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "")
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url="https://proveedor.test/v1"))
+
+    def test_el_error_dice_la_linea_exacta_que_falta(self, key, monkeypatch):
+        """
+        Mismo criterio que el alta de medios: el motor informa y el operador
+        decide. Un "no permitido" a secas lo dejaría adivinando qué variable es.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "ya.declarado.test")
+        with pytest.raises(ErrorDeProveedor) as error:
+            OpenAICompatible(_modelo(base_url="https://nuevo.test/v1"))
+
+        mensaje = str(error.value)
+        assert "MODELO_HOSTS_PERMITIDOS=ya.declarado.test,nuevo.test" in mensaje
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://192.168.1.50:8000/v1",
+            "http://10.0.0.5/v1",
+        ],
+    )
+    def test_la_red_interna_no_hace_falta_declararla(self, key, monkeypatch, url):
+        """
+        **La regla queda invertida respecto de `services/medios.py`**, y es
+        deliberado: allá lo interno es lo sospechoso porque el riesgo es que nos
+        usen de escáner; acá lo interno es lo confiable porque el riesgo es que
+        la credencial se vaya lejos. Un modelo local es además el único caso
+        donde los cuerpos de los artículos no salen de la máquina.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "")
+        assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+    @pytest.mark.parametrize(
+        "url, motivo",
+        [
+            ("https://proveedor.test.atacante.net/v1", "un sufijo no alcanza"),
+            ("https://evil.proveedor.test/v1", "un subdominio tampoco"),
+            ("https://аpi.proveedor.test/v1", "homógrafo con cirílico"),
+        ],
+    )
+    def test_la_comparacion_es_exacta_y_no_por_sufijo(self, key, url, motivo):
+        """Declarar un host no habilita a todo el que lo contenga en su nombre."""
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url=url))
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://PROVEEDOR.test/v1",
+            "https://proveedor.test./v1",
+            "https://proveedor.test:8443/v1",
+        ],
+    )
+    def test_normaliza_caja_punto_final_y_puerto(self, key, url):
+        """DNS no distingue mayúsculas, y el puerto no cambia a quién le hablás."""
+        assert OpenAICompatible(_modelo(base_url=url)).url.endswith("/chat/completions")
+
+    def test_link_local_sigue_bloqueado_aunque_lo_declaren(self, key, monkeypatch):
+        """
+        La lista habilita destinos públicos, **no levanta las otras defensas**.
+        Los metadata de las nubes reparten credenciales y no tienen ningún uso
+        legítimo acá, así que declararlos no puede alcanzar.
+        """
+        monkeypatch.setattr(settings, "MODELO_HOSTS_PERMITIDOS", "169.254.169.254")
+        with pytest.raises(ErrorDeProveedor, match="link-local"):
+            OpenAICompatible(_modelo(base_url="http://169.254.169.254/latest"))
+
+
+class TestElHostSeValidaAntesQueLaCredencial:
+    """
+    El orden de `OpenAICompatible.__init__` es la defensa contra un oráculo.
+
+    Hallazgo de una revisión independiente sobre el punto 6-bis: `POST
+    /modelos` distinguía dos 422 según si la variable de `api_key_env`
+    existía o no, sin que hiciera falta un host confiable de por medio —
+    `leer_api_key` corría antes que `validar_base_url`, así que nombrar una
+    variable inexistente cortaba ahí y nunca llegaba a mirar el host. Bastaba
+    con probar nombres de variable contra `POST /modelos` para saber cuáles
+    existen en el servidor, sin ningún host permitido.
+
+    Invertido el orden, un host no confiable falla siempre con el mismo
+    mensaje, exista la variable o no — que es el único caso que le importa a
+    quien ataca, porque exfiltrar la credencial de verdad necesita ese host
+    permitido de cualquier forma. Un operador legítimo, con un host ya
+    declarado, sigue viendo el mensaje específico de credencial faltante.
+    """
+
+    def test_host_no_declarado_gana_aunque_la_variable_no_exista(self):
+        """
+        Sin `key`: `ENV_OK` no está seteada. Si el orden estuviera al revés,
+        esto levantaría `ProveedorNoConfigurado` por la variable, y el test
+        fallaría por levantar la excepción equivocada.
+        """
+        with pytest.raises(ErrorDeProveedor, match="no está declarado"):
+            OpenAICompatible(_modelo(base_url="https://atacante.test/v1"))
+
+    def test_con_host_declarado_el_diagnostico_de_credencial_sigue_intacto(self):
+        """
+        La otra mitad: un operador legítimo, con un host que sí declaró, no
+        pierde el mensaje que le dice qué variable falta configurar.
+        """
+        with pytest.raises(ProveedorNoConfigurado, match=ENV_OK):
+            OpenAICompatible(_modelo(base_url="https://proveedor.test/v1"))
 
 
 class TestAdaptadorCompatible:
@@ -1017,8 +1161,11 @@ class TestNoEscalaConLosClusters:
                 stats = synthesis.sintetizar_pendientes(session)
 
         assert stats["sintetizados"] == 3, "el test no está ejercitando el bucle"
-        # Una sola lectura de `modelo_ia` para toda la corrida, no una por cluster.
-        assert lecturas["n"] == 1, (
+        # **Dos lecturas fijas, no una por cluster**, que es lo que este test
+        # cuida. Son las dos que arma `cadena_de_modelos`: el titular y los
+        # suplentes. El número no crece con los clusters, que es la propiedad
+        # que importa — con el N+1 que esto previene serían 3 o más.
+        assert lecturas["n"] == 2, (
             f"el modelo se recarga en cada commit: {lecturas['n']} lecturas "
             f"para 3 clusters"
         )
@@ -1031,8 +1178,8 @@ class TestEndpoints:
     """
 
     def _alta(self, **kwargs) -> dict:
-        # Sin `api_key_env`: el alta ya no lo acepta y la fila lo toma del
-        # default de la columna.
+        # Sin `api_key_env`: el alta lo acepta desde multimodelo, pero su default
+        # es `VARIABLE_UNICA`, así que omitirlo es el caso normal.
         datos = {
             "nombre": "prueba",
             "adaptador": "openai_compatible",
@@ -1073,30 +1220,66 @@ class TestEndpoints:
         assert respuesta.json()["modelo"]["modo_estructura"] == "response_format"
         fila = session.exec(select(ModeloIA)).one()
         assert fila.nombre == "prueba"
-        # El alta no lo pidió y la fila igual quedó apuntando a la variable
-        # única: es lo que hace que el operador no tenga nada que elegir acá.
+        # El alta no lo mandó y la fila quedó apuntando a la variable única:
+        # con un solo proveedor no hay nada que elegir.
         assert fila.api_key_env == VARIABLE_UNICA
 
-    def test_el_alta_no_deja_elegir_de_donde_sale_la_credencial(
-        self, client, session, key
+    @pytest.mark.parametrize(
+        "nombre", ["WEBHOOK_SECRET", "DATABASE_URL", "PATH", "MODELO_API_KEYX"]
+    )
+    def test_el_alta_acota_de_donde_sale_la_credencial(
+        self, client, session, key, nombre
     ):
         """
         **La primitiva de exfiltración, cerrada en la puerta de entrada.**
 
-        Antes `api_key_env` era un campo del alta, así que un `base_url` propio
-        más `WEBHOOK_SECRET` acá hacían que el motor mandara ese secreto como
-        Bearer token. Ahora el campo no existe, y mandarlo es un 422 explícito
-        en vez de un descarte en silencio: quien lo intente se entera de que no
-        hizo lo que creía.
+        Un `base_url` propio más `WEBHOOK_SECRET` acá hacían que el motor
+        mandara ese secreto como Bearer token al host que le indicaran. Con
+        multimodelo el campo volvió a aceptarse —un suplente necesita credencial
+        propia— pero acotado a `MODELO_API_KEY` o la forma con sufijo.
+
+        `MODELO_API_KEYX` está en la lista a propósito: es el borde que separa
+        "empieza parecido" de "es una de las nuestras".
+
+        Y **corta antes de la red**: el validador corre al parsear el cuerpo, no
+        después de haberle hablado al proveedor.
         """
         with patch.object(httpx, "post") as post:
             respuesta = client.post(
-                "/modelos", json=self._alta(api_key_env="WEBHOOK_SECRET")
+                "/modelos", json=self._alta(api_key_env=nombre)
             )
 
         assert respuesta.status_code == 422
         post.assert_not_called()
         assert session.exec(select(ModeloIA)).all() == []
+
+    def test_el_alta_acepta_la_forma_con_sufijo(self, client, session, key):
+        """
+        Lo que multimodelo necesita: un suplente con credencial **propia**.
+
+        Si el suplente comparte la variable del titular comparte su cuota, así
+        que la cadena de fallback no serviría de nada. Ver
+        `modelos.cadena_de_modelos`.
+        """
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            respuesta = client.post("/modelos", json=self._alta(api_key_env=ENV_OK))
+
+        assert respuesta.status_code == 200
+        assert session.exec(select(ModeloIA)).one().api_key_env == ENV_OK
+
+    def test_el_alta_sigue_sin_publicar_la_variable_que_le_mandaron(
+        self, client, session, key
+    ):
+        """
+        Aceptar el campo no es devolverlo: `_vista_publica` lo sigue filtrando.
+        Publicar qué variable nombra una fila es la mitad de la cadena de
+        exfiltración que la tanda 2 cortó.
+        """
+        with patch.object(httpx, "post", return_value=_respuesta(FORMA_OK)):
+            respuesta = client.post("/modelos", json=self._alta(api_key_env=ENV_OK))
+
+        assert "api_key_env" not in respuesta.json()["modelo"]
+        assert ENV_OK not in respuesta.text
 
     def test_el_alta_rechaza_al_que_no_respeta_el_esquema(self, client, session, key):
         prosa = _respuesta("Claro, con gusto.")
@@ -1241,6 +1424,16 @@ class TestEndpoints:
     def test_patch_a_un_id_inexistente(self, client, session):
         assert client.patch("/modelos/9999?activo=true").status_code == 404
 
+    @pytest.mark.parametrize("id_malo", ["99999999999999999999999", "2147483648", "0", "-1"])
+    def test_un_id_imposible_es_422_y_no_500(self, client, id_malo):
+        """
+        `ModeloIA.id` es `INTEGER` en Postgres (32 bits): un id más grande no es
+        "no encontrado", es un valor que la columna no puede representar. Antes
+        de la cota reventaba con `OverflowError` en SQLite y `numeric out of
+        range` en Postgres — un 500 por una entrada mala.
+        """
+        assert client.patch(f"/modelos/{id_malo}?activo=true").status_code == 422
+
 
 class TestUnSoloModeloActivo:
     """
@@ -1356,3 +1549,193 @@ from pydantic import BaseModel  # noqa: E402
 
 class _EsquemaChico(BaseModel):
     angulos: list[str] = []
+
+
+class TestElValorDeLaVariableNoCruzaAHTTP:
+    """
+    Ni siquiera el placeholder: es un valor del entorno, y la regla de la casa
+    —las credenciales viven en el entorno, no en las respuestas— no tiene
+    excepciones escritas.
+
+    Que un placeholder empiece con `tu_` acota el daño pero no lo cierra: es una
+    convención de nombres, no una garantía. Nada impide que alguien ponga ahí
+    algo real y se lo devuelva la API.
+    """
+
+    def test_el_alta_no_devuelve_el_valor_del_placeholder(
+        self, client, session, monkeypatch
+    ):
+        monkeypatch.setenv(ENV_OK, "tu_api_key_aqui_ESTO_NO_TIENE_QUE_SALIR")
+
+        respuesta = client.post(
+            "/modelos",
+            json={
+                "nombre": "prueba",
+                "adaptador": "openai_compatible",
+                "modelo": "un-modelo",
+                "base_url": "https://proveedor.test/v1",
+                "api_key_env": ENV_OK,
+            },
+        )
+
+        assert respuesta.status_code == 422
+        assert "ESTO_NO_TIENE_QUE_SALIR" not in respuesta.text
+        # Y el operador igual se entera de qué le pasa y cómo arreglarlo.
+        assert "valor de ejemplo" in respuesta.json()["detalle"]
+
+
+class TestValidadorDelAlta:
+    """
+    El validador de `api_key_env` en `AltaModelo`, probado **en aislamiento**.
+
+    Por el endpoint es indetectable: `leer_api_key` vuelve a validar el nombre
+    dentro del sondeo, así que sacar el validador da exactamente el mismo 422.
+    Es una capa redundante a propósito -- lo que aporta es no depender de un
+    efecto secundario del sondeo, para que la comprobación no desaparezca en
+    silencio el día que alguien saltee ese paso-- y por eso se prueba acá, donde
+    la otra capa no la tapa.
+    """
+
+    def _datos(self, **kwargs) -> dict:
+        datos = {
+            "nombre": "prueba",
+            "adaptador": "openai_compatible",
+            "modelo": "un-modelo",
+        }
+        datos.update(kwargs)
+        return datos
+
+    @pytest.mark.parametrize(
+        "nombre", ["WEBHOOK_SECRET", "DATABASE_URL", "PATH", "MODELO_API_KEYX", ""]
+    )
+    def test_rechaza_las_variables_ajenas(self, nombre):
+        from pydantic import ValidationError
+
+        from src.main import AltaModelo
+
+        with pytest.raises(ValidationError):
+            AltaModelo(**self._datos(api_key_env=nombre))
+
+    @pytest.mark.parametrize("nombre", [VARIABLE_UNICA, ENV_OK])
+    def test_acepta_las_dos_formas_validas(self, nombre):
+        from src.main import AltaModelo
+
+        assert AltaModelo(**self._datos(api_key_env=nombre)).api_key_env == nombre
+
+    def test_el_default_es_la_variable_unica(self):
+        from src.main import AltaModelo
+
+        assert AltaModelo(**self._datos()).api_key_env == VARIABLE_UNICA
+
+
+class TestCadenaDeModelos:
+    """
+    La cadena de fallback: el activo primero y detrás los suplentes que puedan
+    autenticarse por su cuenta. Ver `modelos.cadena_de_modelos`.
+    """
+
+    def _guardar(self, session, *modelos_ia):
+        for m in modelos_ia:
+            session.add(m)
+        session.commit()
+        for m in modelos_ia:
+            session.refresh(m)
+
+    def test_sin_ningun_activo_la_cadena_esta_vacia(self, session, key):
+        """
+        Un suplente suelto no sintetiza solo: eso volvería a poner al motor a
+        elegir proveedor por su cuenta, que es lo que el punto 2 sacó.
+        """
+        self._guardar(session, _modelo(nombre="suplente", activo=False))
+
+        assert modelos.cadena_de_modelos(session) == []
+
+    def test_solo_el_activo_cuando_no_hay_suplentes(self, session, key):
+        self._guardar(session, _modelo(nombre="titular", activo=True))
+
+        cadena = modelos.cadena_de_modelos(session)
+
+        assert [m.nombre for m in cadena] == ["titular"]
+
+    def test_el_suplente_con_credencial_propia_entra(self, session, key, monkeypatch):
+        otra = f"{PREFIJO_API_KEY_ENV}OTRO"
+        monkeypatch.setenv(otra, "clave-del-suplente")
+        self._guardar(
+            session,
+            _modelo(nombre="titular", activo=True),
+            _modelo(nombre="suplente", activo=False, api_key_env=otra),
+        )
+
+        cadena = modelos.cadena_de_modelos(session)
+
+        assert [m.nombre for m in cadena] == ["titular", "suplente"]
+
+    def test_el_que_comparte_la_variable_del_titular_no_entra(self, session, key):
+        """
+        **El criterio que define la cadena.** Compartir variable es compartir
+        credencial, y por lo tanto cuota: caer de Gemini a Gemini no sirve
+        cuando lo agotado es la cuota de Gemini.
+        """
+        self._guardar(
+            session,
+            _modelo(nombre="titular", activo=True),
+            _modelo(nombre="mismo-proveedor", activo=False, api_key_env=VARIABLE_UNICA),
+        )
+
+        assert [m.nombre for m in modelos.cadena_de_modelos(session)] == ["titular"]
+
+    def test_el_que_nombra_una_variable_sin_definir_no_entra(self, session, key):
+        """
+        Configurar la variable ES el opt-in: un proveedor que nadie configuró no
+        entra aunque esté dado de alta y con un nombre válido.
+        """
+        self._guardar(
+            session,
+            _modelo(nombre="titular", activo=True),
+            _modelo(
+                nombre="sin-configurar",
+                activo=False,
+                api_key_env=f"{PREFIJO_API_KEY_ENV}NUNCA_DEFINIDA",
+            ),
+        )
+
+        assert [m.nombre for m in modelos.cadena_de_modelos(session)] == ["titular"]
+
+    def test_el_activo_encabeza_aunque_su_prioridad_sea_peor(
+        self, session, key, monkeypatch
+    ):
+        """
+        `prioridad` ordena a los suplentes entre sí; no decide quién manda. Que
+        un suplente pudiera adelantarse al activo haría que prender un modelo no
+        signifique nada.
+        """
+        otra = f"{PREFIJO_API_KEY_ENV}OTRO"
+        monkeypatch.setenv(otra, "clave-del-suplente")
+        self._guardar(
+            session,
+            _modelo(nombre="titular", activo=True, prioridad=900),
+            _modelo(nombre="suplente", activo=False, prioridad=1, api_key_env=otra),
+        )
+
+        assert [m.nombre for m in modelos.cadena_de_modelos(session)] == [
+            "titular",
+            "suplente",
+        ]
+
+    def test_los_suplentes_se_ordenan_por_prioridad(self, session, key, monkeypatch):
+        primera = f"{PREFIJO_API_KEY_ENV}UNO"
+        segunda = f"{PREFIJO_API_KEY_ENV}DOS"
+        monkeypatch.setenv(primera, "clave-1")
+        monkeypatch.setenv(segunda, "clave-2")
+        self._guardar(
+            session,
+            _modelo(nombre="titular", activo=True),
+            _modelo(nombre="ultimo", activo=False, prioridad=50, api_key_env=segunda),
+            _modelo(nombre="primero", activo=False, prioridad=10, api_key_env=primera),
+        )
+
+        assert [m.nombre for m in modelos.cadena_de_modelos(session)] == [
+            "titular",
+            "primero",
+            "ultimo",
+        ]
