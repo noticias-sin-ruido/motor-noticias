@@ -2,11 +2,29 @@
 //!
 //! El shell es deliberadamente chico: la app **maneja** el motor, no lo
 //! empaqueta. Empaquetarlo habría significado ~2 GB —el entorno de Python pesa
-//! 1,8 GB, con torch adentro— y además sacar pgvector, que es lo único del
-//! sistema sin plan B escrito. Ver el punto 14 de `specs/roadmap.md`.
+//! 1,8 GB— y además sacar pgvector, que es lo único del sistema sin plan B
+//! escrito. Ver el punto 14 de `specs/roadmap.md`.
 
+mod ajustes;
 mod api;
+mod docker;
+mod motor;
 mod secretos;
+
+use std::path::PathBuf;
+
+use tauri::{AppHandle, Emitter};
+
+use ajustes::Ajustes;
+use docker::ErrorDocker;
+use motor::Estado;
+
+/// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
+/// en cada transición, no al final: arrancar puede tardar minutos y una ventana
+/// que no dice nada mientras tanto parece colgada.
+const CANAL_ESTADO: &str = "motor-estado";
+
+// --- El token -------------------------------------------------------------
 
 /// Si ya hay un token guardado. **No devuelve el token**: el front no lo
 /// necesita para nada, porque los pedidos los hace Rust.
@@ -25,11 +43,107 @@ fn token_borrar() -> Result<(), String> {
     secretos::borrar()
 }
 
-/// El `GET /` del motor: salud, base, entorno y hora.
+// --- Dónde está el repo ---------------------------------------------------
+
+/// La ruta del repo guardada, o `None` si todavía no se configuró.
+#[tauri::command]
+fn repo_leer(app: AppHandle) -> Result<Option<PathBuf>, String> {
+    Ok(ajustes::leer(&app)?.ruta_del_repo)
+}
+
+/// Guarda la ruta del repo, **después de comprobar que lo es**.
 ///
-/// Devuelve el error como categoría (`ErrorDeApi`) y no como texto suelto, así
-/// la interfaz puede decidir qué mostrar —"falta el token" y "el motor está
-/// apagado" piden acciones distintas— en vez de pintar un mensaje genérico.
+/// El error sale acá, cuando alguien elige la carpeta y puede corregirlo, y no
+/// dos pantallas después cuando el arranque falle sin decir por qué.
+#[tauri::command]
+fn repo_guardar(app: AppHandle, ruta: PathBuf) -> Result<(), String> {
+    if !ajustes::tiene_compose(&ruta) {
+        return Err(format!(
+            "En «{}» no hay un `docker-compose.yml`. Elegí la carpeta del repo del motor.",
+            ruta.display()
+        ));
+    }
+    ajustes::guardar(
+        &app,
+        &Ajustes {
+            ruta_del_repo: Some(ruta),
+        },
+    )
+}
+
+// --- El motor -------------------------------------------------------------
+
+fn ruta_configurada(app: &AppHandle) -> Result<PathBuf, ErrorDocker> {
+    ajustes::leer(app)
+        .map_err(ErrorDocker::Fallo)?
+        .ruta_del_repo
+        .ok_or_else(|| {
+            ErrorDocker::Fallo("Todavía no se configuró dónde está el repo del motor.".into())
+        })
+}
+
+fn avisar(app: &AppHandle, estado: Estado) {
+    // Si el canal falla no hay nada que hacer —la ventana puede haberse
+    // cerrado— y no es motivo para abortar el arranque.
+    let _ = app.emit(CANAL_ESTADO, estado);
+}
+
+/// Un sondeo suelto, para saber en qué anda sin tocar nada.
+#[tauri::command]
+async fn motor_estado() -> Estado {
+    motor::estado_de(&motor::sondear().await)
+}
+
+/// Levanta el motor y **avisa cada transición** hasta que esté listo.
+#[tauri::command]
+async fn motor_arrancar(app: AppHandle) -> Result<Estado, ErrorDocker> {
+    let ruta = ruta_configurada(&app)?;
+
+    avisar(&app, Estado::Reconstruyendo);
+    let ruta_para_docker = ruta.clone();
+    tauri::async_runtime::spawn_blocking(move || docker::arrancar(&ruta_para_docker))
+        .await
+        .map_err(|e| ErrorDocker::Fallo(format!("No se pudo lanzar docker: {e}")))?
+        .inspect_err(|_| avisar(&app, Estado::Error))?;
+
+    // Los contenedores ya arrancaron; falta que la API acepte conexiones y que
+    // termine el `alembic upgrade head`. Eso se sondea, no se supone.
+    let mut ultimo = Estado::Arrancando;
+    avisar(&app, ultimo);
+
+    for _ in 0..motor::intentos_maximos() {
+        let estado = motor::estado_de(&motor::sondear().await);
+        if estado != ultimo {
+            ultimo = estado;
+            avisar(&app, estado);
+        }
+        if matches!(estado, Estado::Listo | Estado::Error) {
+            return Ok(estado);
+        }
+        tokio::time::sleep(motor::intervalo()).await;
+    }
+
+    avisar(&app, Estado::Error);
+    Err(ErrorDocker::Fallo(
+        "El motor no terminó de arrancar dentro del plazo.".into(),
+    ))
+}
+
+/// Para el motor. Los contenedores quedan parados hasta que se los vuelva a
+/// levantar: `stop` persiste frente a `restart: unless-stopped`.
+#[tauri::command]
+async fn motor_detener(app: AppHandle) -> Result<Estado, ErrorDocker> {
+    let ruta = ruta_configurada(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || docker::detener(&ruta))
+        .await
+        .map_err(|e| ErrorDocker::Fallo(format!("No se pudo lanzar docker: {e}")))??;
+
+    avisar(&app, Estado::Parado);
+    Ok(Estado::Parado)
+}
+
+/// El `GET /` del motor, ya autenticado.
 #[tauri::command]
 async fn motor_salud() -> Result<serde_json::Value, api::ErrorDeApi> {
     api::get("/").await
@@ -42,6 +156,11 @@ pub fn run() {
             token_existe,
             token_guardar,
             token_borrar,
+            repo_leer,
+            repo_guardar,
+            motor_estado,
+            motor_arrancar,
+            motor_detener,
             motor_salud
         ])
         .run(tauri::generate_context!())

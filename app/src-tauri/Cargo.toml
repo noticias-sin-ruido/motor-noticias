@@ -33,6 +33,11 @@ keyring = { version = "3", features = ["windows-native"] }
 # De paso desaparece el CORS.
 reqwest = { version = "0.12", features = ["json"] }
 
+# Solo por el sleep entre sondeos del arranque. Tauri ya trae tokio adentro;
+# se declara igual porque usarlo sin declararlo es depender de un detalle de
+# otra dependencia.
+tokio = { version = "1", features = ["time"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

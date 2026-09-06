@@ -68,12 +68,16 @@ hace `invoke()`. De paso no hay CORS que configurar.
 app/
 ├── src/                 # React + TypeScript (strict)
 │   ├── App.tsx
+│   ├── motor.ts         # los estados del motor y sus mensajes
 │   └── estilos.css
 └── src-tauri/
     └── src/
         ├── lib.rs       # los comandos que el front invoca
         ├── secretos.rs  # el token, contra el Credential Manager
-        └── api.rs       # el cliente HTTP contra el motor
+        ├── api.rs       # el cliente HTTP contra el motor
+        ├── ajustes.rs   # dónde está el repo, entre arranques
+        ├── docker.rs    # prender y apagar los contenedores
+        └── motor.rs     # en qué anda: la máquina de estados
 ```
 
 Los errores cruzan a la interfaz como **categorías cerradas**
@@ -83,13 +87,36 @@ que la UI tiene que poder separarlas sin parsear un mensaje. Es el mismo criteri
 que el motor aplicó a su campo `agotados` después de que un mensaje de error
 filtrara el nombre de una variable de entorno.
 
+## Docker Desktop tiene que estar corriendo
+
+La app **detecta** que no lo está y lo dice —"Docker Desktop no está corriendo"—
+en vez de escupir el `failed to connect to the docker API at npipe://…` que
+devuelve Docker. Sin esa distinción, quien mira no puede saber si falló el
+arranque o si nunca hubo con quién hablar: los dos casos llegaban como el mismo
+error.
+
+**Prenderlo desde la app se evaluó y se descartó.** El ejecutable no está en una
+ruta fija —en esta máquina la instalación es por usuario, no en
+`Archivos de programa`—, arrancarlo tarda entre 30 y 60 segundos y puede abrir
+diálogos propios. Detectar cuesta un `docker info` de milisegundos y no puede
+salir mal; prender es una cadena de cosas que sí. Queda como candidato si la
+molestia se repite.
+
 ## Estado
 
-**Fase 1 — el esqueleto.** La app abre, pide el token si falta, y muestra el
-`GET /` real del motor. Prueba la cadena entera: Tauri corre, React carga, el
-token sale del Credential Manager, el HTTP llega a `localhost:8000` y la
-respuesta se pinta.
+**Fase 2 — el control del motor.** Además de lo de la fase 1, la app pregunta una
+vez dónde está el repo —comprobando que tenga `docker-compose.yml` antes de
+aceptarlo—, levanta y para los contenedores, y muestra en qué anda mientras
+tanto: `reconstruyendo → arrancando → migrando → listo`.
 
-Lo que **todavía no hace**: levantar los contenedores por su cuenta (fase 2),
-las dos pantallas (fases 4 y 5), el ícono en la bandeja (fase 6) y el instalador
-(fase 9).
+Los estados intermedios existen porque el servicio `app` **no tiene
+healthcheck**: que el contenedor esté arriba no quiere decir que la API conteste,
+y menos que haya terminado el `alembic upgrade head`. Eso se sondea contra
+`GET /`, reusando el **503** que el motor ya devuelve cuando la base no responde
+como la señal de "migrando".
+
+`up -d --build`, y `stop` — **nunca `down`**, que borra los contenedores y con la
+bandera equivocada se lleva puesto el volumen de Postgres.
+
+Lo que **todavía no hace**: las dos pantallas (fases 4 y 5), el ícono en la
+bandeja (fase 6) y el instalador (fase 9).
