@@ -1190,6 +1190,383 @@ class TestNoGastaEnUnClusterQueNoPuedePublicar:
         assert respuesta.json()["motivo"] == "sin_medios_suficientes"
 
 
+
+class TestLeerLasSintesis:
+    """
+    `GET /sintesis` y `GET /sintesis/{id}` — prerrequisito de la app.
+
+    Hasta el punto 14, el motor **no sabía devolver lo que producía**: de sus
+    cuatro `GET` ninguno daba un ángulo, y las síntesis salían solo empujadas
+    por el webhook.
+    """
+
+    def _sintesis(self, session, cuantas=5, cluster=None, entregadas=False,
+                  prefijo="Angulo", desfasaje_horas=0):
+        """
+        `cuantas` síntesis con fechas distintas y separadas, de la más vieja a
+        la más nueva. Las fechas explícitas importan: el orden y el cursor se
+        apoyan en `(fecha_generacion, id)`.
+        """
+        from datetime import datetime, timedelta
+
+        from src.models import Medio, Noticia, Sintesis
+
+        if cluster is None:
+            cluster = Cluster(titulo_evento="Un evento", estado="procesado")
+            session.add(cluster)
+            session.commit()
+            session.refresh(cluster)
+
+        medio = Medio(
+            nombre=f"Medio-{cluster.id}",
+            url_base=f"https://medio{cluster.id}.test",
+            feeds_rss=[f"https://medio{cluster.id}.test/rss"],
+        )
+        session.add(medio)
+        session.commit()
+        session.refresh(medio)
+
+        base = datetime(2026, 9, 6, 10, 0, 0) + timedelta(hours=desfasaje_horas)
+        creadas = []
+        for i in range(cuantas):
+            noticia = Noticia(
+                medio_id=medio.id,
+                cluster_id=cluster.id,
+                titulo=f"Nota {cluster.id}-{i}",
+                url=f"https://medio{cluster.id}.test/{i}",
+                guid=f"guid-{cluster.id}-{i}",
+                contenido_limpio="Cuerpo de la nota.",
+                fecha_publicacion=base,
+                embedding=[0.1] * 384,
+            )
+            session.add(noticia)
+            session.commit()
+            session.refresh(noticia)
+
+            s = Sintesis(
+                cluster_id=cluster.id,
+                titulo_angulo=f"{prefijo} {i}",
+                resumen_neutro=f"Resumen del {prefijo} {i}.",
+                puntos_clave=["Uno", "Dos"],
+                comparativa_enfoques={"Medio": {"destaco": "A", "omitio": "B", "cita": "c"}},
+                topicos=["sociedad"],
+                subtopicos=[],
+                modelo_usado="gemini-por-defecto",
+                enviado_backend=entregadas,
+                fecha_generacion=base + timedelta(minutes=i),
+            )
+            s.noticias = [noticia]
+            session.add(s)
+            session.commit()
+            session.refresh(s)
+            creadas.append(s)
+        return creadas
+
+    def test_devuelve_las_mas_nuevas_primero(self, client: TestClient, session):
+        self._sintesis(session, cuantas=3)
+
+        cuerpo = client.get("/sintesis").json()
+
+        assert cuerpo["status"] == "ok"
+        assert [s["titulo_angulo"] for s in cuerpo["sintesis"]] == [
+            "Angulo 2", "Angulo 1", "Angulo 0",
+        ]
+
+    def test_la_lista_no_trae_el_contenido(self, client: TestClient, session):
+        """
+        La comparativa de veinte ítems es la lectura entera; la lista existe
+        para elegir, no para leer. Ver `GET /sintesis/{id}`.
+        """
+        self._sintesis(session, cuantas=1)
+
+        item = client.get("/sintesis").json()["sintesis"][0]
+
+        assert "comparativa_enfoques" not in item
+        assert "resumen_neutro" not in item
+        assert "puntos_clave" not in item
+        # Pero sí lo que hace falta para decidir.
+        assert item["titulo_angulo"] == "Angulo 0"
+        assert item["medios"] and item["modelo_usado"] == "gemini-por-defecto"
+
+    def test_el_detalle_si_trae_todo(self, client: TestClient, session):
+        creadas = self._sintesis(session, cuantas=1)
+
+        cuerpo = client.get(f"/sintesis/{creadas[0].id}").json()
+
+        detalle = cuerpo["sintesis"]
+        assert detalle["resumen_neutro"] == "Resumen del Angulo 0."
+        assert detalle["comparativa_enfoques"]["Medio"]["cita"] == "c"
+        assert len(detalle["fuentes"]) == 1
+        assert detalle["fuentes"][0]["url"].startswith("https://")
+
+    def test_una_sintesis_que_no_existe_es_404(self, client: TestClient):
+        assert client.get("/sintesis/9999").status_code == 404
+
+    def test_el_cursor_pagina_sin_repetir_ni_saltear(
+        self, client: TestClient, session
+    ):
+        self._sintesis(session, cuantas=5)
+
+        primera = client.get("/sintesis?limite=2").json()
+        segunda = client.get(f"/sintesis?limite=2&cursor={primera['siguiente']}").json()
+        tercera = client.get(f"/sintesis?limite=2&cursor={segunda['siguiente']}").json()
+
+        vistos = [s["titulo_angulo"] for p in (primera, segunda, tercera) for s in p["sintesis"]]
+        assert vistos == ["Angulo 4", "Angulo 3", "Angulo 2", "Angulo 1", "Angulo 0"]
+        assert len(vistos) == len(set(vistos)), "no se repite ninguna"
+        assert tercera["siguiente"] is None, "la ultima pagina lo dice"
+
+    def test_lo_que_entra_arriba_mientras_paginas_no_corre_la_pagina(
+        self, client: TestClient, session
+    ):
+        """
+        **El test que justifica haber elegido cursor y no `offset`.**
+
+        El scheduler corre cada 15 minutos e inserta síntesis **arriba**. Con
+        `offset=2`, insertar dos nuevas entre la página 1 y la 2 hace que la 2
+        devuelva otra vez lo que la 1 ya mostró. Con cursor la posición es un
+        ítem y no un número, así que lo de arriba no corre nada.
+        """
+        self._sintesis(session, cuantas=4)
+
+        primera = client.get("/sintesis?limite=2").json()
+        ya_vistos = {s["titulo_angulo"] for s in primera["sintesis"]}
+
+        # Llega una corrida nueva mientras el operador mira la página 1.
+        cluster_nuevo = Cluster(titulo_evento="Evento posterior", estado="procesado")
+        session.add(cluster_nuevo)
+        session.commit()
+        session.refresh(cluster_nuevo)
+        self._sintesis(
+            session, cuantas=2, cluster=cluster_nuevo,
+            prefijo="Recien llegado", desfasaje_horas=5,
+        )
+
+        segunda = client.get(f"/sintesis?limite=2&cursor={primera['siguiente']}").json()
+
+        repetidos = ya_vistos & {s["titulo_angulo"] for s in segunda["sintesis"]}
+        assert not repetidos, f"la pagina 2 repitio {repetidos}"
+
+    def test_un_cursor_invalido_es_422_y_no_500(self, client: TestClient, session):
+        """
+        El cursor es una entrada de quien llama: mal formado es un pedido
+        inválido, no algo que se rompió del lado del motor.
+        """
+        self._sintesis(session, cuantas=1)
+
+        respuesta = client.get("/sintesis?cursor=esto-no-es-un-cursor")
+
+        assert respuesta.status_code == 422
+        assert "cursor" in respuesta.json()["detalle"].lower()
+
+    def test_filtra_por_cluster(self, client: TestClient, session):
+        primeras = self._sintesis(session, cuantas=2)
+        otro = Cluster(titulo_evento="Otro evento", estado="procesado")
+        session.add(otro)
+        session.commit()
+        session.refresh(otro)
+        self._sintesis(session, cuantas=3, cluster=otro)
+
+        cuerpo = client.get(f"/sintesis?cluster_id={primeras[0].cluster_id}").json()
+
+        assert cuerpo["cantidad"] == 2
+        assert {s["cluster_id"] for s in cuerpo["sintesis"]} == {primeras[0].cluster_id}
+
+    def test_filtra_por_entregado(self, client: TestClient, session):
+        """Es el filtro con el que la app muestra qué falta mandar al back-end."""
+        self._sintesis(session, cuantas=2, entregadas=True)
+        otro = Cluster(titulo_evento="Sin entregar", estado="procesado")
+        session.add(otro)
+        session.commit()
+        session.refresh(otro)
+        self._sintesis(session, cuantas=3, cluster=otro, entregadas=False)
+
+        pendientes = client.get("/sintesis?entregado=false").json()
+        entregadas = client.get("/sintesis?entregado=true").json()
+
+        assert pendientes["cantidad"] == 3
+        assert entregadas["cantidad"] == 2
+        assert all(s["enviado_backend"] is False for s in pendientes["sintesis"])
+
+
+
+class _SesionPrestada:
+    """
+    Le presta al job la sesión del test, sin cerrarla al salir del `with`.
+
+    `_job_ingesta_programada` abre su propia sesión —dos, desde que registra la
+    corrida— y los tests que solo miran los pasos la mockean entera. Acá hace
+    falta la de verdad, porque lo que se prueba es lo que quedó escrito.
+    """
+
+    def __init__(self, session):
+        self.session = session
+
+    def __enter__(self):
+        return self.session
+
+    def __exit__(self, *args):
+        return False
+
+
+class TestElRegistroDeCorridas:
+    """
+    `GET /pipeline` — el otro faltante que destapó el punto 14.
+
+    Hasta acá el motor medía duración y utilización del ciclo en cada corrida,
+    las logueaba y ahí morían. `GET /` dice si está vivo; nada del scheduler.
+    """
+
+    def _corrida(self, session, minutos_atras=0, cerrada=True, pasos=None):
+        from src.models import Corrida
+        from src.tiempo import ahora_utc
+
+        inicio = ahora_utc() - timedelta(minutes=minutos_atras)
+        corrida = Corrida(
+            inicio=inicio,
+            fin=inicio + timedelta(seconds=240) if cerrada else None,
+            duracion_segundos=240.2 if cerrada else None,
+            utilizacion=0.267 if cerrada else None,
+            pasos=pasos if pasos is not None else {"ingesta": {"nuevas": 46}},
+        )
+        session.add(corrida)
+        session.commit()
+        session.refresh(corrida)
+        return corrida
+
+    def test_sin_corridas_lo_dice_sin_inventar(self, client: TestClient):
+        cuerpo = client.get("/pipeline").json()
+
+        assert cuerpo["status"] == "ok"
+        assert cuerpo["ultima"] is None
+        assert cuerpo["corriendo"] is False
+        assert cuerpo["anteriores"] == []
+
+    def test_devuelve_la_ultima_con_sus_numeros(self, client: TestClient, session):
+        self._corrida(session, minutos_atras=12)
+
+        ultima = client.get("/pipeline").json()["ultima"]
+
+        assert ultima["duracion_segundos"] == 240.2
+        assert ultima["utilizacion"] == 0.267
+        assert ultima["pasos"]["ingesta"]["nuevas"] == 46
+        # Hora argentina con offset explícito, como el resto de la API.
+        assert ultima["inicio"].endswith("-03:00")
+
+    def test_una_corrida_abierta_y_reciente_esta_corriendo(
+        self, client: TestClient, session
+    ):
+        self._corrida(session, minutos_atras=2, cerrada=False)
+
+        cuerpo = client.get("/pipeline").json()
+
+        assert cuerpo["corriendo"] is True
+        assert cuerpo["huerfana"] is False
+
+    def test_una_corrida_abierta_y_vieja_es_huerfana_y_no_mentira(
+        self, client: TestClient, session
+    ):
+        """
+        Si el proceso muere a mitad de camino, su fila queda sin `fin` para
+        siempre. Preguntar solo por `fin IS NULL` haría que el motor dijera
+        "corriendo" eternamente; el ciclo es la vara que separa viva de
+        huérfana, y la huérfana se informa en vez de esconderse.
+        """
+        self._corrida(session, minutos_atras=120, cerrada=False)
+
+        cuerpo = client.get("/pipeline").json()
+
+        assert cuerpo["corriendo"] is False
+        assert cuerpo["huerfana"] is True
+
+    def test_las_anteriores_van_de_la_mas_nueva_a_la_mas_vieja(
+        self, client: TestClient, session
+    ):
+        for minutos in (60, 45, 30, 15):
+            self._corrida(session, minutos_atras=minutos)
+
+        cuerpo = client.get("/pipeline?historial=3").json()
+
+        assert len(cuerpo["anteriores"]) == 2
+        inicios = [cuerpo["ultima"]["inicio"]] + [
+            c["inicio"] for c in cuerpo["anteriores"]
+        ]
+        assert inicios == sorted(inicios, reverse=True)
+
+
+class TestElJobDejaEscritoLoQueHizo:
+    """
+    El pipeline programado registra su corrida.
+
+    No se prueba que los pasos corran —eso ya lo cubre `TestPipelineProgramado`—
+    sino que **quede escrito** lo que hicieron.
+    """
+
+    def _correr(self, session, fallan=()):
+        from sqlmodel import select
+
+        from src import main
+        from src.models import Corrida
+
+        with ExitStack() as pila:
+            for nombre in PASOS_DEL_PIPELINE:
+                efecto = (
+                    {"side_effect": RuntimeError("se cayo")}
+                    if nombre in fallan
+                    else {"return_value": {"ok": True}}
+                )
+                pila.enter_context(patch.object(main, nombre, **efecto))
+            pila.enter_context(patch.object(main, "get_engine"))
+            pila.enter_context(
+                patch.object(main, "Session", return_value=_SesionPrestada(session))
+            )
+            pila.enter_context(patch.object(main, "enviar_alerta"))
+            main._job_ingesta_programada()
+
+        return session.exec(select(Corrida)).all()
+
+    def test_registra_un_paso_por_cada_paso_del_pipeline(self, session):
+        """
+        **La guarda contra el olvido.** Se cuenta contra `PASOS_DEL_PIPELINE`,
+        la misma lista que ya usa `TestPipelineProgramado`, así que un paso
+        nuevo que no quede registrado hace fallar esto en vez de desaparecer
+        del historial en silencio.
+        """
+        corridas = self._correr(session)
+
+        assert len(corridas) == 1
+        assert len(corridas[0].pasos) == len(PASOS_DEL_PIPELINE)
+
+    def test_un_paso_que_falla_queda_en_None_y_no_ausente(self, session):
+        """
+        `None` es "se intentó y no salió"; ausente sería "no llegó a correr".
+        Son estados distintos y el historial tiene que poder separarlos.
+        """
+        corridas = self._correr(session, fallan={"ingerir_todos_los_medios"})
+
+        pasos = corridas[0].pasos
+        assert pasos["ingesta"] is None
+        assert pasos["vectorización"] == {"ok": True}
+
+    def test_cierra_la_corrida_con_su_duracion_y_utilizacion(self, session):
+        corridas = self._correr(session)
+
+        corrida = corridas[0]
+        assert corrida.fin is not None
+        assert corrida.duracion_segundos is not None and corrida.duracion_segundos >= 0
+        assert corrida.utilizacion is not None
+
+    def test_la_corrida_queda_escrita_aunque_un_paso_reviente(self, session):
+        """
+        La fila se abre ANTES del primer paso justamente para esto: una corrida
+        que se cae a mitad de camino igual deja rastro de que ocurrió.
+        """
+        corridas = self._correr(session, fallan={"sintetizar_pendientes"})
+
+        assert len(corridas) == 1
+        assert corridas[0].pasos["síntesis"] is None
+
+
 class TestLaSuiteNoPuedeGastarCuota:
     """
     La red de seguridad de `conftest.sin_credencial_de_ia`, que no la cubre

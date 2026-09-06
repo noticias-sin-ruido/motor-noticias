@@ -10,7 +10,7 @@ La 1.1.0 cerró **los puntos 1, 2, 10 y 12** del backlog de abajo: segunda vía 
 
 **El punto 3 se cerró el 03/09/2026** (el alta de medios la hace el operador): `GET/POST/PATCH /medios`, con sondeo del feed antes de aceptar y baja reversible. El roster deja de ser del repo — aunque `seed_medios.py` sobrevive como datos de ejemplo.
 
-**Siguiente:** sin definir. Los candidatos son el punto 13 (entidades HTML, barato y visible para el lector), el 11 (la URL del webhook la configura el operador) y el 4 (el cuadrático de `agrupar_pendientes`, que todavía no lo dispara nada).
+**Siguiente:** el **punto 14** (la app de escritorio del operador), diseñado el 06/09/2026 y arrancando por los cuatro endpoints que le faltan al motor. Detrás quedan el punto 13 (entidades HTML, barato y visible para el lector), el 11 (la URL del webhook la configura el operador) y el 4 (el cuadrático de `agrupar_pendientes`, que todavía no lo dispara nada).
 
 **Pendiente operativo, fuera del código:** elegir dónde se despliega (VPS pago vs. capa gratuita) y armar el `.env` de producción con la `MODELO_API_KEY` real y la `WEBHOOK_URL` del back-end — hoy apunta a `localhost`.
 
@@ -375,3 +375,30 @@ Lo destapó el punto 12 en su primera corrida con logs: una síntesis tituló *"
 Es chico en volumen pero **sale publicado**: entra al prompt como evidencia, el modelo lo copia tal cual al título del ángulo, y de ahí va al back-end. Vale medir primero cuál de las dos vías (el `content:encoded` del feed o `trafilatura`) lo deja pasar, antes de agregar un `html.unescape` a ciegas en los dos lados.
 
 Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el lector final.
+
+### 14. La app de escritorio del operador — la cabina del motor
+
+**Diseñada el 06/09/2026** en una sesión de grillado completa; ninguna línea escrita todavía. Las decisiones, con lo que se evaluó y se descartó, están en `change_logs.md`.
+
+**Qué es.** Una app Windows, para un solo operador, que **maneja el motor en vez de empaquetarlo**: prende y apaga los contenedores que ya existen y le habla a `localhost:8000`. Sin hosting, sin nada siempre activo, sin tocar pgvector ni empaquetar los 1,8 GB del `.venv`.
+
+**Por qué existe, más allá de 6-bis.** Los puntos **2**, **3**, **9** y **11** tienen todos la misma forma — *"esto lo decide el operador, no el `.env`"*. Hoy decidir significa editar un archivo y reiniciar un contenedor. La app es lo que vuelve usable esa tesis, y es el consumidor natural de los dos puntos que siguen abiertos.
+
+**La v1 hace cuatro cosas**, y sacar cualquiera deja de ser una sala de control: ver los clusters con su estado y si ya tienen síntesis · sintetizar uno eligiendo modelo · leer lo que salió · ver en qué anda el pipeline. Dos pantallas cohesivas: la lista de trabajo y el feed de lectura.
+
+**Stack**: Tauri (UI en React, shell mínimo en Rust), solo Windows. Vive **dentro de este repo**, con tres condiciones: CI separada por paths, docs de la app en `app/` y no en `specs/`, y el contrato de endpoints documentado y sostenido por un test.
+
+**Ciclo de vida**: minimizar deja el pipeline vivo; cerrar lo detiene. Con la consecuencia medida escrita al lado — **apagado más de ~4 h se empieza a perder La Nación de forma permanente**, porque su feed se da vuelta en ese plazo.
+
+#### Lo que hay que construir en el motor primero, y sin lo cual la app no existe
+
+- [x] **`GET /sintesis`** ✅ — lista resumida, con **paginación por cursor** sobre `(fecha_generacion, id)`, más `?cluster_id=` y `?entregado=`. El cursor es opaco a propósito, y un cursor mal formado es 422.
+- [x] **`GET /sintesis/{id}`** ✅ — el detalle completo, con la comparativa y las fuentes.
+- [x] **Tabla `corrida`** ✅ — una fila por corrida, pasos en `jsonb`, migración `b963fe84825f` aplicada contra la base real. La fila se abre antes del primer paso, así una corrida que muere igual deja rastro.
+- [x] **`GET /pipeline`** ✅ — última corrida, si hay una en curso y las previas. `corriendo` no sale solo de `fin IS NULL`: una corrida abierta y vieja se informa como `huerfana` en vez de mentir.
+
+**Los cuatro cerrados el 06/09/2026**, con 18 tests nuevos y 6 mutaciones detectadas. Detalle en `change_logs.md`. El motor pasó de 16 a 19 endpoints y ya sabe devolver lo que produce y decir en qué anda.
+
+#### Lo que queda deliberadamente afuera de la v1
+
+La consola completa del operador —medios, modelos, alertas, webhook— que es lo que absorbería los puntos 9 y 11. Llega cuando la v1 demuestre que se usa. Y el instalador que empaquete el motor entero, que costaría sacar pgvector: si algún día hace falta, la UI ya va a estar hecha.

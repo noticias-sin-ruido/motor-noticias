@@ -21,6 +21,11 @@ from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
 from .models import Adaptador, Cluster, Medio, ModeloIA
 from .services.alerts import enviar_alerta
+from .services.corridas import (
+    cerrar_corrida,
+    estado_del_pipeline,
+    iniciar_corrida,
+)
 from .services.medios import (
     FeedInservible,
     sondear as sondear_medio,
@@ -42,7 +47,13 @@ from .services.clustering import (
 )
 from .services.ingestion import ingerir_todos_los_medios
 from .services.purga import purgar_cuerpos_vencidos
-from .services.search import buscar_noticias_similares, listar_clusters
+from .services.search import (
+    CursorInvalido,
+    buscar_noticias_similares,
+    detalle_de_sintesis,
+    listar_clusters,
+    listar_sintesis,
+)
 from .services.synthesis import (
     _RESOLVER,
     SintesisBloqueada,
@@ -133,6 +144,13 @@ MAX_LARGO_URL = 2048
 # (500 copias del mismo feed en un solo POST).
 MAX_FEEDS_POR_MEDIO = 20
 
+# Largo máximo del cursor de paginación.
+#
+# Es un `fecha|id` en base64 -- unos 40 caracteres. 200 deja aire de sobra y
+# cierra la puerta a que alguien mande medio megabyte por la query string,
+# que es la misma cota que la tanda 3 le puso a todo lo que entra por la API.
+MAX_LARGO_CURSOR = 200
+
 
 scheduler = AsyncIOScheduler()
 
@@ -198,20 +216,34 @@ def _avisar_corrida_perdida(evento) -> None:
     hilo.start()
 
 
-def _correr_paso(session: Session, nombre: str, funcion: Callable) -> Optional[dict]:
+def _correr_paso(
+    session: Session,
+    nombre: str,
+    funcion: Callable,
+    registro: Optional[Dict[str, Any]] = None,
+) -> Optional[dict]:
     """
     Corre un paso del pipeline. Si falla, avisa y devuelve None sin cortar.
 
     El `rollback()` no es opcional: después de una excepción de base la sesión
     queda inutilizable, y sin él los pasos siguientes fallarían en cascada por
     un motivo distinto al original — que es lo peor posible para diagnosticar.
+
+    **`registro` es el dict de la corrida**, y anotar acá y no en cada llamada
+    es lo que hace que un paso nuevo no pueda quedar fuera del historial por
+    olvido. Un paso que falló queda como `None`, que es distinto de un paso
+    ausente: `None` es "se intentó y no salió", ausente es "no llegó a correr".
     """
     try:
         resultado = funcion(session)
         logger.info(f"{nombre}: {resultado}")
+        if registro is not None:
+            registro[nombre] = resultado
         return resultado
     except Exception as error:
         session.rollback()
+        if registro is not None:
+            registro[nombre] = None
         logger.exception(f"Falló el paso '{nombre}' del pipeline")
         enviar_alerta(
             asunto=f"[Sin Ruido] Falló el paso '{nombre}' del pipeline",
@@ -240,17 +272,27 @@ def _job_ingesta_programada() -> None:
     logger.info(f"=== Pipeline arranca {arranque:%d/%m %H:%M:%S} (UTC-3) ===")
 
     with Session(get_engine()) as session:
-        _correr_paso(session, "ingesta", ingerir_todos_los_medios)
-        _correr_paso(session, "vectorización", vectorizar_pendientes)
+        # La fila se abre ANTES del primer paso, así una corrida que muere a
+        # mitad de camino igual deja rastro. Se guarda el id y no el objeto:
+        # `_correr_paso` hace `rollback()` cuando un paso falla, y sostener una
+        # fila viva a través de eso es la trampa del `expunge` que este repo ya
+        # documentó dos veces. Ver `services/corridas.iniciar_corrida`.
+        corrida_id = iniciar_corrida(session)
+        pasos: Dict[str, Any] = {}
+
+        _correr_paso(session, "ingesta", ingerir_todos_los_medios, pasos)
+        _correr_paso(session, "vectorización", vectorizar_pendientes, pasos)
 
         # El cierre va ANTES del agrupamiento para que los clusters vencidos no
         # sigan capturando noticias nuevas en esta misma corrida.
-        _correr_paso(session, "cierre de clusters", cerrar_clusters_vencidos)
-        _correr_paso(session, "agrupamiento", agrupar_pendientes)
+        _correr_paso(session, "cierre de clusters", cerrar_clusters_vencidos, pasos)
+        _correr_paso(session, "agrupamiento", agrupar_pendientes, pasos)
 
         # La fusión va antes de la síntesis: primero se arma todo y recién ahí
         # se consolidan los clusters que quedaron describiendo el mismo hecho.
-        fusion = _correr_paso(session, "fusión de clusters", fusionar_clusters_duplicados)
+        fusion = _correr_paso(
+            session, "fusión de clusters", fusionar_clusters_duplicados, pasos
+        )
 
         # Es el único paso que condiciona a otro. Sintetizar sin haber
         # consolidado publicaría dos veces el mismo hecho, y una publicación ya
@@ -258,24 +300,30 @@ def _job_ingesta_programada() -> None:
         if fusion is None:
             logger.error("Se omite la síntesis porque falló la fusión de clusters")
         else:
-            _correr_paso(session, "síntesis", sintetizar_pendientes)
+            _correr_paso(session, "síntesis", sintetizar_pendientes, pasos)
 
         # La entrega sí corre igual, porque es un barrido de todo lo pendiente y
         # no un envío de lo recién generado: lo que quedó sin entregar de
         # corridas anteriores no tiene por qué esperar a que se arregle la
         # fusión. Por lo mismo tampoco necesita un job de reintento aparte.
-        _correr_paso(session, "entrega al backend", entregar_pendientes)
+        _correr_paso(session, "entrega al backend", entregar_pendientes, pasos)
 
         # Al final a propósito: nada de lo que hizo esta corrida depende de que
         # la purga haya pasado antes. Idempotente como el resto — una noticia
         # ya purgada no vuelve a tocarse — así que corre todos los ciclos y no
         # necesita su propio disparador.
-        _correr_paso(session, "purga de cuerpos", purgar_cuerpos_vencidos)
+        _correr_paso(session, "purga de cuerpos", purgar_cuerpos_vencidos, pasos)
 
     fin = ahora_local()
     duracion = (fin - arranque).total_seconds()
     intervalo = settings.INGEST_INTERVAL_MINUTES * 60
     utilizacion = duracion / intervalo
+
+    # **El registro va acá y no adentro del `with`**: la utilización recién se
+    # conoce cuando la sesión de los pasos ya cerró, así que se abre una propia
+    # y corta. Que falle no puede tumbar la corrida -- ver `cerrar_corrida`.
+    with Session(get_engine()) as session:
+        cerrar_corrida(session, corrida_id, pasos, duracion, utilizacion)
 
     # La utilización se loguea en cada corrida, no solo cuando molesta: es el
     # dato con el que se calibra el intervalo, y para eso hacen falta las
@@ -715,6 +763,101 @@ def clusters(
     """Lista los clusters (eventos) con sus noticias y los medios que los cubrieron."""
     resultados = listar_clusters(session, estado=estado, limite=limite)
     return {"status": "ok", "cantidad": len(resultados), "clusters": resultados}
+
+
+# --- Lectura de las síntesis (backlog punto 14) -----------------------------
+#
+# Prerrequisito de la app de escritorio: hasta acá el motor no sabía devolver
+# lo que produce. Las síntesis salían **solo** empujadas por el webhook, así
+# que no había forma de mirar un ángulo sin ir a la base a mano.
+
+
+@app.get("/sintesis")
+def sintesis(
+    limite: int = Query(20, ge=1, le=100),
+    cursor: Optional[str] = Query(
+        None, max_length=MAX_LARGO_CURSOR,
+        description="El campo `siguiente` de una respuesta anterior",
+    ),
+    cluster_id: Optional[int] = Query(None, ge=1, le=MAX_ID),
+    entregado: Optional[bool] = Query(
+        None, description="Filtra por si ya se entregó al back-end"
+    ),
+    session: Session = Depends(get_session),
+):
+    """
+    Las síntesis producidas, de la más reciente a la más vieja.
+
+    **Resumidas**: título, tópicos, medios y estado de entrega. El contenido
+    —resumen, puntos clave y comparativa— se pide por `GET /sintesis/{id}`,
+    porque traer la comparativa completa de veinte ítems para elegir uno es
+    pagar la lectura entera para tomar una decisión.
+
+    **Paginación por cursor.** Se toma el campo `siguiente` de una respuesta y
+    se manda tal cual en la siguiente llamada; cuando viene `null`, no hay más.
+    No es `offset` porque el scheduler inserta síntesis nuevas arriba cada 15
+    minutos, y con offset la página 2 repetiría lo que ya se vio.
+    """
+    try:
+        resultado = listar_sintesis(
+            session,
+            limite=limite,
+            cursor=cursor,
+            cluster_id=cluster_id,
+            entregado=entregado,
+        )
+    except CursorInvalido as error:
+        # 422 y no 500: el cursor es una entrada de quien llama, así que uno
+        # mal formado es un pedido inválido y no algo que se rompió acá.
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+
+    return {"status": "ok", "cantidad": len(resultado["sintesis"]), **resultado}
+
+
+@app.get("/sintesis/{sintesis_id}")
+def sintesis_detalle(
+    sintesis_id: int = Path(..., ge=1, le=MAX_ID),
+    session: Session = Depends(get_session),
+):
+    """
+    Una síntesis entera: su comparativa por medio y las notas que la respaldan.
+
+    Es lo único que justifica traer la comparativa completa — acá se está
+    leyendo una, no eligiendo entre veinte.
+    """
+    detalle = detalle_de_sintesis(session, sintesis_id)
+    if detalle is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detalle": "No existe esa síntesis"},
+        )
+    return {"status": "ok", "sintesis": detalle}
+
+
+@app.get("/pipeline")
+def pipeline(
+    historial: int = Query(
+        5, ge=1, le=50, description="Cuántas corridas anteriores devolver"
+    ),
+    session: Session = Depends(get_session),
+):
+    """
+    En qué anda el pipeline: si hay algo corriendo, la última corrida y las previas.
+
+    **El otro faltante que destapó el punto 14.** `GET /` dice si el motor está
+    vivo y si la base responde, pero nada del scheduler: ni cuándo corrió por
+    última vez, ni qué produjo. Una sala de control que no puede mostrar
+    "última corrida hace 12 min, 6 clusters sintetizados" está ciega justo en
+    lo que la hace sala de control.
+
+    `corriendo` no sale de preguntar solo si la última quedó sin cerrar: una
+    corrida abierta que quedó de un proceso que murió diría "corriendo" para
+    siempre. Se exige además que sea reciente, con el ciclo como vara, y la
+    otra situación se informa aparte en `huerfana` en vez de esconderla.
+    """
+    return {"status": "ok", **estado_del_pipeline(session, historial=historial)}
 
 
 # --- Modelos de IA configurables (backlog punto 2) --------------------------

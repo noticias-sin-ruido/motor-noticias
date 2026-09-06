@@ -8,6 +8,7 @@ Este módulo importa todos los modelos para que:
 from .medio import Medio
 from .noticia import Noticia
 from .cluster import Cluster
+from .corrida import Corrida
 from .sintesis import Sintesis, SintesisNoticia
 from .publicacion_redes import PublicacionRedes
 from .modelo_ia import Adaptador, ModeloIA, ModoEstructura
@@ -16,6 +17,7 @@ __all__ = [
     "Medio",
     "Noticia",
     "Cluster",
+    "Corrida",
     "Sintesis",
     "SintesisNoticia",
     "PublicacionRedes",

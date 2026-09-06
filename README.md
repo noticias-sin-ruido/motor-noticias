@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-775%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-793%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
@@ -180,7 +180,7 @@ Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opci
 
 ## API
 
-Dieciséis endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
+Diecinueve endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -194,6 +194,9 @@ Dieciséis endpoints. Los `POST` del pipeline son disparo manual de cada paso, q
 | `POST` | `/purge` | Borra el cuerpo de las noticias huérfanas vencidas. **Irreversible**. Acepta `?solo_contar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |
 | `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
+| `GET` | `/sintesis` | Las síntesis producidas, resumidas. Cursor + `?cluster_id=` y `?entregado=` |
+| `GET` | `/sintesis/{id}` | Una síntesis entera: comparativa por medio y fuentes |
+| `GET` | `/pipeline` | En qué anda el motor: última corrida, si hay una en curso y las previas |
 | `GET` | `/modelos` | Los modelos de IA configurados y cuál se está usando |
 | `POST` | `/modelos` | Da de alta un modelo **después de sondearlo** |
 | `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** — pero apagar no lo saca de la cadena de fallback si tiene credencial propia |
@@ -370,13 +373,13 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 775 tests
+pytest                                            # 793 tests
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
 ```
 
-**775 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+**793 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
 
 **Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 

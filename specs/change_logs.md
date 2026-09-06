@@ -2881,3 +2881,135 @@ Sumado a que la guarda del efecto 1 ahora exige `forzar=true` para repetir sin m
 ---
 
 Con esto **el bloque de amplificación de costo queda cerrado**: efecto 1 arreglado (guarda de material nuevo con `forzar`), efecto 3 corregido y arreglado (guarda de medios mínimos, incondicional), efecto 2 evaluado y descartado como defecto.
+
+### La app de escritorio del operador: qué es, y las decisiones que la definen (06/09/2026)
+
+Sesión de grillado completa antes de escribir una línea. Se documenta acá porque son decisiones estructurales que condicionan trabajo **en el motor**, no solo en la app.
+
+#### El reencuadre: "escritorio" significaba otra cosa
+
+El punto 6-bis dejó la interfaz fuera de alcance con la frase *"se construye cuando exista la app"*, y el plan original la había llamado "app de escritorio" contrastándola con *"una API que funciona alojada en un servidor y le pega a un back-end cada 15 minutos"*.
+
+Ese contraste era **atendido contra desatendido** —alguien mirando y decidiendo, contra el scheduler corriendo solo—, **no nativo contra web**. La segunda pregunta nunca se había hecho, y el nombre venía arrastrando una decisión que nadie había tomado. Se hizo explícita, y la respuesta terminó siendo nativa igual pero por un motivo distinto al que el nombre sugería: **no querer hostear nada siempre activo**.
+
+#### Lo que la app es
+
+La cabina del motor, para un solo operador. Arranca como **sala de control de síntesis** y queda estructurada para crecer a la consola completa.
+
+Eso último no es ambición: es un patrón que ya estaba en el backlog sin que nadie lo nombrara. Los puntos **2** (el modelo lo elige el operador), **3** (el alta de medios la hace el operador), **9** (el mail de alertas) y **11** (la URL del webhook) tienen todos la misma forma — *"esto lo decide el operador, no el `.env`"*. Hoy "decidir" significa editar un archivo y reiniciar un contenedor, o sea decidir de mentira. **La app es lo que vuelve real esa tesis.**
+
+#### Maneja el motor, no lo empaqueta
+
+La decisión más cara de la sesión, y se tomó con números medidos.
+
+Empaquetar el motor en un instalador único significa **~2 GB antes de escribir una línea de interfaz**: el `.venv` de este repo pesa 1,8 GB, con `torch` en 527 MB (lo arrastra `sentence-transformers`), `scipy` en 115 MB y el modelo de spaCy en 52 MB, más los 458 MB del modelo de embeddings que se baja en la primera corrida. Y hay un costo peor que el peso: **habría que sacar pgvector**, migrando a algo empaquetable como `sqlite-vec` — riesgo puro sobre lo único del sistema que no tiene plan B escrito.
+
+La alternativa elegida: la app **prende y apaga los contenedores que ya existen** y le habla a `localhost:8000`. Da exactamente lo que se pedía —local, sin hosting, sin nada siempre activo— y deja el motor tal como está, probado. Docker ya es dependencia de este entorno, así que no suma ninguna.
+
+**El empaquetado no se pierde como aprendizaje**: el shell chico es justamente lo que se empaqueta, y ahí se aprende instalador, ícono, bandeja y actualizaciones peleando contra el problema real y no contra 2 GB de dependencias de ML.
+
+#### Dos formas de cerrar, y por qué merece ser explícito
+
+**Minimizar** deja el pipeline vivo ingiriendo y guardando; **cerrar** lo detiene. Es una elección del operador y no un efecto secundario de dónde se hace clic.
+
+La razón está medida sobre las dos corridas del 05/09. Los feeds RSS no guardan historia, guardan las últimas N notas:
+
+| Medio | Capacidad del feed | Nuevas por hora | Se da vuelta en |
+|---|---|---|---|
+| La Nación | ~90 | 23 | **~4 h** |
+| TN | ~95 | 16 | ~6 h |
+| Ciudad Magazine | ~66 | 2 | días |
+
+**Apagado más de ~4 horas, se empieza a perder La Nación de forma permanente.** Ya pasó: el contenedor estuvo caído ~20 h y la primera corrida trajo 363 notas, prácticamente la capacidad completa de los siete feeds. Al ritmo medido de ~46/hora se habrían publicado unas 920, así que **se perdieron del orden de 550 notas** — estimado a partir de una hora de medición, no medido directamente.
+
+#### El stack, y por qué no el que ya había
+
+Se descartó **reusar el front público** (`Sin Ruido/front-end`, React + Vite + shadcn): es otro producto, con otro consumidor —le habla al back-end del otro equipo, no a este motor— y otro ciclo de vida.
+
+Se eligió **Tauri**: la UI en React, que es terreno conocido; el shell en Rust es mínimo (lanzar `docker compose`, un ícono en la bandeja), así que no es aprender Rust; y el instalador y el updater vienen resueltos, que es lo que se quería aprender bien hecho. Se descartó **Electron** por peso (~150 MB para un shell) y **Python + pywebview + PyInstaller** porque, aunque unifica el lenguaje con el motor, PyInstaller en Windows no trae updater y enseña más sufrimiento que empaquetado.
+
+**Solo Windows**, a propósito: es la máquina del único usuario, y multiplataforma sin un segundo usuario es costo sin demanda.
+
+#### Vive dentro de este repo, contra la recomendación inicial
+
+Se había recomendado un repo aparte, con un argumento real: `motor-noticias` es público y AGPL, describe un motor de servidor que otros pueden desplegar, y meterle una GUI personal de Windows le cambia lo que promete — sobre todo en `roadmap.md` y `change_logs.md`, que pasarían a mezclar decisiones del motor con decisiones de la interfaz.
+
+**Ganó el repo único**, y el argumento que lo dio vuelta es el *version skew*: la app consume endpoints que el motor define, y en dos repos un cambio de API la rompe sin que nadie avise. En uno, el cambio y su adaptación caen en el mismo commit. Para un desarrollador solo eso muerde todos los días; el problema de identidad del repo muerde solo cuando lo lee otro, y hoy no lo lee nadie.
+
+La objeción de CI —el motor corre `pytest` y `ruff` sobre Python, y Tauri mete Node y Rust— **se desarma con filtros por path**, que GitHub Actions soporta de fábrica.
+
+**Tres condiciones** para que la convivencia no degrade el repo: CI separada por paths, los docs de la app en `app/` y no en `specs/`, y el contrato de endpoints que la app consume documentado y sostenido por un test — el mismo criterio con el que `webhook_contract.md` fija lo que el back-end espera.
+
+#### Dos huecos del motor que la app destapó
+
+Buscando qué le puede pedir hoy una interfaz al motor aparecieron dos faltantes, y ninguno es menor:
+
+1. **El motor no sabe devolver sus propias síntesis.** De sus 16 endpoints, cuatro son `GET` y **ninguno devuelve un ángulo**: `listar_clusters` trae noticias y medios, no síntesis. Las síntesis salen del motor **solo empujadas por el webhook**. O sea que el modo paso a paso —elegir, sintetizar y **ver qué salió**— no se puede construir contra la API de hoy.
+2. **El motor no sabe en qué anda.** `GET /` devuelve salud, base, entorno y hora; nada del scheduler. Y no hay tabla de corridas: `_job_ingesta_programada` mide duración y utilización del ciclo, lo loguea, y ahí muere.
+
+#### Las decisiones sobre esos dos huecos
+
+**`GET /sintesis` propio, en vez de engordar `GET /clusters`.** Son preguntas distintas —qué hechos hay y quién los cubrió, contra qué se produjo— y las síntesis tienen filtros que un cluster no tiene: si se entregó, con qué modelo, cuántos intentos lleva. Antecedente: `_vista_publica` ya estableció que no todo lo que hay en la fila sale por la API.
+
+**Lista resumida más `GET /sintesis/{id}` para el detalle.** Una síntesis completa trae la comparativa entera, que son varios párrafos por medio; para una lista de veinte es demasiado. Es además la distinción que la pantalla necesita: una grilla para elegir y un panel para leer.
+
+**Paginación por cursor sobre `(fecha_generacion, id)`, no `offset`.** Con offset, el scheduler insertando arriba cada 15 minutos hace que la página 2 repita ítems ya vistos. Se aceptó además que **las síntesis nuevas aparecen al refrescar** y no se inyectan en vivo, lo que simplifica la UI y deja el cursor solo para paginar hacia atrás.
+
+**Tabla de corridas: una fila por corrida, con los pasos en `JSONB`.** Se descartó normalizar en `corrida` + `corrida_paso` porque las preguntas que existen son "la última" y "las últimas N", no "todas las veces que falló la vectorización" — y `JSONB` ya es el idioma de la casa (`puntos_clave`, `comparativa_enfoques`, `topicos`).
+
+La razón para persistir va más allá de la app: ese número **ya se calcula y hoy se tira**. `medir-antes-de-resolver` dice que el número medido tiene que quedar donde justifica la decisión, y la decisión que justifica —¿subir el intervalo?, ¿ya hacen falta los hilos por modelo?— hoy depende de que alguien lea logs.
+
+La contra que se aceptó: sacar series de adentro de un `JSONB` es incómodo. Quedó relativizada por un argumento del usuario que la debilita: la duración cruda depende de cuántos medios publicaron y cuánto, así que el número que serviría para graficar no es ése sino uno normalizado —segundos por cluster, hoy 9,2— y ése se deriva del JSON igual.
+
+#### La v1, y las dos pantallas
+
+La v1 hace cuatro cosas y ninguna es negociable hacia abajo: **ver los clusters con su estado y si ya tienen síntesis · sintetizar uno eligiendo modelo · leer lo que salió · ver en qué anda el pipeline**. Sacar cualquiera deja de ser una sala de control: sin ver el resultado no se decide nada, y sin el estado del pipeline no se sabe si lo que se mira está fresco.
+
+**Dos pantallas cohesivas, una responsabilidad cada una**: la lista de trabajo (mirar, decidir, disparar) y el feed de lectura (los ángulos en tarjetas, paginado). Se descartó una sola pantalla que hiciera las dos: son ritmos distintos, y mezclarlos da una que hace las dos a medias — el mismo error que se evitó del lado del motor al decidir que `GET /clusters` no cargue los ángulos.
+
+El feed nació de una pregunta del usuario —si servía una interfaz tipo Instagram— y la respuesta fue que encaja en la mitad de lectura y no en la de decisión: Instagram optimiza scroll sin fin ni orden estable, y una lista de trabajo quiere orden determinístico, filtros y una acción por fila.
+
+#### Autenticación
+
+El token se pega una vez y se guarda en el **Credential Manager de Windows**. Se descartó **no usar token** apoyándose en que la API liga a `127.0.0.1`: este repo ya decidió que el token existe, y saltearlo por comodidad sería desarmar una defensa que costó una tanda de auditoría. Se descartó también **leer el `.env` del motor**: es más cómodo y tiene el argumento de ser la misma máquina, pero mete ese archivo en el camino de un segundo programa — y es justamente el archivo que en este proyecto **ya se filtró una vez**, con una key de Groq que hubo que rotar.
+
+Además es lo más portable en el sentido que importa. No hace que el secreto viaje —el Credential Manager es por máquina y por usuario, y eso es correcto— pero **no depende de ninguna ruta del disco**, que es lo que rompe la alternativa de leer el `.env`. Y el crate `keyring` mapea la misma llamada a Credential Manager, Keychain y Secret Service, así que el día que deje de ser solo Windows el código no cambia.
+
+
+#### Los cuatro faltantes del motor, construidos (06/09/2026)
+
+Paso 2 del punto 14: sin esto la app no se puede construir, porque no habría contra qué. Los cuatro salieron de buscar qué le puede pedir hoy una interfaz al motor y encontrar que **no podía pedirle ni lo que produce ni en qué anda**.
+
+#### Leer las síntesis: `GET /sintesis` y `GET /sintesis/{id}`
+
+Van **dos y no uno**: una síntesis completa trae la comparativa entera —varios párrafos por medio— y en una lista de veinte eso es pagar la lectura completa para tomar una decisión. Es la misma distinción que hace la pantalla: una grilla para elegir, un panel para leer. El resumen deja afuera `resumen_neutro`, `puntos_clave` y `comparativa_enfoques` a propósito, y hay un test que lo sostiene.
+
+**El cursor es opaco** (base64 de `fecha|id`) y no un par de números legibles. Si se pudiera armar a mano, el criterio de orden quedaría congelado como parte del contrato; así, el día que cambie, cambia en un solo lugar.
+
+**La comparación va desarmada** —`fecha < f OR (fecha = f AND id < i)`— y no como tupla, porque la suite corre sobre SQLite y producción sobre Postgres, y la forma con tupla no se comporta igual en los dos.
+
+**Se pide un ítem de más** para saber si hay página siguiente sin contar la tabla entera; el de más no se devuelve, solo responde "¿hay más?".
+
+**Un cursor mal formado es 422 y no 500**: es una entrada de quien llama, no algo que se rompió del lado del motor. Mismo criterio que la tanda 3 aplicó a todo lo que entra por la API, con su cota de largo incluida (`MAX_LARGO_CURSOR`).
+
+De paso se corrigió el docstring de `search.py`, que decía ser solo búsqueda semántica cuando ya albergaba `listar_clusters`. Dejar un encabezado mintiendo es el problema de los siete comentarios que esta misma rama acababa de arreglar.
+
+#### Saber en qué anda: la tabla `corrida` y `GET /pipeline`
+
+**La fila se abre antes del primer paso y se completa al final.** Así una corrida que muere a mitad de camino igual deja rastro de que ocurrió — y de paso, `fin IS NULL` es la forma de saber si hay una en curso sin depender del estado en memoria de APScheduler, que se pierde en cada reinicio.
+
+**Pero `fin IS NULL` solo no alcanza, y ese es el detalle que importa.** Si el proceso muere, esa fila queda abierta para siempre y el motor diría "corriendo" eternamente. Así que `corriendo` exige además que la corrida sea **reciente**, con el ciclo configurado como vara, y el otro caso se informa aparte en `huerfana` en vez de esconderse: una corrida abierta y vieja es el síntoma de que el proceso se cayó, y eso vale saberlo.
+
+**`iniciar_corrida` devuelve el `id` y no la fila**, y es deliberado: entre la apertura y el cierre corren ocho pasos, y `_correr_paso` hace `rollback()` cuando uno falla. Sostener un objeto vivo a través de eso es exactamente la trampa del `expunge` que este archivo ya documentó dos veces y que costó un `DetachedInstanceError` en una corrida real. Un `int` no se expira.
+
+**El registro no puede tumbar el pipeline.** `cerrar_corrida` atrapa lo que sea y loguea: que no se pueda escribir la contabilidad es un problema, pero hacerlo explotar hacia arriba convertiría un fallo de observabilidad en un fallo de producción.
+
+**Anotar va adentro de `_correr_paso` y no en cada llamada**, que es lo que hace que un paso nuevo no pueda quedar fuera del historial por olvido. Y un paso que falla queda en `None`, que **no es un hueco**: `None` es "se intentó y no salió", ausente es "no llegó a correr". Son estados distintos y el historial tiene que poder separarlos.
+
+#### Verificación
+
+793 tests (18 nuevos), `ruff` limpio, `alembic check` sin operaciones pendientes. La migración se aplicó **contra la base real**: la tabla quedó con `pasos` en `jsonb` y su índice sobre `inicio`.
+
+**6 mutaciones y 6 detectadas**, en dos tandas. Las de las síntesis: cursor por `offset`, la lista devolviendo el contenido completo, y el cursor inválido reventando en vez de dar 422. Las del registro: `corriendo` mirando solo `fin IS NULL` sin la vara del ciclo, un paso fallido que no se registra, y la fila que no se abre al principio.
+
+**Un test propio que no probaba lo que decía.** `test_lo_que_entra_arriba_mientras_paginas_no_corre_la_pagina` —el que justifica haber elegido cursor sobre `offset`— **pasaba en verde con la mutación a `offset` puesta**. Dos causas, las dos del test: el helper nombraba los ángulos igual en cada tanda, así que la aserción por título no distinguía una repetición real; y las síntesis "nuevas" usaban la misma base horaria, así que no entraban realmente arriba. Corregido el helper, la mutación pasó a hacer caer los dos tests que le corresponden. Es el mismo patrón que esta rama viene persiguiendo, encontrado esta vez por la mutación y no por casualidad.
