@@ -2800,3 +2800,49 @@ Frena la repetición **accidental**, que es el modo de falla más probable. **No
 772 tests (4 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**, y cubren las dos direcciones del error: sacar la guarda entera, ignorar `forzar`, y aflojar el predicado de `>` a `>=` — que no bloquea de más sino de menos, y se caza igual.
 
 El test que importa no mockea `sintetizar_cluster` sino la frontera de red, porque lo que se prueba es **cuántas veces se llega de verdad al proveedor**: con el servicio mockeado, el conteo sería el del mock.
+
+#### El efecto 3 no era lo que yo había dicho, y la corrección importa más que el arreglo (05/09/2026)
+
+Segundo de los tres efectos de la amplificación de costo. **Lo primero que hay que decir es que mi caracterización anterior estaba mal**, y estaba mal por el mismo error de método que este archivo ya documenta cuando lo cometió un revisor externo.
+
+**Lo que había afirmado:** que un cluster `descartado` podía sintetizarse y llegar al back-end, contradiciendo la regla que define el producto — sin dos voces no hay enfoques que comparar.
+
+**Por qué era falso.** La sonda que lo "probaba" construía un cluster `descartado` **con dos medios**, y ése es un estado que el motor no puede producir. La cadena de hechos, leída en la fuente:
+
+1. `descartado` se pone **solo** cuando `medios_distintos < MIN_MEDIOS_CLUSTER` (`cerrar_clusters_vencidos`). Un descartado tiene, por definición, menos de dos medios.
+2. El agrupamiento solo asigna noticias a clusters **`abierto`** (`_cargar_clusters_abiertos`). Un cluster ya cerrado queda **congelado**: nunca puede sumar un segundo medio.
+3. Por lo tanto un descartado tiene menos de dos medios para siempre, y `_persistir` descarta todo ángulo nuevo que no cubra el mínimo.
+
+**Verificado con una sonda sobre un descartado realista** —un solo medio, dos notas de ese medio—: 1 llamada al proveedor, `creados: 0`, `descartados: 1`, **cero filas de `Sintesis`**. Las defensas aguantan en dos capas: `_comparativa_validada` tiró el medio alucinado que el modelo inventó, y `_persistir` descartó el ángulo por tener un solo medio.
+
+Es exactamente el error que se le objetó al tercer par de ojos en la tanda anterior: **armar un setup que no puede existir y reportar lo que ese setup produce**. Que haya vuelto a pasar, del lado propio esta vez, es el argumento más fuerte a favor de la disciplina de reproducir cada hallazgo antes de darlo por bueno.
+
+#### Lo que sí quedaba, más chico y real
+
+> El endpoint gasta una llamada al proveedor en un cluster que **estructuralmente no puede producir nada**, y eso se sabe antes de llamar.
+
+Dos cosas lo achicaban todavía más: la guarda del efecto 1 ya lo había acotado de N llamadas a **una** —la segunda queda bloqueada por falta de material nuevo—, y nadie lo pisa por accidente, porque hay que apuntarle por `id` a propósito. En la base real hay 87 clusters descartados y ninguno se sintetizó nunca.
+
+Se arregló igual, y el criterio para hacerlo fue el que la skill `medir-antes-de-resolver` acaba de incorporar: **el arreglo es más chico que el problema**. Es una comprobación gratuita, con datos ya en memoria, que expresa una regla que el producto ya tiene.
+
+#### La guarda: por medios, no por estado
+
+Se comprueba **`medios_distintos < MIN_MEDIOS_CLUSTER`**, no `estado == descartado`. Cubre más con menos: además del descartado atrapa un `abierto` de un solo medio al que alguien le apunte por `id`, expresa la regla real en vez de un proxy, y no depende de que los estados se sigan usando como hoy.
+
+**Es incondicional: `forzar=true` no la saltea.** `forzar` significa "re-sintetizá aunque no haya material nuevo", no "gastá en algo imposible". Dejarla pasar solo habilitaría desperdiciar la llamada a mano, sin ningún caso de uso detrás.
+
+**Y no se pierde nada al cortar.** Un cluster que no llega al mínimo tampoco puede tener una síntesis previa que actualizar: para crearla habría necesitado el mínimo, y a un cluster no se le quitan noticias. Así que la rama de actualización de `_persistir` —la única que no aplica este filtro— no es una excepción a considerar.
+
+El predicado vive en `clustering.alcanza_el_minimo_de_medios` y lo usan los dos lados: `cerrar_clusters_vencidos`, para decidir `procesado` contra `descartado`, y el endpoint. **Va en `clustering` y no en `synthesis` por la dirección de los imports**: `synthesis` ya depende de `clustering`, así que al revés sería circular.
+
+#### Un fixture irrealista que la guarda destapó
+
+Los cinco tests de cableado de `TestSynthesizeDeUnCluster` empezaron a fallar, y el motivo era del fixture y no de la guarda: `_cluster()` creaba un cluster **sin ninguna noticia**. Servía para probar el cableado porque el servicio estaba mockeado, pero es un estado que no puede producir nada, así que el endpoint ahora corta antes de llegar al mock. Se hizo el fixture realista —dos medios con una nota cada uno— en vez de aflojar la guarda.
+
+Es la contracara del error de arriba: un setup imposible tapaba un hallazgo en un caso, y en el otro hacía pasar un test que probaba algo que no puede ocurrir.
+
+#### Verificación
+
+775 tests (3 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**: sacar la guarda, hacer que `forzar` la saltee, y aflojar el predicado de `>=` a `>`.
+
+Los tests cuentan **llamadas reales al proveedor** y fallan si hay alguna: el mock de `llamar_modelo` levanta `AssertionError` si lo tocan.

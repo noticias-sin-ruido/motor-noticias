@@ -394,6 +394,27 @@ def fusionar_clusters_duplicados(session: Session) -> dict:
     return stats
 
 
+def alcanza_el_minimo_de_medios(cluster: Cluster) -> bool:
+    """
+    Si este cluster tiene voces suficientes para publicar algo.
+
+    Es **la regla que define el producto** —"sin dos voces no hay enfoques que
+    comparar"— expresada una sola vez. La preguntan dos lados por motivos
+    distintos: `cerrar_clusters_vencidos`, para decidir si un cluster que vence
+    queda `procesado` o `descartado`; y `POST /clusters/{id}/synthesize`, para
+    no gastar una llamada al proveedor en un cluster que no puede producir
+    ningún ángulo publicable.
+
+    Vive acá y no en `synthesis` por la dirección de los imports: `synthesis`
+    ya depende de este módulo, así que al revés sería circular.
+
+    **Un cluster que no la cumple no la va a cumplir nunca**: el agrupamiento
+    solo asigna noticias a clusters `abierto` (ver `_cargar_clusters_abiertos`),
+    así que uno ya cerrado queda congelado con los medios que tenía.
+    """
+    return len({n.medio_id for n in cluster.noticias}) >= settings.MIN_MEDIOS_CLUSTER
+
+
 def cerrar_clusters_vencidos(session: Session) -> dict:
     """
     Cierra los clusters abiertos que ya cumplieron su ventana de vida.
@@ -420,9 +441,7 @@ def cerrar_clusters_vencidos(session: Session) -> dict:
     stats = {"evaluados": len(vencidos), "procesados": 0, "descartados": 0}
 
     for cluster in vencidos:
-        medios_distintos = len({n.medio_id for n in cluster.noticias})
-
-        if medios_distintos >= settings.MIN_MEDIOS_CLUSTER:
+        if alcanza_el_minimo_de_medios(cluster):
             cluster.estado = ESTADO_PROCESADO
             stats["procesados"] += 1
         else:

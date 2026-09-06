@@ -657,10 +657,47 @@ class TestSynthesizeDeUnCluster:
     """
 
     def _cluster(self, session) -> int:
+        """
+        Un cluster **publicable**: dos medios distintos con una nota cada uno.
+
+        Antes era un cluster pelado, sin ninguna noticia. Funcionaba para
+        probar el cableado porque el servicio estaba mockeado, pero es un
+        estado que no puede producir nada — y cuando el endpoint aprendió a no
+        gastar una llamada en un cluster que no llega al mínimo de medios,
+        estos tests empezaron a cortar antes de llegar al mock. El fixture
+        estaba irrealista, no la guarda.
+        """
+        from datetime import datetime
+
+        from src.models import Medio, Noticia
+
         cluster = Cluster(titulo_evento="Un evento", estado="abierto")
         session.add(cluster)
         session.commit()
         session.refresh(cluster)
+
+        for i in range(2):
+            medio = Medio(
+                nombre=f"MedioCableado{i}",
+                url_base=f"https://cableado{i}.test",
+                feeds_rss=[f"https://cableado{i}.test/rss"],
+            )
+            session.add(medio)
+            session.commit()
+            session.refresh(medio)
+            session.add(
+                Noticia(
+                    medio_id=medio.id,
+                    cluster_id=cluster.id,
+                    titulo=f"Nota {i}",
+                    url=f"https://cableado{i}.test/{i}",
+                    guid=f"guid-cableado-{i}",
+                    contenido_limpio="Cuerpo suficientemente largo de la nota.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+        session.commit()
         return cluster.id
 
     def test_le_pasa_ese_cluster_y_devuelve_su_resultado(
@@ -1028,6 +1065,129 @@ class TestLaGuardaContraLaAmplificacionDeCosto:
         assert segunda.status_code == 200
         assert cuenta["n"] == 2
         assert segunda.json()["sintetizado"] is not False
+
+
+class TestNoGastaEnUnClusterQueNoPuedePublicar:
+    """
+    Un cluster con menos de `MIN_MEDIOS_CLUSTER` medios distintos no llega al
+    proveedor: no puede producir ningún ángulo publicable.
+
+    **La primera versión de este hallazgo estaba mal, y por una sonda mal
+    armada.** Decía que un cluster `descartado` podía sintetizarse y llegar al
+    back-end contradiciendo la regla de las dos voces. La sonda que lo
+    "probaba" construía un descartado **con dos medios**, que es un estado que
+    el motor no puede producir: `descartado` se pone solo cuando los medios
+    distintos son menos que el mínimo, y el agrupamiento no asigna noticias a
+    clusters cerrados, así que uno descartado queda congelado con un medio.
+
+    Con un descartado realista las defensas aguantan —`_persistir` descarta
+    todos los ángulos— y no se crea ninguna fila. Lo que quedaba era otra
+    cosa, más chica y real: **se pagaba una llamada al proveedor para no
+    obtener nada**, y eso se sabe antes de llamar.
+    """
+
+    def _cluster_de_un_solo_medio(self, session, estado="descartado"):
+        from datetime import datetime
+
+        from src.models import Medio, Noticia
+
+        session.add(
+            ModeloIA(nombre="titular", adaptador=Adaptador.GEMINI, modelo="m", activo=True)
+        )
+        medio = Medio(
+            nombre="Unico",
+            url_base="https://unico.test",
+            feeds_rss=["https://unico.test/rss"],
+        )
+        session.add(medio)
+        session.commit()
+        session.refresh(medio)
+
+        cluster = Cluster(titulo_evento="Hecho de un solo medio", estado=estado)
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        for i in range(2):
+            session.add(
+                Noticia(
+                    medio_id=medio.id,
+                    cluster_id=cluster.id,
+                    titulo=f"Nota {i}",
+                    url=f"https://unico.test/{i}",
+                    guid=f"guid-unico-{i}",
+                    contenido_limpio="Cuerpo suficientemente largo de la nota.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+        session.commit()
+        return cluster
+
+    def test_un_descartado_no_llega_al_proveedor(self, client: TestClient, session):
+        """Dos notas, un solo medio: ni siquiera se intenta."""
+        from src.services import synthesis
+
+        cluster = self._cluster_de_un_solo_medio(session)
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            raise AssertionError("no tendria que haberse llamado al proveedor")
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            respuesta = client.post(f"/clusters/{cluster.id}/synthesize")
+
+        assert respuesta.status_code == 200
+        assert cuenta["n"] == 0
+        assert respuesta.json() == {
+            "status": "ok",
+            "cluster_id": cluster.id,
+            "sintetizado": False,
+            "motivo": "sin_medios_suficientes",
+        }
+
+    def test_forzar_no_lo_saltea(self, client: TestClient, session):
+        """
+        `forzar` significa "aunque no haya material nuevo", no "gasta en algo
+        imposible". Dejarlo pasar solo habilitaria desperdiciar la llamada.
+        """
+        from src.services import synthesis
+
+        cluster = self._cluster_de_un_solo_medio(session)
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            raise AssertionError("no tendria que haberse llamado al proveedor")
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            respuesta = client.post(f"/clusters/{cluster.id}/synthesize?forzar=true")
+
+        assert respuesta.status_code == 200
+        assert cuenta["n"] == 0
+        assert respuesta.json()["motivo"] == "sin_medios_suficientes"
+
+    def test_tampoco_uno_abierto_de_un_solo_medio(self, client: TestClient, session):
+        """
+        La guarda mira los medios y no el estado, asi que cubre tambien un
+        `abierto` al que alguien le apunte por id -- que el chequeo por
+        `estado == descartado` habria dejado pasar.
+        """
+        from src.services import synthesis
+
+        cluster = self._cluster_de_un_solo_medio(session, estado="abierto")
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            raise AssertionError("no tendria que haberse llamado al proveedor")
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            respuesta = client.post(f"/clusters/{cluster.id}/synthesize")
+
+        assert cuenta["n"] == 0
+        assert respuesta.json()["motivo"] == "sin_medios_suficientes"
 
 
 class TestLaSuiteNoPuedeGastarCuota:

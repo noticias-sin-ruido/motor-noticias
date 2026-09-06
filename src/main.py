@@ -36,6 +36,7 @@ from .services.proveedores import (
 )
 from .services.clustering import (
     agrupar_pendientes,
+    alcanza_el_minimo_de_medios,
     cerrar_clusters_vencidos,
     fusionar_clusters_duplicados,
 )
@@ -530,6 +531,16 @@ def synthesize_cluster(
     acto explícito, así que la fricción no la paga quien usa la app sino quien
     escribe la URL a mano — que es justo donde conviene que se note.
 
+    **Y no sintetiza un cluster que no llega a `MIN_MEDIOS_CLUSTER` medios
+    distintos, ni con `forzar`.** Ése no puede producir ningún ángulo
+    publicable —`_persistir` los descarta a todos— así que la llamada se
+    pagaría para no obtener nada. Es la regla del producto (sin dos voces no
+    hay enfoques que comparar) aplicada donde es gratis en vez de después de
+    pagar.
+
+    Las dos respuestas que cortan llevan `sintetizado: false` y un `motivo`
+    cerrado: `sin_medios_suficientes` o `sin_material_nuevo`.
+
     Sin `modelo_id` usa el activo. Con él, ése y solo ése: no hay cadena de
     fallback cuando la elección fue explícita.
     """
@@ -539,6 +550,30 @@ def synthesize_cluster(
             status_code=404,
             content={"status": "error", "detalle": "No existe ese cluster"},
         )
+
+    # **Incondicional, y no respeta `forzar`.** Un cluster con menos de
+    # `MIN_MEDIOS_CLUSTER` medios distintos no puede producir ningún ángulo
+    # publicable: `_persistir` los descarta a todos, así que la llamada al
+    # proveedor se paga para no obtener nada. Verificado con sonda sobre un
+    # cluster `descartado` real: 1 llamada, 0 filas de `Sintesis`.
+    #
+    # `forzar` significa "re-sintetizá aunque no haya material nuevo", no
+    # "gastá en algo imposible", así que acá no aplica: dejarlo pasar solo
+    # habilitaría desperdiciar la llamada a mano, sin ningún caso de uso
+    # detrás.
+    #
+    # **Y no se pierde nada al cortar**: un cluster que no llega al mínimo
+    # tampoco puede tener una síntesis previa que actualizar —para crearla
+    # habría necesitado el mínimo, y a un cluster no se le quitan noticias—,
+    # así que la rama de actualización de `_persistir`, que no aplica este
+    # filtro, no es una excepción a considerar.
+    if not alcanza_el_minimo_de_medios(cluster):
+        return {
+            "status": "ok",
+            "cluster_id": cluster_id,
+            "sintetizado": False,
+            "motivo": "sin_medios_suficientes",
+        }
 
     # **200 y no 4xx**: no falló nada, el motor decidió no gastar. Un 4xx haría
     # que una interfaz muestre un error ante una condición perfectamente normal.
