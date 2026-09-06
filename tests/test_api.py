@@ -678,7 +678,9 @@ class TestSynthesizeDeUnCluster:
             respuesta = client.post(f"/clusters/{cid}/synthesize")
 
         assert respuesta.status_code == 200
-        assert respuesta.json() == {"status": "ok", "cluster_id": cid, **resultado}
+        assert respuesta.json() == {
+            "status": "ok", "cluster_id": cid, "sintetizado": True, **resultado
+        }
         assert mock.call_args[0][1].id == cid
 
     def test_con_modelo_id_usa_esa_fila(self, client: TestClient, session):
@@ -829,6 +831,203 @@ class TestSynthesizeDeUnCluster:
 
         assert respuesta.status_code == 422
         assert respuesta.status_code != 500
+
+
+class TestLaGuardaContraLaAmplificacionDeCosto:
+    """
+    `POST /clusters/{id}/synthesize` no gasta una llamada al proveedor
+    repitiendo una síntesis con la misma entrada.
+
+    **El hallazgo, medido**: 5 POST seguidos daban 5 llamadas reales al
+    proveedor, contra 1 de `POST /synthesize` —que filtra por
+    `clusters_pendientes`—. Con `API_TOKEN` opcional, un doble clic, un
+    reintento por timeout o un script en bucle gastaban cuota sin que nadie
+    hubiera decidido gastarla.
+
+    **Estos tests NO mockean `sintetizar_cluster`**, y no pueden: lo que se
+    prueba es cuántas veces se llega de verdad al proveedor, así que el mock
+    va en la frontera de red y el conteo se hace ahí.
+    """
+
+    def _motor(self, session, noticias=2):
+        """Un modelo activo y un cluster publicable, ambos de verdad."""
+        from datetime import datetime
+
+        from src.models import Medio, Noticia
+
+        session.add(
+            ModeloIA(nombre="titular", adaptador=Adaptador.GEMINI, modelo="m", activo=True)
+        )
+        cluster = Cluster(titulo_evento="Un evento", estado="abierto")
+        session.add(cluster)
+        session.commit()
+        session.refresh(cluster)
+
+        for i in range(noticias):
+            medio = Medio(
+                nombre=f"Medio{i}",
+                url_base=f"https://medio{i}.test",
+                feeds_rss=[f"https://medio{i}.test/rss"],
+            )
+            session.add(medio)
+            session.commit()
+            session.refresh(medio)
+            session.add(
+                Noticia(
+                    medio_id=medio.id,
+                    cluster_id=cluster.id,
+                    titulo=f"Titulo {i}",
+                    url=f"https://medio{i}.test/{i}",
+                    guid=f"guid-{i}",
+                    contenido_limpio="Cuerpo suficientemente largo de la nota.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+        session.commit()
+        return cluster
+
+    def _respuesta(self):
+        from src.services.synthesis import (
+            AnguloGenerado,
+            EnfoqueMedio,
+            RespuestaSintesis,
+        )
+        from src.services.topicos import Topico
+
+        return RespuestaSintesis(
+            angulos=[
+                AnguloGenerado(
+                    id_existente=None,
+                    titulo_angulo="Un angulo",
+                    resumen_neutro="Resumen neutro con longitud suficiente.",
+                    puntos_clave=["Uno", "Dos"],
+                    topicos=[Topico.SOCIEDAD],
+                    subtopicos=[],
+                    comparativa_enfoques=[
+                        EnfoqueMedio(medio="Medio0", destaco="A", omitio="B", cita="c0"),
+                        EnfoqueMedio(medio="Medio1", destaco="C", omitio="D", cita="c1"),
+                    ],
+                    notas=[1, 2],
+                    relevancia_social=False,
+                    resumen_redes=None,
+                    hashtags=[],
+                )
+            ]
+        )
+
+    def test_cinco_post_identicos_son_una_sola_llamada_al_proveedor(
+        self, client: TestClient, session
+    ):
+        """El hallazgo, convertido en test: antes eran 5 llamadas."""
+        from src.services import synthesis
+
+        cluster = self._motor(session)
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            return self._respuesta()
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            respuestas = [
+                client.post(f"/clusters/{cluster.id}/synthesize") for _ in range(5)
+            ]
+
+        assert all(r.status_code == 200 for r in respuestas)
+        assert cuenta["n"] == 1, "solo la primera tenía material nuevo"
+        assert respuestas[0].json()["sintetizado"] is not False
+        assert respuestas[4].json()["sintetizado"] is False
+
+    def test_el_que_no_sintetiza_dice_por_que_con_una_categoria_cerrada(
+        self, client: TestClient, session
+    ):
+        """
+        200 y no 4xx: no falló nada, el motor decidió no gastar. Y el motivo
+        es un valor cerrado, no prosa — mismo criterio que `agotados`.
+        """
+        from src.services import synthesis
+
+        cluster = self._motor(session)
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=lambda p, m: self._respuesta()):
+            client.post(f"/clusters/{cluster.id}/synthesize")
+            segunda = client.post(f"/clusters/{cluster.id}/synthesize")
+
+        assert segunda.status_code == 200
+        assert segunda.json() == {
+            "status": "ok",
+            "cluster_id": cluster.id,
+            "sintetizado": False,
+            "motivo": "sin_material_nuevo",
+        }
+
+    def test_forzar_si_vuelve_a_sintetizar(self, client: TestClient, session):
+        """
+        La salida deliberada. Es lo que manda el botón "volver a sintetizar"
+        de una interfaz, y lo que hace falta para comparar el mismo cluster
+        con otro modelo.
+        """
+        from src.services import synthesis
+
+        cluster = self._motor(session)
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            return self._respuesta()
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            client.post(f"/clusters/{cluster.id}/synthesize")
+            forzada = client.post(f"/clusters/{cluster.id}/synthesize?forzar=true")
+
+        assert forzada.status_code == 200
+        assert cuenta["n"] == 2
+        assert forzada.json()["sintetizado"] is not False
+
+    def test_con_material_nuevo_pasa_sin_pedir_forzar(
+        self, client: TestClient, session
+    ):
+        """
+        La guarda no le pide nada a quien tiene material nuevo: ese es el
+        caso normal y no tiene que aprender ningún parámetro.
+        """
+        from datetime import datetime
+
+        from src.models import Noticia
+        from src.services import synthesis
+
+        cluster = self._motor(session)
+        cuenta = {"n": 0}
+
+        def _contar(prompt, modelo):
+            cuenta["n"] += 1
+            return self._respuesta()
+
+        with patch.object(synthesis, "llamar_modelo", side_effect=_contar):
+            client.post(f"/clusters/{cluster.id}/synthesize")
+
+            # Llega una nota nueva al mismo cluster.
+            medio_id = cluster.noticias[0].medio_id
+            session.add(
+                Noticia(
+                    medio_id=medio_id,
+                    cluster_id=cluster.id,
+                    titulo="Nota nueva",
+                    url="https://medio0.test/nueva",
+                    guid="guid-nueva",
+                    contenido_limpio="Cuerpo de la nota nueva, suficientemente largo.",
+                    fecha_publicacion=datetime.utcnow(),
+                    embedding=[0.1] * 384,
+                )
+            )
+            session.commit()
+
+            segunda = client.post(f"/clusters/{cluster.id}/synthesize")
+
+        assert segunda.status_code == 200
+        assert cuenta["n"] == 2
+        assert segunda.json()["sintetizado"] is not False
 
 
 class TestLaSuiteNoPuedeGastarCuota:

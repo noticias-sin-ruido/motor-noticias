@@ -47,6 +47,7 @@ from .services.synthesis import (
     SintesisBloqueada,
     SintesisFallida,
     SintesisSinConfigurar,
+    hay_material_nuevo,
     sintetizar_cluster,
     sintetizar_pendientes,
 )
@@ -500,6 +501,7 @@ def synthesize(
 def synthesize_cluster(
     cluster_id: int = Path(..., ge=1, le=MAX_ID),
     modelo_id: Optional[int] = Query(None, ge=1, le=MAX_ID),
+    forzar: bool = False,
     session: Session = Depends(get_session),
 ):
     """
@@ -511,10 +513,22 @@ def synthesize_cluster(
     o agregan ángulos, nunca reparten de nuevo, así que el `id` que el back-end
     ya conoce no cambia.
 
-    **No pasa por `clusters_pendientes`**, y es a propósito: ese filtro existe
-    para que el barrido automático no gaste de más, pero acá hay alguien
-    eligiendo. Un cluster sin material nuevo se re-sintetiza igual si se lo
-    piden.
+    **No pasa por `clusters_pendientes`**, y es a propósito: ese filtro exige
+    además que el material nuevo alcance para un ángulo nuevo, y eso dejaría
+    afuera justamente el caso de re-sintetizar un ángulo existente con otro
+    modelo. Acá hay alguien eligiendo.
+
+    **Pero sí exige material nuevo, salvo `forzar=true`.** Sin esa guarda, N
+    llamadas idénticas eran N llamadas al proveedor: medido, 5 POST seguidos
+    daban 5 síntesis reales, contra 1 de `POST /synthesize`. Y como `API_TOKEN`
+    es opcional, un doble clic, un reintento por timeout o un script en bucle
+    gastan cuota sin que nadie haya decidido gastarla. Repetir con la misma
+    entrada tampoco aporta nada: la evidencia y el prompt son los mismos.
+
+    `forzar=true` es la salida deliberada, con el mismo vocabulario que
+    `POST /deliver`. En una interfaz, el botón "volver a sintetizar" **es** ese
+    acto explícito, así que la fricción no la paga quien usa la app sino quien
+    escribe la URL a mano — que es justo donde conviene que se note.
 
     Sin `modelo_id` usa el activo. Con él, ése y solo ése: no hay cadena de
     fallback cuando la elección fue explícita.
@@ -525,6 +539,17 @@ def synthesize_cluster(
             status_code=404,
             content={"status": "error", "detalle": "No existe ese cluster"},
         )
+
+    # **200 y no 4xx**: no falló nada, el motor decidió no gastar. Un 4xx haría
+    # que una interfaz muestre un error ante una condición perfectamente normal.
+    # El `motivo` es una categoría cerrada, mismo criterio que `agotados`.
+    if not forzar and not hay_material_nuevo(cluster):
+        return {
+            "status": "ok",
+            "cluster_id": cluster_id,
+            "sintetizado": False,
+            "motivo": "sin_material_nuevo",
+        }
 
     try:
         elegido = _modelo_elegido(session, modelo_id)
@@ -564,7 +589,11 @@ def synthesize_cluster(
             },
         )
 
-    return {"status": "ok", "cluster_id": cluster_id, **resultado}
+    # `sintetizado` va en las dos ramas y no solo en la que corta: un campo que
+    # aparece a veces obliga a quien consume a escribir `.get(..., True)` y a
+    # saber cuál es el default. Con las dos ramas declarándolo, la respuesta se
+    # lee sola.
+    return {"status": "ok", "cluster_id": cluster_id, "sintetizado": True, **resultado}
 
 
 @app.post("/deliver")

@@ -320,6 +320,30 @@ def ajustar_a_tweet(resumen: str, hashtags: Sequence[str]) -> Tuple[str, List[st
     return _recortar(resumen, TWEET_PRESUPUESTO), []
 
 
+def hay_material_nuevo(cluster: Cluster) -> bool:
+    """
+    Si llegaron noticias a este cluster desde el último intento de síntesis.
+
+    **Es una sola pregunta con una sola respuesta posible**, y por eso vive
+    suelta: la usan `clusters_pendientes` —para decidir qué barre el
+    scheduler— y `POST /clusters/{id}/synthesize` —para no gastar una llamada
+    al proveedor repitiendo una síntesis con la misma entrada—. Preguntarlo
+    por dos caminos distintos sería tener dos respuestas el día que difieran.
+
+    Sin marca (`None`) nunca se intentó, así que hay material por definición.
+
+    **`MARCA_CADUCADO` tampoco cuenta como intento**: un cluster que venció sin
+    sintetizarse y volvió a entrar en la ventana de fecha —porque se subió
+    `HORAS_MAXIMAS_SIN_SINTETIZAR`, que es lo que recomienda la propia alerta—
+    tiene que poder sintetizarse. Si contara, la recuperación que promete esa
+    alerta sería mentira.
+    """
+    marca = cluster.noticias_al_sintetizar
+    if marca is None or marca == MARCA_CADUCADO:
+        return True
+    return len(cluster.noticias) > marca
+
+
 def clusters_pendientes(session: Session) -> List[Cluster]:
     """
     Clusters con material nuevo suficiente para publicar al menos un ángulo.
@@ -377,11 +401,9 @@ def clusters_pendientes(session: Session) -> List[Cluster]:
     for cluster in candidatos:
         noticias = cluster.noticias
 
-        # `MARCA_CADUCADO` no cuenta como intento: si el cluster volvió a entrar
-        # en la ventana de fecha —porque se subió el plazo— tiene que poder
-        # sintetizarse, que es justamente la recuperación que promete la alerta.
-        marca = cluster.noticias_al_sintetizar
-        if marca is not None and marca != MARCA_CADUCADO and len(noticias) <= marca:
+        # Ver `hay_material_nuevo`, que es la misma pregunta que se hace el
+        # endpoint por cluster antes de gastar una llamada al proveedor.
+        if not hay_material_nuevo(cluster):
             continue
 
         sin_angulo = [n for n in noticias if n.id not in ya_con_angulo]

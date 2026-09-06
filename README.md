@@ -189,7 +189,7 @@ Dieciséis endpoints. Los `POST` del pipeline son disparo manual de cada paso, q
 | `POST` | `/vectorize` | Vectoriza lo que tenga `embedding IS NULL`. Acepta `?limite=` |
 | `POST` | `/cluster` | Cierra vencidos, agrupa las sueltas y fusiona duplicados |
 | `POST` | `/synthesize` | Genera las síntesis de los clusters publicables. Acepta `?modelo_id=` |
-| `POST` | `/clusters/{id}/synthesize` | Sintetiza **un** cluster puntual. Acepta `?modelo_id=` |
+| `POST` | `/clusters/{id}/synthesize` | Sintetiza **un** cluster puntual. Acepta `?modelo_id=` y `?forzar=`. Sin material nuevo no gasta una llamada al proveedor: hay que pedirlo con `forzar=true` |
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
 | `POST` | `/purge` | Borra el cuerpo de las noticias huérfanas vencidas. **Irreversible**. Acepta `?solo_contar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |

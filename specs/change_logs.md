@@ -2756,3 +2756,47 @@ Corrida real de punta a punta con el modelo titular, **sin el paso de entrega al
 **Las mediciones viejas se sostienen**, que es lo que esta corrida venía a comprobar: **9,2 s por cluster** contra los ~8,7 s que este archivo ya tenía anotados, y **26,7% del ciclo** de 15 minutos para 26 clusters contra el 23% que se había medido para 24. La estimación con la que se descartaron los hilos por modelo era buena.
 
 `agotados` quedó vacío y `por_modelo` en `{'gemini-por-defecto': 26}`: la cadena **no se activó ni una vez**, así que esta corrida no dice nada sobre el fallback. Lo único que probó es que el titular solo alcanza.
+
+#### La guarda contra la amplificación de costo del endpoint por cluster (05/09/2026)
+
+Primero de los tres efectos que la verificación de hallazgos había confirmado y dejado sin arreglar. Los otros dos —el reset de `intentos_envio` y la re-síntesis de un cluster `descartado`— siguen abiertos.
+
+**El hallazgo, medido con sonda:** 5 POST a `POST /clusters/{id}/synthesize` daban **5 llamadas reales al proveedor**, contra **1** de `POST /synthesize` con los mismos 5 POST — porque el barrido filtra por `clusters_pendientes` y el endpoint por cluster no filtraba por nada. Entre recibir el request y llamar al modelo no había ninguna guarda: ni de frecuencia, ni de estado, ni de "esto ya se sintetizó recién".
+
+Y no era negligencia: el docstring decía que saltear `clusters_pendientes` era a propósito, *"ese filtro existe para que el barrido no gaste de más, pero acá hay alguien eligiendo"*. El razonamiento vale **para una persona en una app de escritorio**. El problema es que hoy no hay app: hay un endpoint HTTP, y con `API_TOKEN` opcional —configuración soportada— un doble clic, un reintento por timeout o un script en bucle gastan cuota sin que nadie haya decidido gastarla.
+
+#### La guarda: una de las dos condiciones del barrido, no las dos
+
+`clusters_pendientes` exige dos cosas. Acá se reusa **solo la primera**:
+
+1. **¿Llegaron noticias desde el último intento?** — sí se usa. Es exactamente la pregunta que separa "repetir con la misma entrada" de "hay algo nuevo que sintetizar". Cuando se repite, la evidencia y el prompt son idénticos, así que la llamada no puede aportar nada que la anterior no haya aportado.
+2. **¿El material sin ángulo alcanza para un ángulo nuevo?** — **no** se usa. Ésa es la condición económica del barrido, y aplicarla acá rompería el caso que este endpoint existe para habilitar: re-sintetizar un ángulo que ya existe con otro modelo, donde no hay material nuevo ni se busca un ángulo nuevo.
+
+La condición se extrajo a `synthesis.hay_material_nuevo(cluster)`, que ahora usan los dos lados. Es el mismo criterio de `_tiene_credencial_propia`: **una sola pregunta no puede tener dos respuestas posibles** según quién la haga.
+
+#### `forzar=true`, y por qué esa palabra y no otra
+
+Con la guarda sola quedaba bloqueado el caso que el propio docstring promociona —*"volver a sintetizar con otro modelo algo que ya salió"*—, así que hace falta una salida explícita. Se evaluaron dos:
+
+- **`?forzar=true`**, elegida. Reusa el vocabulario que la API ya tiene en `POST /deliver?forzar=`, no inventa un parámetro, y deja una sola palabra como línea entre "no gastes al pedo" y "sé lo que hago".
+- **Que un `?modelo_id=` explícito implicara forzar.** Menos fricción para el caso promocionado, pero mezcla dos significados en un parámetro y reabre la amplificación entera para cualquiera que pase `modelo_id`. Descartada.
+
+**Para una interfaz la fricción es cero**, que es lo que terminó de decidirlo: en el modo paso a paso, el botón "volver a sintetizar" **es** el acto explícito, así que la app manda `forzar=true` y listo. La palabra sobra solo para quien escribe la URL a mano — justo donde conviene que se note.
+
+#### Dónde vive cada mitad, y qué contesta
+
+**El predicado en el servicio, la política en el endpoint.** Decidir si vale la pena gastar una llamada es política de API, no un invariante de la síntesis; pero la pregunta que la sostiene tiene que ser compartida para que no diverja.
+
+Cuando corta contesta **200 y no un 4xx**: no falló nada, el motor decidió no gastar, y un 4xx haría que una interfaz muestre un error ante una condición perfectamente normal. El cuerpo lleva `"sintetizado": false` y `"motivo": "sin_material_nuevo"` — categoría cerrada, mismo criterio que se adoptó para `agotados` después de la fuga.
+
+**`sintetizado` viaja también en la rama que sí sintetiza**, y eso salió de escribir los tests: un campo que aparece solo a veces obliga a quien consume a escribir `.get("sintetizado", True)` y a saber cuál es el default. Con las dos ramas declarándolo, la respuesta se lee sola.
+
+#### Lo que esta guarda NO cierra
+
+Frena la repetición **accidental**, que es el modo de falla más probable. **No frena a alguien decidido**: con `forzar=true` en un bucle la amplificación vuelve entera. Ese vector es el de `API_TOKEN` opcional y se trata aparte — el roadmap ya tiene el precedente en el punto 9, donde se marca que algunos endpoints son candidatos a exigir token siempre y no solo cuando el operador lo activó.
+
+#### Verificación
+
+772 tests (4 nuevos), `ruff` limpio. **3 mutaciones y 3 detectadas**, y cubren las dos direcciones del error: sacar la guarda entera, ignorar `forzar`, y aflojar el predicado de `>` a `>=` — que no bloquea de más sino de menos, y se caza igual.
+
+El test que importa no mockea `sintetizar_cluster` sino la frontera de red, porque lo que se prueba es **cuántas veces se llega de verdad al proveedor**: con el servicio mockeado, el conteo sería el del mock.
