@@ -1,0 +1,117 @@
+/* Paleta y tipografía de la cabina.
+   Neutros con sesgo verde-gris: es una superficie de lectura y de control, no
+   un diario. El color se gasta en una sola cosa —el estado del motor—, porque
+   ahí informa: verde anda, ámbar está arrancando, rojo no responde. */
+:root {
+  --fondo: #f2f4f1;
+  --superficie: #fbfcfa;
+  --hundido: #eaeee9;
+  --tinta: #161a18;
+  --tinta-suave: #566360;
+  --tinta-tenue: #8a9793;
+  --filete: #d6dcd6;
+  --acento: #2f6f62;
+  --ok: #2f7d5f;
+  --alerta: #a8791f;
+  --error: #a8443a;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #111513;
+    --superficie: #191f1c;
+    --hundido: #141a17;
+    --tinta: #e7ede9;
+    --tinta-suave: #a3afaa;
+    --tinta-tenue: #74827d;
+    --filete: #2a322e;
+    --acento: #74c3ab;
+    --ok: #6fbf95;
+    --alerta: #d9ab5a;
+    --error: #de8074;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--fondo);
+  color: var(--tinta);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  /* La ventana no es una página web: no se selecciona texto por accidente
+     al arrastrar, salvo donde el contenido está para ser copiado. */
+  user-select: none;
+}
+
+.envoltorio { max-width: 720px; margin: 0 auto; padding: 3rem 1.5rem; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--tinta-tenue);
+  margin: 0;
+}
+
+h1 { font-size: 1.6rem; font-weight: 600; letter-spacing: -0.01em; margin: 0.4rem 0 1.6rem; }
+
+.tarjeta {
+  background: var(--superficie);
+  border: 1px solid var(--filete);
+  border-radius: 4px;
+  padding: 1.2rem 1.3rem;
+}
+
+.fila { display: grid; grid-template-columns: 9rem 1fr; gap: 0.4rem 1rem; align-items: baseline; }
+.fila dt { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tinta-tenue); }
+.fila dd { margin: 0; font-family: var(--mono); font-size: 0.9rem; user-select: text; }
+
+.estado { display: inline-flex; align-items: center; gap: 0.5rem; font-weight: 600; }
+.estado::before { content: ""; width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; }
+.estado.ok { color: var(--ok); }
+.estado.alerta { color: var(--alerta); }
+.estado.error { color: var(--error); }
+
+label { display: block; font-size: 0.85rem; color: var(--tinta-suave); margin-bottom: 0.4rem; }
+
+input[type="password"], input[type="text"] {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--filete);
+  border-radius: 3px;
+  background: var(--fondo);
+  color: var(--tinta);
+  user-select: text;
+}
+input:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+
+button {
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: 3px;
+  border: 1px solid var(--acento);
+  background: var(--acento);
+  color: var(--fondo);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { filter: brightness(1.08); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.secundario { background: transparent; color: var(--tinta-suave); border-color: var(--filete); }
+button:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
+
+.acciones { display: flex; gap: 0.6rem; margin-top: 1.2rem; }
+
+.aviso { margin-top: 1rem; padding: 0.7rem 0.9rem; border-radius: 3px; border-left: 3px solid var(--error); background: var(--hundido); font-size: 0.87rem; color: var(--tinta-suave); }
+.ayuda { font-size: 0.82rem; color: var(--tinta-tenue); margin-top: 0.8rem; }
+.ayuda code { font-family: var(--mono); user-select: text; }
