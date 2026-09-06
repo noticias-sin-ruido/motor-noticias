@@ -386,7 +386,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 **La v1 hace cuatro cosas**, y sacar cualquiera deja de ser una sala de control: ver los clusters con su estado y si ya tienen síntesis · sintetizar uno eligiendo modelo · leer lo que salió · ver en qué anda el pipeline. Dos pantallas cohesivas: la lista de trabajo y el feed de lectura.
 
-**Stack**: Tauri (UI en React, shell mínimo en Rust), solo Windows. Vive **dentro de este repo**, con tres condiciones: CI separada por paths, docs de la app en `app/` y no en `specs/`, y el contrato de endpoints documentado y sostenido por un test.
+**Stack**: Tauri (UI en React, shell mínimo en Rust), solo Windows. Vive **dentro de este repo**, con tres condiciones que **se cumplen al construir la app y no antes** —hoy no hay `app/` ni workflow que filtrar—: CI separada por paths, docs de la app en `app/` y no en `specs/`, y el contrato de endpoints documentado y sostenido por un test. Quedan acá anotadas para que el checklist de los endpoints, ya cerrado, no las dé por hechas.
 
 **Ciclo de vida**: minimizar deja el pipeline vivo; cerrar lo detiene. Con la consecuencia medida escrita al lado — **apagado más de ~4 h se empieza a perder La Nación de forma permanente**, porque su feed se da vuelta en ese plazo.
 
@@ -394,7 +394,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 - [x] **`GET /sintesis`** ✅ — lista resumida, con **paginación por cursor** sobre `(fecha_generacion, id)`, más `?cluster_id=` y `?entregado=`. El cursor es opaco a propósito, y un cursor mal formado es 422.
 - [x] **`GET /sintesis/{id}`** ✅ — el detalle completo, con la comparativa y las fuentes.
-- [x] **Tabla `corrida`** ✅ — una fila por corrida, pasos en `jsonb`, migración `b963fe84825f` aplicada contra la base real. La fila se abre antes del primer paso, así una corrida que muere igual deja rastro.
+- [x] **Tabla `corrida`** ✅ — una fila por corrida, pasos en `jsonb`, migración `b963fe84825f` aplicada contra la base real. La fila se abre antes del primer paso, así una corrida que muere deja **rastro de que existió** — `inicio` puesto y `fin` en `None`. El detalle de los pasos **no** sobrevive a una muerte de proceso: `pasos` se persiste recién al cerrar.
 - [x] **`GET /pipeline`** ✅ — última corrida, si hay una en curso y las previas. `corriendo` no sale solo de `fin IS NULL`: una corrida abierta y vieja se informa como `huerfana` en vez de mentir.
 
 **Los cuatro cerrados el 06/09/2026**, con 18 tests nuevos y 6 mutaciones detectadas. Detalle en `change_logs.md`. El motor pasó de 16 a 19 endpoints y ya sabe devolver lo que produce y decir en qué anda.

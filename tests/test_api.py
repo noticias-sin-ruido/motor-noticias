@@ -1566,6 +1566,49 @@ class TestElJobDejaEscritoLoQueHizo:
         assert len(corridas) == 1
         assert corridas[0].pasos["síntesis"] is None
 
+    def test_un_fallo_al_abrir_el_registro_no_tumba_el_pipeline(self, session):
+        """
+        **El registro es observabilidad y no puede costar una corrida.**
+
+        `iniciar_corrida` corre ANTES del primer paso, así que sin guarda un
+        fallo al escribir su fila aborta el pipeline entero. La primera versión
+        no la tenía y una revisión lo encontró: sonda con 0 de 8 pasos
+        corriendo. El `rollback` del `except` es parte del arreglo — sin él la
+        sesión queda inutilizable y los ocho pasos fallan igual, por un motivo
+        distinto al original.
+
+        El fallo se inyecta **adentro** de `iniciar_corrida` y no reemplazando
+        la función: parchearla entera saltearía justamente la guarda que se
+        quiere probar.
+        """
+        from sqlmodel import select
+
+        from src import main
+        from src.models import Corrida
+        from src.services import corridas as mod_corridas
+
+        corridos = []
+        with ExitStack() as pila:
+            for nombre in PASOS_DEL_PIPELINE:
+                pila.enter_context(patch.object(
+                    main, nombre,
+                    side_effect=lambda _s, _n=nombre: corridos.append(_n) or {"ok": True},
+                ))
+            pila.enter_context(patch.object(main, "get_engine"))
+            pila.enter_context(
+                patch.object(main, "Session", return_value=_SesionPrestada(session))
+            )
+            pila.enter_context(patch.object(main, "enviar_alerta"))
+            pila.enter_context(patch.object(
+                mod_corridas, "ahora_utc", side_effect=RuntimeError("base caida")
+            ))
+
+            main._job_ingesta_programada()  # no tiene que levantar
+
+        assert corridos == PASOS_DEL_PIPELINE, "los ocho pasos corren igual"
+        # Y no quedó ninguna fila a medio escribir.
+        assert session.exec(select(Corrida)).all() == []
+
 
 class TestLaSuiteNoPuedeGastarCuota:
     """

@@ -3013,3 +3013,46 @@ De paso se corrigió el docstring de `search.py`, que decía ser solo búsqueda 
 **6 mutaciones y 6 detectadas**, en dos tandas. Las de las síntesis: cursor por `offset`, la lista devolviendo el contenido completo, y el cursor inválido reventando en vez de dar 422. Las del registro: `corriendo` mirando solo `fin IS NULL` sin la vara del ciclo, un paso fallido que no se registra, y la fila que no se abre al principio.
 
 **Un test propio que no probaba lo que decía.** `test_lo_que_entra_arriba_mientras_paginas_no_corre_la_pagina` —el que justifica haber elegido cursor sobre `offset`— **pasaba en verde con la mutación a `offset` puesta**. Dos causas, las dos del test: el helper nombraba los ángulos igual en cada tanda, así que la aserción por título no distinguía una repetición real; y las síntesis "nuevas" usaban la misma base horaria, así que no entraban realmente arriba. Corregido el helper, la mutación pasó a hacer caer los dos tests que le corresponden. Es el mismo patrón que esta rama viene persiguiendo, encontrado esta vez por la mutación y no por casualidad.
+
+
+#### Primera revisión con `/revisar`, y los cuatro arreglos que salieron (06/09/2026)
+
+Estreno de la skill sobre los endpoints del punto 14, contra `main`. Dos ejes en paralelo y aislados, cada uno con el diff capturado una sola vez y sus fuentes pegadas.
+
+**El protocolo nuevo se midió contra el viejo.** La revisión improvisada del 05/09 gastó 195.355 tokens en 47 llamadas y 15,8 minutos. Ésta: **~190.000 tokens en 9 llamadas y 1,8 minutos**, entregando **dos revisiones independientes** en vez de una. El costo total quedó igual; lo que cambió es que no se gastó nada descubriendo el alcance, y que por el mismo precio salieron dos ejes.
+
+Nueve hallazgos entre los dos ejes. Se verificaron los nueve antes de tocar nada, que es lo que la skill deja explícitamente de nuestro lado.
+
+#### Una refutada
+
+**La zona horaria de `estado_del_pipeline`.** El eje Spec marcó que `ahora_utc() - ultima.inicio` podía dar `TypeError` en Postgres si `ahora_utc()` devolvía un datetime con zona. No: `tiempo.ahora_utc` hace `.replace(tzinfo=None)` **a propósito**, y su docstring explica que cambiarlo obligaría a migrar las columnas. Naive menos naive no rompe en ningún motor.
+
+Vale anotar cómo llegó el hallazgo: el revisor dijo *"no puedo resolverlo sin ver `src/tiempo.py`"* en vez de afirmarlo. Es exactamente la conducta que el protocolo busca — un hallazgo marcado como no decidible cuesta un minuto de verificación; uno afirmado de más cuesta la confianza en los otros ocho.
+
+#### El arreglo que importaba: el registro tumbaba el pipeline
+
+`iniciar_corrida` no tenía guarda, y corre **antes del primer paso**. Así que un fallo al escribir la fila de la corrida abortaba la corrida entera — un problema de contabilidad convertido en uno de producción, y **exactamente lo contrario de lo que la entrada anterior de este archivo afirmaba**: *"el registro no puede tumbar el pipeline"*. La afirmación solo era cierta de `cerrar_corrida`, que sí tenía su `try`.
+
+**Verificado con sonda antes de arreglar: 0 de 8 pasos llegaban a correr.** Después del arreglo, 8 de 8 y el job no levanta.
+
+El `rollback` del `except` no es cosmético: sin él la sesión queda inutilizable y los ocho pasos fallarían igual, por un motivo distinto al original — que es el modo de falla más difícil de diagnosticar y el que `_correr_paso` ya documentaba evitar.
+
+**Y una trampa propia en el camino.** La primera versión de la sonda parcheaba `iniciar_corrida` entera con un `side_effect` que levantaba, así que **salteaba la guarda que quería probar** y seguía dando 0 de 8 después del arreglo. Es el mismo error que este archivo ya documentó dos veces —medir el propio mock— cometido esta vez sobre el arreglo recién hecho. Corregida para que el fallo ocurra *adentro* de la función, mostró 8 de 8. El test permanente hereda ese cuidado y lo dice en su docstring.
+
+#### Los otros tres
+
+**`historial` documentaba al revés.** El parámetro de `GET /pipeline` es el **total** —con `historial=3` vuelven una `ultima` y dos `anteriores`—, pero se documentaba como "cuántas corridas anteriores devolver". El código hacía lo correcto y el texto mentía. Corregido el texto, en el endpoint y en el servicio.
+
+**Código muerto.** `listar_corridas` y `ultima_corrida` no las importaba nadie ni las tocaba ningún test: las escribí por si acaso. Borradas — es lo que `medir-antes-de-resolver` dice de no adelantarse.
+
+**"Deja rastro" prometía más de lo que deja.** La fila se abre antes del primer paso, así que una corrida que muere deja rastro **de que existió** (`inicio` puesto, `fin` en `None`), pero **no el detalle de los pasos**: `pasos` se persiste recién al cerrar. La frase del roadmap decía lo primero de un modo que sugería lo segundo. Precisada.
+
+#### Lo que no se arregló, y por qué
+
+**Las tres condiciones de convivencia** —CI por paths, docs en `app/`, test de contrato— siguen sin cumplirse, y es correcto: **son del paso 3**, cuando la app exista. Hoy no hay `app/` ni workflow que filtrar. Lo que sí se corrigió es la ambigüedad que las dejaba pareciendo parte del paso ya cerrado.
+
+**Los constructores de test duplicados.** El eje Convenciones marcó, contra la regla escrita *"fixtures reutilizables en `tests/conftest.py`"*, que las cuatro clases nuevas traen cada una su constructor de `Cluster` + `Medio` + `Noticia`. Es cierto contra la regla — y también es cierto que **el repo nunca la aplicó a estos constructores**: `conftest.py` no tiene ninguno y **seis archivos de test tienen el suyo**. Se siguió la práctica real. Que la regla y la práctica diverjan es el hallazgo de fondo, y resolverlo es una decisión aparte que toca seis archivos ajenos a este diff.
+
+#### Verificación
+
+794 tests (1 nuevo), `ruff` limpio. **1 mutación y 1 detectada**: sacarle la guarda a `iniciar_corrida` hace caer el test nuevo.

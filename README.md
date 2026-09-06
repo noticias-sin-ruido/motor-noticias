@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-793%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-794%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
@@ -373,13 +373,13 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 793 tests
+pytest                                            # 794 tests
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
 ```
 
-**793 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+**794 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
 
 **Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 

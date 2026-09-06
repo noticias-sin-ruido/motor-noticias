@@ -839,7 +839,8 @@ def sintesis_detalle(
 @app.get("/pipeline")
 def pipeline(
     historial: int = Query(
-        5, ge=1, le=50, description="Cuántas corridas anteriores devolver"
+        5, ge=1, le=50,
+        description="Cuántas corridas devolver en total, la última incluida",
     ),
     session: Session = Depends(get_session),
 ):

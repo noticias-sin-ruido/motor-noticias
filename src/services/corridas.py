@@ -6,7 +6,7 @@ y hora, y nada del scheduler. La duración y la utilización del ciclo se medía
 en cada corrida y se tiraban al log.
 """
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from sqlmodel import Session, select
 
@@ -17,29 +17,45 @@ from ..tiempo import ahora_utc, iso_local
 logger = logging.getLogger(__name__)
 
 
-def iniciar_corrida(session: Session) -> int:
+def iniciar_corrida(session: Session) -> Optional[int]:
     """
-    Abre la fila de esta corrida y devuelve **su id**, no el objeto.
+    Abre la fila de esta corrida y devuelve **su id**, o `None` si no pudo.
 
     **Devolver el id y no la fila es deliberado.** Entre este momento y el
     cierre corren ocho pasos, y `_correr_paso` hace `session.rollback()` cuando
     uno falla; sostener un objeto vivo a través de eso es exactamente la trampa
     que el punto 14 dejó anotada en el roadmap y que ya nos costó un
     `DetachedInstanceError` en una corrida real. Un `int` no se expira.
+
+    **Y no puede tumbar el pipeline, que es la otra mitad.** La primera versión
+    de esta función no tenía guarda, y una revisión lo encontró: como corre
+    *antes* del primer paso, un fallo al escribir la fila abortaba la corrida
+    entera. Verificado con una sonda —**0 de 8 pasos llegaban a correr**—, o
+    sea que un problema de contabilidad se convertía en un problema de
+    producción, justo lo contrario de lo que este módulo dice hacer.
+
+    El `rollback` del `except` no es cosmético: sin él la sesión queda
+    inutilizable y los ocho pasos fallarían igual, por un motivo distinto al
+    original.
     """
-    corrida = Corrida(inicio=ahora_utc(), pasos={})
-    session.add(corrida)
-    # Commit inmediato: si quedara pendiente, el primer `rollback` de un paso
-    # que falla se la llevaría puesta y la corrida no quedaría registrada
-    # justo cuando más interesa saber que pasó algo.
-    session.commit()
-    session.refresh(corrida)
-    return corrida.id
+    try:
+        corrida = Corrida(inicio=ahora_utc(), pasos={})
+        session.add(corrida)
+        # Commit inmediato: si quedara pendiente, el primer `rollback` de un
+        # paso que falla se la llevaría puesta y la corrida no quedaría
+        # registrada justo cuando más interesa saber que pasó algo.
+        session.commit()
+        session.refresh(corrida)
+        return corrida.id
+    except Exception:
+        session.rollback()
+        logger.exception("No se pudo abrir el registro de la corrida")
+        return None
 
 
 def cerrar_corrida(
     session: Session,
-    corrida_id: int,
+    corrida_id: Optional[int],
     pasos: Dict[str, Any],
     duracion_segundos: float,
     utilizacion: float,
@@ -50,7 +66,13 @@ def cerrar_corrida(
     El registro es observabilidad: que no se pueda escribir es un problema, pero
     hacerlo explotar hacia arriba convertiría un fallo de contabilidad en un
     fallo del pipeline. Se loguea y se sigue.
+
+    `corrida_id` en `None` significa que la apertura tampoco pudo escribirse.
+    No hay nada que cerrar y no es un error nuevo: ya se logueó allá.
     """
+    if corrida_id is None:
+        return
+
     try:
         corrida = session.get(Corrida, corrida_id)
         if corrida is None:
@@ -81,6 +103,11 @@ def _vista_de_corrida(corrida: Corrida) -> dict:
 def estado_del_pipeline(session: Session, historial: int = 5) -> dict:
     """
     En qué anda el pipeline: si hay algo corriendo, la última y las anteriores.
+
+    **`historial` es el total, la última incluida**, no cuántas anteriores.
+    Con `historial=3` vuelven una `ultima` y dos en `anteriores`. La primera
+    versión lo documentaba al revés y una revisión lo encontró: el parámetro
+    hacía lo correcto y el texto mentía.
 
     **Cómo se decide "está corriendo".** Una corrida sin `fin` es candidata,
     pero no alcanza: si el proceso murió a mitad de camino, esa fila queda
@@ -116,19 +143,3 @@ def estado_del_pipeline(session: Session, historial: int = 5) -> dict:
         "ultima": _vista_de_corrida(ultima),
         "anteriores": [_vista_de_corrida(c) for c in corridas[1:]],
     }
-
-
-def listar_corridas(session: Session, limite: int = 20) -> List[dict]:
-    """Las últimas corridas, de la más reciente a la más vieja."""
-    corridas = session.exec(
-        select(Corrida).order_by(Corrida.inicio.desc()).limit(limite)
-    ).all()
-    return [_vista_de_corrida(c) for c in corridas]
-
-
-def ultima_corrida(session: Session) -> Optional[dict]:
-    """La última corrida registrada, o `None` si el motor nunca corrió."""
-    corrida = session.exec(
-        select(Corrida).order_by(Corrida.inicio.desc()).limit(1)
-    ).first()
-    return None if corrida is None else _vista_de_corrida(corrida)
