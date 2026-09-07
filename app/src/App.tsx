@@ -4,14 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import * as motor from "./motor";
 import type { Estado } from "./motor";
 import type { ErrorDeApi } from "./bindings/ErrorDeApi";
-
-/** Lo que devuelve `GET /` del motor. */
-type Salud = {
-  status: string;
-  database: string;
-  environment: string;
-  hora_local: string;
-};
+import type { Salud } from "./bindings/Salud";
 
 /**
  * El error llega como categoría cerrada desde Rust, no como texto suelto:
@@ -27,6 +20,10 @@ function mensajeDe(error: ErrorDeApi): string {
       return "El motor no responde.";
     case "no_autorizado":
       return "El motor rechazó el token. Puede haber cambiado en el .env.";
+    case "no_encontrado":
+      return "El motor no encontró eso. Puede haberse borrado; probá refrescar.";
+    case "invalida":
+      return `El motor rechazó el pedido: ${error.detalle}`;
     case "respuesta":
       return `El motor respondió ${error.detalle}.`;
     case "red":

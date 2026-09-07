@@ -8,4 +8,4 @@
  * filtrara el nombre de una variable de entorno: lo que cruza una frontera
  * viaja como categoría, y el detalle se queda de este lado.
  */
-export type ErrorDeApi = { "tipo": "sin_token" } | { "tipo": "motor_caido" } | { "tipo": "no_autorizado" } | { "tipo": "respuesta", "detalle": number } | { "tipo": "red", "detalle": string };
+export type ErrorDeApi = { "tipo": "sin_token" } | { "tipo": "motor_caido" } | { "tipo": "no_autorizado" } | { "tipo": "no_encontrado" } | { "tipo": "invalida", "detalle": string } | { "tipo": "respuesta", "detalle": number } | { "tipo": "red", "detalle": string };

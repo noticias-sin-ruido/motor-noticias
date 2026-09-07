@@ -10,14 +10,20 @@ mod api;
 mod docker;
 mod motor;
 mod secretos;
+mod tipos;
 
 use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter};
 
 use ajustes::Ajustes;
+use api::ErrorDeApi;
 use docker::ErrorDocker;
 use motor::Estado;
+use tipos::{
+    Id, RespuestaClusters, RespuestaDetalle, RespuestaModelos, RespuestaPipeline,
+    RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
+};
 
 /// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
 /// en cada transición, no al final: arrancar puede tardar minutos y una ventana
@@ -143,10 +149,93 @@ async fn motor_detener(app: AppHandle) -> Result<Estado, ErrorDocker> {
     Ok(Estado::Parado)
 }
 
+// --- Lo que el motor sabe -------------------------------------------------
+//
+// Un comando por endpoint, cada uno devolviendo su tipo. La ventana no arma
+// URLs ni interpreta códigos HTTP: pide `listar_sintesis` y recibe o los datos
+// o una categoría de error.
+
 /// El `GET /` del motor, ya autenticado.
 #[tauri::command]
-async fn motor_salud() -> Result<serde_json::Value, api::ErrorDeApi> {
-    api::get("/").await
+async fn motor_salud() -> Result<Salud, ErrorDeApi> {
+    api::get("/", &[]).await
+}
+
+#[tauri::command]
+async fn listar_clusters(
+    estado: Option<String>,
+    limite: Option<u32>,
+) -> Result<RespuestaClusters, ErrorDeApi> {
+    let mut parametros = vec![("limite", limite.unwrap_or(20).to_string())];
+    if let Some(estado) = estado {
+        parametros.push(("estado", estado));
+    }
+    api::get("/clusters", &parametros).await
+}
+
+/// Una página de síntesis.
+///
+/// `cursor` es opaco: sale del campo `siguiente` de la respuesta anterior y se
+/// manda tal cual. No se interpreta de este lado — es base64 y el motor es el
+/// único que sabe leerlo.
+#[tauri::command]
+async fn listar_sintesis(
+    limite: Option<u32>,
+    cursor: Option<String>,
+    cluster_id: Option<Id>,
+    entregado: Option<bool>,
+) -> Result<RespuestaSintesis, ErrorDeApi> {
+    let mut parametros = vec![("limite", limite.unwrap_or(20).to_string())];
+    if let Some(cursor) = cursor {
+        parametros.push(("cursor", cursor));
+    }
+    if let Some(cluster_id) = cluster_id {
+        parametros.push(("cluster_id", cluster_id.to_string()));
+    }
+    if let Some(entregado) = entregado {
+        parametros.push(("entregado", entregado.to_string()));
+    }
+    api::get("/sintesis", &parametros).await
+}
+
+#[tauri::command]
+async fn detalle_de_sintesis(id: Id) -> Result<RespuestaDetalle, ErrorDeApi> {
+    api::get(&format!("/sintesis/{id}"), &[]).await
+}
+
+#[tauri::command]
+async fn estado_del_pipeline(historial: Option<u32>) -> Result<RespuestaPipeline, ErrorDeApi> {
+    api::get(
+        "/pipeline",
+        &[("historial", historial.unwrap_or(5).to_string())],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn listar_modelos() -> Result<RespuestaModelos, ErrorDeApi> {
+    api::get("/modelos", &[]).await
+}
+
+/// Sintetiza un cluster puntual.
+///
+/// **`forzar` no tiene default acá y va explícito**: del lado del motor esa
+/// bandera es lo único que separa "volver a sintetizar" de gastar una llamada
+/// paga sin que nadie lo haya decidido. Un default en el medio del camino la
+/// volvería invisible.
+#[tauri::command]
+async fn sintetizar_cluster(
+    cluster_id: Id,
+    modelo_id: Option<Id>,
+    forzar: bool,
+) -> Result<Sintetizado, ErrorDeApi> {
+    let mut parametros = vec![("forzar", forzar.to_string())];
+    if let Some(modelo_id) = modelo_id {
+        parametros.push(("modelo_id", modelo_id.to_string()));
+    }
+    let cruda: RespuestaSintetizar =
+        api::post(&format!("/clusters/{cluster_id}/synthesize"), &parametros).await?;
+    Ok(cruda.into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -161,7 +250,13 @@ pub fn run() {
             motor_estado,
             motor_arrancar,
             motor_detener,
-            motor_salud
+            motor_salud,
+            listar_clusters,
+            listar_sintesis,
+            detalle_de_sintesis,
+            estado_del_pipeline,
+            listar_modelos,
+            sintetizar_cluster
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar la cabina");

@@ -78,7 +78,8 @@ app/
         ├── api.rs       # el cliente HTTP contra el motor
         ├── ajustes.rs   # dónde está el repo, entre arranques
         ├── docker.rs    # prender y apagar los contenedores
-        └── motor.rs     # en qué anda: la máquina de estados
+        ├── motor.rs     # en qué anda: la máquina de estados
+        └── tipos.rs     # la forma de lo que el motor devuelve
 ```
 
 ## Los tipos de TypeScript no se escriben a mano
@@ -151,6 +152,28 @@ como la señal de "migrando".
 
 `up -d --build`, y `stop` — **nunca `down`**, que borra los contenedores y con la
 bandera equivocada se lleva puesto el volumen de Postgres.
+
+**Fase 3 — el cliente tipado.** Los siete endpoints tienen structs, y la ventana
+ya no ve JSON crudo: pide `listar_sintesis` y recibe o los datos o una categoría
+de error. `404` y `422` dejaron de colapsar en "el motor respondió un número",
+que era todo lo que la pantalla podía decir de un id inexistente y de un cursor
+roto por igual.
+
+Las formas **no se dedujeron leyendo el código**: salieron de respuestas reales
+congeladas en `src-tauri/fixtures/`, y corrigieron cuatro suposiciones — la más
+cara, que `comparativa_enfoques` es un objeto indexado por medio y no una lista.
+Ver `src-tauri/fixtures/README.md`.
+
+Hay cuatro pruebas contra el motor de verdad, marcadas `#[ignore]` porque
+necesitan los contenedores arriba y el token guardado:
+
+```bash
+cd src-tauri && cargo test -- --ignored
+```
+
+Son las únicas que ejercitan la cadena entera —Credential Manager, armado de la
+query, red, deserialización—; las demás deserializan fixtures. **Ninguna manda
+un POST**, para que correrlas nunca pueda terminar en una llamada paga.
 
 Lo que **todavía no hace**: las dos pantallas (fases 4 y 5), el ícono en la
 bandeja (fase 6) y el instalador (fase 9).
