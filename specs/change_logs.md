@@ -3222,4 +3222,85 @@ Lo anotable es cómo apareció. No lo encontró un test: **salió de ir a mirar 
 
 #### Lo que queda de la fase 4
 
-La pantalla en sí, prender la CSP (`default-src 'self'`) y **borrar el andamio**, que es descartable por diseño y no debería sobrevivir a la pantalla que lo reemplaza.
+La pantalla en sí y prender la CSP — las dos hechas después, ver las entradas siguientes.
+
+**Sobre borrar el andamio, la decisión cambió.** Al revisar qué se perdía se vio que casi nada necesitaba rescate: el chequeo de fuga de `/modelos` ya vive en el motor (`tests/test_modelos.py`) y más fuerte, y las mediciones ya están escritas. Pero quedaban dos cosas sin cubrir —`listar_sintesis` y `detalle_de_sintesis`, que espera el feed de la fase 5, y las comprobaciones que exigen una ventana abierta, como que la CSP se aplique—. Así que **se mantiene como banco de pruebas del puente hasta la fase 9**. En su lugar se agregó una guarda automática: un test que falla si aparece un `invoke` fuera de los envoltorios, nombrando el archivo.
+### La pantalla de trabajo, y la paleta que no era la de Sin Ruido (07/09/2026)
+
+Tercer tramo de la fase 4: la pantalla en sí. Se documenta por la paleta, que fue una corrección de fondo y no un ajuste estético.
+
+#### La identidad estaba, el código no la tenía
+
+La app venía con un verde-gris "con sesgo neutro", justificado en su propio comentario. **Ese verde-gris no era de Sin Ruido**: lo inventó esta sesión en la fase 1 y nadie lo había contrastado con la marca. Al preguntarlo aparecieron los colores reales: **#22486A azul, #E5A823 oro y blanco**, con el blanco predominante y el azul mandando en modo oscuro.
+
+Vale anotar el error de razonamiento: al evaluar una herramienta de diseño se argumentó que no convenía tocar el color porque "la app ya tiene una identidad decidida y documentada". La identidad estaba documentada, sí — pero en la cabeza del dueño del proyecto, no en el repo. **Que algo esté escrito con seguridad en un comentario no lo vuelve la decisión correcta.**
+
+#### La restricción que ordenó todo el diseño salió de medir
+
+**El oro sobre blanco da 2,11:1.** No llega ni al 3,0 que WCAG pide para texto grande. Eso no es una preferencia: cierra la puerta.
+
+De ahí sale la regla: **en tema claro el oro nunca es texto**. Es relleno, filete y marca, y lo que se apoya encima va en azul (4,52:1). Cuando hace falta ese calor *en* un texto sobre blanco se usa una variante oscurecida, medida en 4,55:1.
+
+En tema oscuro se da vuelta, y es la combinación natural de la marca: sobre el azul, el oro lee a 7,33:1 y pasa a ser el acento. Un solo token —`--acento`— cambia de color con el tema y las dos lecturas son correctas.
+
+Los tres niveles de tinta son **el tono más claro que todavía cumple** su objetivo (13:1, 7:1 y 4,5:1 contra el peor fondo), así que la jerarquía es lo más suave posible sin dejar de ser legible. Todo derivado del matiz del azul de marca, moviendo sólo luminosidad y saturación.
+
+#### Lo que la paleta anterior escondía
+
+Antes de reemplazarla se la midió, y **no pasaba**: `--tinta-tenue` daba 2,58:1 y estaba puesto justo en el texto más chico de la interfaz —chips, datos de tarjeta, textos de ayuda—, usado en 17 reglas. Además había seis tamaños de fuente por debajo de 12px, el menor en 9,8px, y eran exactamente los pintados con ese gris. Gris flojo más letra chica.
+
+Se corrigió antes de conocer los colores de marca, y la corrección se rehízo después sobre la paleta nueva. **Re-medir encontró un cuarto problema que la primera pasada no vio**: `--ok` fallaba contra `--hundido` porque en la primera medición sólo se lo había comparado contra `--superficie`.
+
+#### La grilla, y por qué las fichas miden todas igual
+
+La lista pasó de una tarjeta por fila a una grilla `auto-fill`. Lo que la volvía irregular no era la grilla sino el contenido: título de uno a tres renglones, un aviso que aparecía sólo en algunas tarjetas, y las notas desplegables.
+
+Se fijó el alto de fila con `grid-auto-rows` y **el título reserva sus tres renglones aunque tenga uno**. Que tres alcancen no se supuso: medidos los 537 clusters reales, el más largo tiene 179 caracteres y a ese ancho entran ~186, así que no se trunca ninguno. Las notas desplegadas entran en el mismo hueco que los datos, con scroll propio, para que abrir una tarjeta no estire su fila.
+
+#### Un bug que la barra fija destapó
+
+La barra de estado siempre visible sondea el motor **en reposo**, y ahí se vio que `Sondeo::Rechazada` se leía siempre como `arrancando`. Era correcto mientras el único que sondeaba era el bucle de arranque —ahí ya se le había pedido a Docker que levantara—, pero en reposo el mismo dato significa lo contrario: está apagado.
+
+Se separó en `estado_al_arrancar` y `estado_en_reposo`, dos funciones y no un parámetro booleano: lo que cambia no es el sondeo sino qué se acaba de hacer, y eso lo sabe quien llama. **Mutado**: volver a la lectura única tumba el test que documenta el caso, así que queda de guarda contra que vuelva.
+
+#### Accesibilidad, con lo que aportó y lo que no
+
+Se evaluó y se instaló la skill `ui-ux-pro-max` (MIT, búsqueda local sobre CSV, sin red ni credenciales). Su aporte real fue acotado y conviene registrarlo sin inflarlo: **confirmó** el criterio de contraste que ya se estaba aplicando, **no sirvió** para el color —su dominio devuelve paletas para elegir, y acá la paleta venía dada— y **aportó una cosa que no estaba considerada**: *Focus Not Obscured* (WCAG 2.2 AA), o sea que una barra `sticky` puede tapar el control que acaba de recibir el foco. Se arregló con `scroll-padding-top`.
+
+Del mismo repaso salieron el diálogo sin manejo de teclado —ahora con foco inicial, Escape, tabulador atrapado y foco devuelto al cerrar— y el botón de sólo ícono sin nombre accesible.
+
+### La CSP del webview, y por qué el valor que teníamos escrito no servía (07/09/2026)
+
+Segundo tramo de la fase 4. La política estaba planificada desde la fase 2 con un valor propuesto, y **ese valor era incorrecto**.
+
+#### `default-src 'self'` habría matado la app
+
+El `invoke()` de Tauri no viaja por HTTP: usa el esquema **`ipc://localhost`**, que `'self'` no cubre. Con la política que el roadmap y el README venían proponiendo, ni un solo comando habría cruzado el puente. Está documentado en la fuente de `tauri-utils`, que trae el ejemplo correcto:
+
+```
+csp: "default-src 'self'; connect-src ipc: http://ipc.localhost"
+```
+
+Se descubrió leyendo la fuente antes de escribir, no rompiendo la app y depurando después.
+
+#### La política quedó mínima porque el inventario lo permitió
+
+Antes de escribirla se revisó qué carga la ventana: `index.html` trae un único script del mismo origen, las tipografías son del sistema, el logo entra por `url()` local, y **no hay un solo estilo en línea** —el build emite el CSS como archivo aparte con `<link>`—. Nada de eso exige aflojar la política. En el build, además, Tauri la endurece agregando nonces y hashes.
+
+#### En desarrollo no hay CSP, y no es un descuido
+
+`devCsp` está escrito y **no se aplica**. La CSP se inyecta en un solo lugar de Tauri —`manager/mod.rs`, dentro de `get_asset`, cuando Tauri sirve el frontend por su protocolo— y en desarrollo el HTML lo sirve Vite. Tauri nunca lo toca.
+
+Eso invalida además una advertencia que el README repetía: *"una CSP mal puesta rompe el HMR de Vite"*. Acá no puede romperlo, porque nunca llega a aplicarse en dev. Era una advertencia genérica que en este montaje no aplica.
+
+#### Cómo se comprobó, y por qué la comprobación obvia no sirve
+
+**Una política escrita pero no aplicada se ve idéntica a una que funciona.** Un `fetch` a un host externo falla en los dos casos: con CSP porque la bloquea, sin CSP porque CORS la rechaza. Mirar si el `fetch` falló habría dado verde en los dos.
+
+Lo que distingue los casos es el evento **`securitypolicyviolation`**, que sólo existe si la política se aplica. La sonda que se agregó al andamio lo escucha, y por eso encontró algo: en la ventana de desarrollo reportó *"SIN VIOLACIÓN"*, destapando que `devCsp` era letra muerta. En el ejecutable de release reportó el bloqueo con su directiva.
+
+**Y hace falta la mitad complementaria**: una política que bloquee todo —incluido el IPC— se vería igual de exitosa en esa línea. Se verificó del otro lado, en el log del motor: la app de release le mandó **26 pedidos**, entre ellos los de la pantalla real. Bloquea lo de afuera y deja pasar lo nuestro.
+
+#### Lo que costó
+
+Se eligió compilar en release para probarla de verdad, en vez de dejar la de producción sin comprobar hasta la fase 9. El build tardó varios minutos y de paso dejó los dos instaladores (MSI y NSIS) en `target/release/bundle/`, que no se pidieron y que recién hacen falta en la fase 9.

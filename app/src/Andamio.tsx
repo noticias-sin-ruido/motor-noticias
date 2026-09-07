@@ -1,15 +1,29 @@
 /**
- * Andamio de la fase 4. **Descartable**: se borra cuando la pantalla real esté.
+ * El banco de pruebas del puente. **Acompaña todo el desarrollo y se borra en
+ * la fase 9, antes de empaquetar** — no antes.
  *
- * Existe por una sola razón. Entre Rust y el webview hay una capa que **ningún
- * compilador ve**: `cargo test` llama las funciones directo, y `tsc` tipa el
- * retorno de `invoke<T>()` con lo que uno le declare — no sabe qué comandos
- * existen ni qué argumentos piden. `invoke("comando_inexistente", { fruta: 3 })`
- * compila perfecto. Los seis comandos de la fase 3 nunca cruzaron ese puente.
+ * Nació en la fase 4 como andamio descartable, para cruzar por primera vez los
+ * seis comandos que nadie había invocado. Se quedó porque cubre lo que ninguna
+ * pantalla cubre todavía, y porque mide cosas que sólo se pueden medir con la
+ * ventana abierta.
  *
+ * **Por qué hace falta un banco y no bastan los tests.** Entre Rust y el webview
+ * hay una capa que ningún compilador ve: `cargo test` llama las funciones
+ * directo, y `tsc` tipa el retorno de `invoke<T>()` con lo que uno le declare —
+ * no sabe qué comandos existen ni qué argumentos piden.
+ * `invoke("comando_inexistente", { fruta: 3 })` compila perfecto.
+ *
+ * **Es el único lugar que llama al puente crudo, y a propósito.** El resto de la
+ * app pasa por `datos.ts`; acá se llama directo para poder equivocarse a
+ * mandato — mandar `cluster_id` en vez de `clusterId` y ver qué pasa. Un test
+ * de Rust (`guardas::el_puente_no_se_llama_desde_cualquier_lado`) hace cumplir
+ * esa separación.
+ *
+ * **Qué mantener acá.** Cuando una fase agregue comandos, agregarles su prueba;
+ * cuando una pantalla real pase a ejercitar uno, su prueba de acá puede irse.
  * Las pruebas **corren solas al montar** y son todas de lectura: abrir la
- * ventana alcanza, no hay que apretar nada. El único POST —el que puede gastar
- * plata— está abajo, detrás de un botón aparte.
+ * ventana alcanza. El único POST —el que puede gastar plata— está abajo, detrás
+ * de un botón aparte.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -305,6 +319,46 @@ export default function Andamio() {
             estado: c.estado,
             cantidad_sintesis: c.cantidad_sintesis,
           })),
+        };
+      },
+    );
+
+    // --- La CSP: comprobar que de verdad bloquea -------------------------
+
+    await probar(
+      "CSP · bloquea lo externo",
+      "fetch a un host de afuera, que la politica no permite",
+      async () => {
+        // **La senal que distingue los dos casos.** Si la CSP esta activa, el
+        // motor de render emite `securitypolicyviolation` y el pedido nunca
+        // sale. Si NO esta activa, el pedido sale de verdad y falla por red,
+        // sin evento. Mirar solo si el fetch fallo no alcanza: falla en los
+        // dos casos, y una politica escrita pero no aplicada se ve identica a
+        // una que funciona.
+        let violacion: SecurityPolicyViolationEvent | null = null;
+        const escuchar = (e: SecurityPolicyViolationEvent) => {
+          violacion = e;
+        };
+        document.addEventListener("securitypolicyviolation", escuchar);
+        let fallo = "";
+        try {
+          await fetch("https://example.com/csp-probe");
+        } catch (e) {
+          fallo = String(e);
+        }
+        // El evento se despacha en una tarea aparte: hay que darle un turno.
+        await new Promise((r) => setTimeout(r, 120));
+        document.removeEventListener("securitypolicyviolation", escuchar);
+
+        const v = violacion as SecurityPolicyViolationEvent | null;
+        if (v !== null) {
+          return {
+            veredicto: `bloqueado por la CSP · directiva «${v.violatedDirective}» · destino «${v.blockedURI}». La politica esta activa y aplicandose.`,
+          };
+        }
+        return {
+          veredicto: `SIN VIOLACION: el pedido salio a la red y ${fallo || "no fallo"}. La CSP no esta bloqueando nada -- esta escrita pero no aplicada.`,
+          marca: "error",
         };
       },
     );

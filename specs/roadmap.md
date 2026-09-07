@@ -407,7 +407,7 @@ Construidas las **fases 0 a 3** del plan de nueve, y la **4 en curso**. Verde en
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
 - **Fase 2 · control del motor** ✅ — levanta y para los contenedores (`up -d --build` y `stop`, nunca `down`), con la máquina de estados `reconstruyendo → arrancando → migrando → listo` sondeada contra el 503. Detecta que Docker Desktop no está corriendo y lo dice.
 - **Fase 3 · cliente tipado** ✅ — 16 structs derivados de fixtures capturados del motor real, los tipos de TypeScript generados desde Rust con `ts-rs`, y siete comandos, uno por endpoint. `404` y `422` dejaron de colapsar en un número.
-- **Fase 4 · lista de trabajo** ⏳ — cruzado el puente `invoke()` y resuelto el punto flojo del `Set<cluster_id>` (los dos abajo). **Falta la pantalla en sí**, prender la CSP y borrar el andamio.
+- **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio no se borró**: se decidió mantenerlo como banco de pruebas del puente hasta la fase 9, porque cubre comandos que ninguna pantalla ejercita todavía y mide lo que sólo se mide con la ventana abierta.
 
 **Fase 4, en curso — el puente `invoke()` ya se cruzó (07/09/2026).** Los seis
 comandos que nunca se habían llamado desde la ventana —`listar_clusters`,
@@ -442,7 +442,7 @@ solo pedido**, y constante. Cero cuando no hay ninguna, nunca ausente, para que
 la ventana no tenga que distinguir "no tiene" de "no vino el campo".
 
 **Dos cosas más, con fecha:**
-- La **CSP del webview está apagada** (`"csp": null`). Se prende en la fase 4, junto con las pantallas que renderizan titulares y citas de medios — el contenido de terceros que la justifica. Valor propuesto: `default-src 'self'`.
+- La **CSP del webview quedó prendida (07/09/2026)**, junto con las pantallas que la justifican. El valor que este punto proponía —`default-src 'self'` a secas— **era el que rompe la app**: el `invoke()` viaja por `ipc://localhost`, que `'self'` no cubre. El bueno es `default-src 'self'; connect-src ipc: http://ipc.localhost`. Comprobado en el ejecutable de release, no supuesto: bloquea un `fetch` externo con evento `securitypolicyviolation`, y la app siguió mandándole 26 pedidos al motor. **En desarrollo no hay CSP y no puede haberla**: Tauri sólo la inyecta cuando sirve el frontend él mismo, y en dev lo sirve Vite.
 - Los tests de `secretos.rs` **tocan el Credential Manager real sin `#[ignore]`**. Fue deliberado, pero **va a romper en CI cuando llegue la fase 8**, donde no hay almacén de credenciales.
 
 #### Lo que queda deliberadamente afuera de la v1

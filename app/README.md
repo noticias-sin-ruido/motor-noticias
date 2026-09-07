@@ -132,22 +132,58 @@ agregaría nada que el mensaje no diga ya. Lo que sí se cuidó es que esos
 mensajes no arrastren nada sensible: **el token nunca se interpola en ellos**,
 solo el error del sistema.
 
-## La CSP está apagada, y es una decisión con fecha
+## La CSP: prendida en producción, inexistente en desarrollo
 
-`tauri.conf.json` tiene `"csp": null` — el default del scaffold. Hoy no hay
-riesgo concreto: la ventana no renderiza HTML de nadie, no hay un solo
-`dangerouslySetInnerHTML` en `src/`, y React escapa por defecto.
+```json
+"csp":    "default-src 'self'; connect-src ipc: http://ipc.localhost",
+"devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+```
 
-**Deja de ser inocuo en la fase 4.** Ahí entran a la pantalla titulares, URLs y
-citas textuales de TN, Perfil y La Nación, más resúmenes generados por un
-modelo: contenido de terceros que ninguno de nosotros escribió. La CSP es la
-segunda capa para ese caso, debajo del escapado de React.
+Es la segunda capa debajo del escapado de React, y se prendió junto con las
+pantallas que la justifican: ahí entran titulares, URLs y citas textuales de TN,
+Perfil y La Nación, más resúmenes escritos por un modelo. La primera capa evita
+que algo inyectado se ejecute; **la segunda hace que, si igual se ejecutara, no
+tenga a dónde llamar**.
 
-Se prende **junto con esas pantallas** y no antes, por una razón práctica: una
-CSP mal puesta rompe el HMR de Vite en modo dev sin decir por qué, así que hay
-que probarla abriendo la app — y conviene probarla contra el contenido real que
-la justifica, no contra una ventana vacía. El valor propuesto para entonces es
-`default-src 'self'`, ajustando lo que el modo dev pida.
+⚠️ **`default-src 'self'` a secas rompe la app entera.** El `invoke()` viaja por
+el esquema `ipc://localhost`, que `'self'` no cubre, así que sin la parte de
+`connect-src` no cruza un solo comando. Está en la documentación de la propia
+fuente de Tauri (`tauri-utils/src/config.rs`), y el valor que este README
+proponía antes —`default-src 'self'` solo— era exactamente el que no funciona.
+
+**La política es mínima porque el inventario dio limpio**: `index.html` carga un
+único script del mismo origen, las tipografías son del sistema (no hay ninguna
+de la red), el logo entra por `url()` local, y no hay un solo estilo en línea —
+el build emite el CSS como archivo aparte con `<link>`. Y en el build **Tauri la
+endurece todavía más**, agregando nonces y hashes de scripts y estilos.
+
+### En desarrollo no hay CSP, y no puede haberla
+
+`devCsp` está escrito y **no se aplica**. No es un error de configuración: la
+CSP se inyecta en un solo lugar de Tauri —`get_asset`, cuando Tauri sirve el
+frontend por su propio protocolo— y en desarrollo el HTML lo sirve Vite desde
+`localhost:1420`, así que Tauri nunca lo toca. La clave queda escrita por si
+algún día el dev sirve desde `frontendDist`, pero **hoy la ventana de desarrollo
+corre sin protección**.
+
+Corolario práctico: **una CSP mal puesta no puede romper el HMR de Vite**, al
+revés de lo que este README advertía antes. Nunca llega a aplicarse en dev.
+
+### Cómo se comprobó, y por qué el fetch no alcanza
+
+Una política escrita pero no aplicada **se ve idéntica a una que funciona**: en
+los dos casos un `fetch` a un host externo falla. Sin CSP falla por CORS.
+
+Lo que distingue los dos casos es el evento **`securitypolicyviolation`**, que
+sólo existe si la política se está aplicando. La sonda del andamio lo escucha, y
+por eso sirvió: en la ventana de desarrollo reportó *"SIN VIOLACIÓN"* —
+destapando que `devCsp` era letra muerta— y en el ejecutable de release reportó
+*bloqueado por la CSP, directiva `connect-src`*.
+
+La otra mitad de la prueba es que **la app siga funcionando**: una política que
+bloquea todo, incluido el IPC, se vería igual de exitosa en esa línea. Se
+verificó del otro lado, en el log del motor: la app de release le mandó 26
+pedidos, incluidos los de la pantalla real.
 
 ## Docker Desktop tiene que estar corriendo
 
@@ -229,10 +265,21 @@ Escribirlo en snake_case compila, pasa `tsc` y falla en ejecución.
 `ArgumentCase::Camel` es el default en `tauri-macros 2.6.3` (`wrapper.rs:51`,
 la conversión en `:506`).
 
-**El andamio es descartable y se borra con la pantalla de verdad.** Corre solo al
-montar y es todo de lectura; el único POST está detrás de un botón aparte,
-apuntando a un cluster que ya tiene síntesis para que `forzar: false` corte en
-`sin_material_nuevo` sin llegar al proveedor.
+**El andamio acompaña todo el desarrollo y se borra en la fase 9**, antes de
+empaquetar. Nació descartable, y se quedó por dos razones: cubre comandos que
+ninguna pantalla ejercita todavía —`listar_sintesis` y `detalle_de_sintesis`
+esperan al feed de la fase 5— y mide cosas que sólo se miden con la ventana
+abierta, como que la CSP esté aplicándose de verdad.
+
+Corre solo al montar y es todo de lectura; el único POST está detrás de un botón
+aparte, apuntando a un cluster que ya tiene síntesis para que `forzar: false`
+corte en `sin_material_nuevo` sin llegar al proveedor.
+
+**Es el único lugar que llama al puente crudo, y a propósito**: el resto de la
+app pasa por `datos.ts`, y acá se llama directo para poder equivocarse a mandato.
+Esa separación no es una convención: la hace cumplir un test
+(`guardas::el_puente_no_se_llama_desde_cualquier_lado`), que falla nombrando el
+archivo si alguien mete un `invoke` en un componente.
 
 **El `Set<cluster_id>` se midió y se resolvió.** Saber qué cluster ya está
 sintetizado costaba **5 pedidos y 201 ms** paginando `/sintesis` antes de dibujar
