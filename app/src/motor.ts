@@ -9,24 +9,36 @@ import type { ErrorDocker } from "./bindings/ErrorDocker";
 
 export type { Estado, ErrorDocker };
 
-/** Qué se le muestra a quien mira, y con qué color. */
+/**
+ * Qué se le muestra a quien mira, y con qué color.
+ *
+ * **El ámbar está reservado a lo que está en curso** —reconstruyendo,
+ * arrancando, migrando—, o sea a estados que se resuelven solos si uno espera.
+ * `parado` no es uno de esos: no avanza a ningún lado hasta que alguien
+ * apriete un botón, y en ámbar se confundía con los tres transitorios. Por eso
+ * va en rojo, igual que `error`.
+ *
+ * Que dos estados compartan color no los vuelve indistinguibles: cada uno
+ * dice su texto al lado del punto, que es lo que evita informar sólo por
+ * color.
+ */
 export function describir(estado: Estado): { texto: string; clase: string } {
   switch (estado) {
     case "parado":
-      return { texto: "detenido", clase: "alerta" };
+      return { texto: "Detenido", clase: "error" };
     case "reconstruyendo":
       // Puede tardar minutos la primera vez después de tocar requirements.txt,
       // y por eso es un estado propio y no "arrancando": una ventana que dice
       // "arrancando" durante cinco minutos parece colgada.
-      return { texto: "reconstruyendo la imagen…", clase: "alerta" };
+      return { texto: "Reconstruyendo la imagen…", clase: "alerta" };
     case "arrancando":
-      return { texto: "arrancando…", clase: "alerta" };
+      return { texto: "Arrancando…", clase: "alerta" };
     case "migrando":
-      return { texto: "migrando la base…", clase: "alerta" };
+      return { texto: "Migrando la base…", clase: "alerta" };
     case "listo":
-      return { texto: "operativo", clase: "ok" };
+      return { texto: "Operativo", clase: "ok" };
     case "error":
-      return { texto: "con problemas", clase: "error" };
+      return { texto: "Con problemas", clase: "error" };
   }
 }
 

@@ -100,7 +100,9 @@ fn avisar(app: &AppHandle, estado: Estado) {
 /// Un sondeo suelto, para saber en qué anda sin tocar nada.
 #[tauri::command]
 async fn motor_estado() -> Estado {
-    motor::estado_de(&motor::sondear().await)
+    // **En reposo**, no durante un arranque: acá una conexión rechazada
+    // significa que el motor está apagado, no que está por levantar.
+    motor::estado_en_reposo(&motor::sondear().await)
 }
 
 /// Levanta el motor y **avisa cada transición** hasta que esté listo.
@@ -122,7 +124,7 @@ async fn motor_arrancar(app: AppHandle) -> Result<Estado, ErrorDocker> {
 
     for _ in 0..motor::intentos_maximos() {
         let sondeo = motor::sondear().await;
-        let estado = motor::estado_de(&sondeo);
+        let estado = motor::estado_al_arrancar(&sondeo);
         if estado != ultimo {
             ultimo = estado;
             avisar(&app, estado);
@@ -276,4 +278,73 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar la cabina");
+}
+
+#[cfg(test)]
+mod guardas {
+    use std::fs;
+    use std::path::Path;
+
+    /// Los únicos archivos del front que pueden llamar a `invoke` directo.
+    ///
+    /// `datos.ts` y `motor.ts` son los envoltorios; `App.tsx` conserva las dos
+    /// llamadas del token y la ruta del repo; `Andamio.tsx` es el instrumento
+    /// de desarrollo, que llama crudo a propósito —incluso con nombres mal
+    /// escritos— porque de eso se trata.
+    const PERMITIDOS: [&str; 4] = ["datos.ts", "motor.ts", "App.tsx", "Andamio.tsx"];
+
+    fn recorrer(dir: &Path, encontrados: &mut Vec<String>) {
+        let Ok(entradas) = fs::read_dir(dir) else {
+            return;
+        };
+        for entrada in entradas.flatten() {
+            let ruta = entrada.path();
+            if ruta.is_dir() {
+                // `bindings/` lo genera ts-rs y no contiene llamadas.
+                if ruta.file_name().is_some_and(|n| n == "bindings") {
+                    continue;
+                }
+                recorrer(&ruta, encontrados);
+                continue;
+            }
+            let Some(nombre) = ruta.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !(nombre.ends_with(".ts") || nombre.ends_with(".tsx")) {
+                continue;
+            }
+            if PERMITIDOS.contains(&nombre) {
+                continue;
+            }
+            if fs::read_to_string(&ruta)
+                .is_ok_and(|t| t.contains("invoke<") || t.contains("invoke("))
+            {
+                encontrados.push(nombre.to_string());
+            }
+        }
+    }
+
+    /// **Las llamadas al puente viven en un solo lugar, y esto lo hace cumplir.**
+    ///
+    /// El motivo no es orden: es que Tauri convierte los nombres de los
+    /// argumentos a camelCase, así que escribir `cluster_id` compila, pasa
+    /// `tsc` y falla en ejecución sin decir por qué. Medido el 07/09/2026: la
+    /// misma consulta devolvió 1 fila con `clusterId` y 100 con `cluster_id`.
+    ///
+    /// Concentradas, hay una línea por comando donde equivocarse. Dispersas,
+    /// una por cada componente que llame — y ningún compilador mira ninguna.
+    #[test]
+    fn el_puente_no_se_llama_desde_cualquier_lado() {
+        let front = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+        assert!(front.is_dir(), "no se encontro el front en {front:?}");
+
+        let mut sueltas = Vec::new();
+        recorrer(&front, &mut sueltas);
+
+        assert!(
+            sueltas.is_empty(),
+            "estos archivos llaman a `invoke` fuera de los envoltorios: {sueltas:?}.
+             Agregá la llamada a `datos.ts` en vez de escribirla ahí: es donde              estan todos los nombres de argumento, y el unico lugar donde se              revisa que vayan en camelCase."
+        );
+    }
 }

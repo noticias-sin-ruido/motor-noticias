@@ -85,12 +85,36 @@ pub async fn sondear() -> Sondeo {
 }
 
 /// Traduce un sondeo al estado que se muestra.
-pub fn estado_de(sondeo: &Sondeo) -> Estado {
+/// Qué significa un sondeo **mientras se está arrancando**.
+///
+/// Acá una conexión rechazada es `arrancando`: se le acaba de pedir a Docker
+/// que levante los contenedores, así que "nadie escucha" es una etapa esperada
+/// del camino y no un problema.
+pub fn estado_al_arrancar(sondeo: &Sondeo) -> Estado {
     match sondeo {
         Sondeo::Rechazada => Estado::Arrancando,
         Sondeo::Degradada => Estado::Migrando,
         Sondeo::Lista => Estado::Listo,
         Sondeo::Otra(_) => Estado::Error,
+    }
+}
+
+/// Qué significa el mismo sondeo **en reposo**, cuando nadie pidió arrancar.
+///
+/// **Difiere en una sola rama, y es la que importa**: una conexión rechazada
+/// acá significa `parado`, porque no hay ningún arranque en curso que la
+/// explique. Son dos funciones y no un parámetro booleano porque el dato es el
+/// mismo y lo que cambia es qué se acaba de hacer — y eso lo sabe quien llama,
+/// no el sondeo.
+///
+/// Esto estuvo mal hasta la fase 4: había una sola lectura, la de arriba, y
+/// mientras el único que sondeaba era el bucle de arranque nadie lo notó. Con
+/// la barra de estado siempre visible, el motor apagado decía «arrancando…»
+/// para siempre.
+pub fn estado_en_reposo(sondeo: &Sondeo) -> Estado {
+    match sondeo {
+        Sondeo::Rechazada => Estado::Parado,
+        otro => estado_al_arrancar(otro),
     }
 }
 
@@ -112,25 +136,40 @@ mod pruebas {
         // Es el corazón de la máquina de estados: el motor usa 503 para decir
         // "vivo pero sin base". Tratarlo como error dejaría a la app diciendo
         // que algo se rompió durante un arranque perfectamente normal.
-        assert_eq!(estado_de(&Sondeo::Degradada), Estado::Migrando);
+        assert_eq!(estado_al_arrancar(&Sondeo::Degradada), Estado::Migrando);
+        assert_eq!(estado_en_reposo(&Sondeo::Degradada), Estado::Migrando);
     }
 
     #[test]
-    fn una_conexion_rechazada_es_arrancando() {
-        assert_eq!(estado_de(&Sondeo::Rechazada), Estado::Arrancando);
+    fn una_conexion_rechazada_significa_cosas_distintas_segun_el_contexto() {
+        // **El caso que la fase 4 destapó.** El mismo sondeo, dos lecturas:
+        // arrancando, "todavía no levantó"; en reposo, "está apagado". Con una
+        // sola lectura la barra decía «arrancando…» con el motor detenido.
+        assert_eq!(estado_al_arrancar(&Sondeo::Rechazada), Estado::Arrancando);
+        assert_eq!(estado_en_reposo(&Sondeo::Rechazada), Estado::Parado);
+    }
+
+    #[test]
+    fn en_reposo_solo_cambia_la_conexion_rechazada() {
+        // Las otras tres ramas tienen que seguir significando lo mismo: si
+        // alguna se desalinea, un 503 en reposo dejaría de decir "migrando".
+        for sondeo in [Sondeo::Degradada, Sondeo::Lista, Sondeo::Otra(500)] {
+            assert_eq!(estado_en_reposo(&sondeo), estado_al_arrancar(&sondeo));
+        }
     }
 
     #[test]
     fn el_200_es_listo() {
-        assert_eq!(estado_de(&Sondeo::Lista), Estado::Listo);
+        assert_eq!(estado_al_arrancar(&Sondeo::Lista), Estado::Listo);
+        assert_eq!(estado_en_reposo(&Sondeo::Lista), Estado::Listo);
     }
 
     #[test]
     fn cualquier_otro_codigo_es_error() {
         // Un 500 o un 404 en la salud no son etapas del arranque: son algo
         // que no entendemos, y conviene decirlo en vez de seguir esperando.
-        assert_eq!(estado_de(&Sondeo::Otra(500)), Estado::Error);
-        assert_eq!(estado_de(&Sondeo::Otra(404)), Estado::Error);
+        assert_eq!(estado_al_arrancar(&Sondeo::Otra(500)), Estado::Error);
+        assert_eq!(estado_en_reposo(&Sondeo::Otra(404)), Estado::Error);
     }
 
     #[test]
