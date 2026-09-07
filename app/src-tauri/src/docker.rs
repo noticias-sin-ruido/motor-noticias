@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use serde::Serialize;
+use ts_rs::TS;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -23,7 +24,8 @@ const SIN_VENTANA: u32 = 0x0800_0000;
 /// piden acciones distintas de quien mira —instalar algo contra prender algo—
 /// y sin separarlas la app solo puede mostrar el texto crudo de Docker, que
 /// dice qué pasó pero no qué hacer.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
 #[serde(tag = "tipo", content = "detalle", rename_all = "snake_case")]
 pub enum ErrorDocker {
     /// No hay un `docker` en el PATH.

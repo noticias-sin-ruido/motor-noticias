@@ -1,17 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-/**
- * En qué anda el motor. Son las mismas variantes que emite Rust — si se
- * agrega una allá y no acá, TypeScript lo hace notar en el `switch`.
- */
-export type Estado =
-  | "parado"
-  | "reconstruyendo"
-  | "arrancando"
-  | "migrando"
-  | "listo"
-  | "error";
+// Los tipos que cruzan desde Rust no se escriben acá: los genera `ts-rs` a
+// partir de los enums de Rust, que son los que definen el payload de verdad.
+// Ver `app/src/bindings/` y el README.
+import type { Estado } from "./bindings/Estado";
+import type { ErrorDocker } from "./bindings/ErrorDocker";
+
+export type { Estado, ErrorDocker };
 
 /** Qué se le muestra a quien mira, y con qué color. */
 export function describir(estado: Estado): { texto: string; clase: string } {
@@ -33,16 +29,6 @@ export function describir(estado: Estado): { texto: string; clase: string } {
       return { texto: "con problemas", clase: "error" };
   }
 }
-
-/**
- * Por qué falló el manejo de los contenedores. Categorías cerradas, iguales a
- * las de Rust: el texto crudo de Docker no le sirve a nadie que mire la
- * ventana, y `demonio_caido` pide una acción distinta de las demás.
- */
-export type ErrorDocker =
-  | { tipo: "no_instalado" }
-  | { tipo: "demonio_caido" }
-  | { tipo: "fallo"; detalle: string };
 
 /**
  * El mensaje que se muestra. **Cada uno dice qué hacer**, que es lo que le

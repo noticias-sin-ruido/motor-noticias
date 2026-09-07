@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
+use ts_rs::TS;
 
 /// Dónde publica el motor. El `docker-compose.yml` liga `127.0.0.1:8000` a
 /// propósito, para que un despliegue con IP pública no exponga la API.
@@ -22,7 +23,8 @@ const TECHO: Duration = Duration::from_secs(120);
 const TIMEOUT_SONDEO: Duration = Duration::from_millis(1500);
 
 /// En qué anda el motor, tal como lo ve la interfaz.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum Estado {
     /// Los contenedores están parados.

@@ -69,6 +69,7 @@ app/
 ├── src/                 # React + TypeScript (strict)
 │   ├── App.tsx
 │   ├── motor.ts         # los estados del motor y sus mensajes
+│   ├── bindings/        # GENERADO por ts-rs -- no se toca a mano
 │   └── estilos.css
 └── src-tauri/
     └── src/
@@ -79,6 +80,39 @@ app/
         ├── docker.rs    # prender y apagar los contenedores
         └── motor.rs     # en qué anda: la máquina de estados
 ```
+
+## Los tipos de TypeScript no se escriben a mano
+
+El JSON cruza **dos** fronteras —motor → Rust → ventana— y ninguna ve los tipos
+de la otra, así que la misma forma se describe dos veces: una para parsearla
+(el struct de Rust) y otra para consumirla (el type de TS).
+
+Las dos copias no hacen el mismo trabajo. **El struct de Rust valida de verdad**
+y puede fallar; el type de TS se borra al compilar y no valida nada. O sea que
+hay una sola fuente —Rust, que define el payload— y una descripción para el
+compilador. Por eso la copia de TS **la genera `ts-rs`**, en `src/bindings/`:
+
+```bash
+npm run bindings        # regenera desde los structs de Rust
+npm run bindings:check  # regenera y falla si quedaron desactualizados
+```
+
+Escribirla a mano ya había fallado: un comentario en `src/motor.ts` prometía que
+"si se agrega una variante en Rust y no acá, TypeScript lo hace notar en el
+`switch`". Era falso — TS solo caza la dirección opuesta. Generados, la promesa
+se cumple: **medido**, agregar `Estado::Pausado` solo en Rust deja el `switch`
+de `describir()` sin salida y `tsc` corta con `TS2366`.
+
+Los archivos generados **se commitean**. Ignorarlos obligaría a correr `cargo`
+antes que `tsc`, y además un cambio de contrato se ve mejor en el diff que en
+la ausencia de un archivo.
+
+⚠️ La ruta de destino va repetida en cada `#[ts(export_to = ...)]` y no en un
+`TS_RS_EXPORT_DIR`. Se probó la variable y se descartó: **cargo resuelve
+`.cargo/config.toml` desde el directorio actual, no desde el manifiesto**, así
+que `cargo test` lanzado desde `app/` la ignoraba y escribía los tipos en
+`src-tauri/bindings/` sin avisar. El guardián pasaba en verde con los bindings
+desactualizados.
 
 Los errores cruzan a la interfaz como **categorías cerradas**
 (`sin_token`, `motor_caido`, `no_autorizado`, …) y no como texto suelto: "falta

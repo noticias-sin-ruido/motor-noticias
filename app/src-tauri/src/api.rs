@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::secretos;
 
@@ -27,7 +28,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// motor tomó para su campo `agotados` después de que un mensaje de error
 /// filtrara el nombre de una variable de entorno: lo que cruza una frontera
 /// viaja como categoría, y el detalle se queda de este lado.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
 #[serde(tag = "tipo", content = "detalle", rename_all = "snake_case")]
 pub enum ErrorDeApi {
     /// Todavía no se configuró el token.

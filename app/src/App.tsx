@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import * as motor from "./motor";
 import type { Estado } from "./motor";
+import type { ErrorDeApi } from "./bindings/ErrorDeApi";
 
 /** Lo que devuelve `GET /` del motor. */
 type Salud = {
@@ -13,17 +14,11 @@ type Salud = {
 };
 
 /**
- * El error llega como categoría cerrada desde Rust, no como texto suelto.
+ * El error llega como categoría cerrada desde Rust, no como texto suelto:
  * `sin_token` y `motor_caido` piden acciones distintas de quien mira, así que
- * la interfaz tiene que poder distinguirlas sin parsear un mensaje.
+ * la interfaz tiene que poder distinguirlas sin parsear un mensaje. El tipo lo
+ * genera `ts-rs` desde el enum de Rust.
  */
-type ErrorDeApi =
-  | { tipo: "sin_token" }
-  | { tipo: "motor_caido" }
-  | { tipo: "no_autorizado" }
-  | { tipo: "respuesta"; detalle: number }
-  | { tipo: "red"; detalle: string };
-
 function mensajeDe(error: ErrorDeApi): string {
   switch (error.tipo) {
     case "sin_token":
