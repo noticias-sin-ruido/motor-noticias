@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
@@ -101,6 +101,28 @@ def listar_clusters(
         consulta.order_by(Cluster.fecha_creacion.desc()).limit(limite)
     ).all()
 
+    # **Cuántas síntesis tiene cada cluster**, en una sola consulta agrupada
+    # sobre los ids que ya están en la mano -- el mismo criterio que el
+    # `selectinload` de arriba, por el que esto no es 1 + N.
+    #
+    # El campo existe porque sin él quien consume no puede saber si un cluster
+    # ya está resuelto sin pedir `GET /sintesis` entera. **Medido el
+    # 07/09/2026** desde la app: 438 síntesis eran 5 páginas y 201 ms antes de
+    # dibujar una sola fila, creciendo a ~28 síntesis por día activo, para
+    # responder una pregunta sobre los veinte clusters que se muestran. Acá el
+    # costo es constante.
+    ids = [c.id for c in clusters]
+    conteo: dict = {}
+    if ids:
+        conteo = {
+            cluster_id: cantidad
+            for cluster_id, cantidad in session.exec(
+                select(Sintesis.cluster_id, func.count(Sintesis.id))
+                .where(Sintesis.cluster_id.in_(ids))
+                .group_by(Sintesis.cluster_id)
+            ).all()
+        }
+
     resultado = []
     for cluster in clusters:
         noticias = cluster.noticias
@@ -111,6 +133,7 @@ def listar_clusters(
                 "estado": cluster.estado,
                 "fecha_creacion": iso_local(cluster.fecha_creacion),
                 "cantidad_noticias": len(noticias),
+                "cantidad_sintesis": conteo.get(cluster.id, 0),
                 "medios": sorted({n.medio.nombre for n in noticias}),
                 "noticias": [
                     {

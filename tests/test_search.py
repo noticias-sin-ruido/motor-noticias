@@ -10,7 +10,7 @@ from datetime import datetime
 import pytest
 from sqlmodel import Session
 
-from src.models import Cluster, Medio, Noticia
+from src.models import Cluster, Medio, Noticia, Sintesis
 from src.services.search import listar_clusters
 from tests.conftest import contar_queries
 
@@ -53,6 +53,18 @@ def _crear_cluster_con_noticias(session: Session, medios: list, sufijo: str, est
     return cluster
 
 
+def _crear_sintesis(session: Session, cluster: Cluster, cuantas: int) -> None:
+    for i in range(cuantas):
+        session.add(
+            Sintesis(
+                cluster_id=cluster.id,
+                titulo_angulo=f"Angulo {cluster.id}-{i}",
+                resumen_neutro="Resumen.",
+            )
+        )
+    session.commit()
+
+
 class TestListarClusters:
     def test_devuelve_noticias_y_medios_correctos(self, session: Session, medios):
         cluster = _crear_cluster_con_noticias(session, medios, "a")
@@ -89,6 +101,46 @@ class TestListarClusters:
 
         for i in range(8):
             _crear_cluster_con_noticias(session, medios, f"muchos-{i}")
+        with contar_queries(session) as muchos:
+            listar_clusters(session, limite=50)
+
+        assert muchos["n"] == pocos["n"]
+
+    def test_cuenta_las_sintesis_de_cada_cluster(self, session: Session, medios):
+        """
+        `cantidad_sintesis` es lo que separa un cluster ya resuelto de uno
+        pendiente. Sin el campo, quien consume tenía que paginar
+        `GET /sintesis` entera para saberlo -- medido desde la app el
+        07/09/2026: 438 síntesis eran 5 páginas y 201 ms antes de dibujar una
+        fila, y crece con el histórico.
+        """
+        con_dos = _crear_cluster_con_noticias(session, medios, "a")
+        con_una = _crear_cluster_con_noticias(session, medios, "b")
+        sin_ninguna = _crear_cluster_con_noticias(session, medios, "c")
+        _crear_sintesis(session, con_dos, 2)
+        _crear_sintesis(session, con_una, 1)
+
+        por_id = {c["id"]: c["cantidad_sintesis"] for c in listar_clusters(session, limite=10)}
+
+        assert por_id[con_dos.id] == 2
+        assert por_id[con_una.id] == 1
+        # **Cero y no ausente**: la ventana distingue "no tiene" de "no sé", y
+        # un campo faltante la obligaría a tratar los dos casos igual.
+        assert por_id[sin_ninguna.id] == 0
+
+    def test_el_conteo_no_agrega_una_query_por_cluster(self, session: Session, medios):
+        """
+        El conteo es **una** consulta agrupada, no una por cluster. El guardián
+        de arriba compara 2 contra 8 clusters sin síntesis; este los compara
+        con síntesis cargadas, que es donde un `count` mal puesto se dispara.
+        """
+        for i in range(2):
+            _crear_sintesis(session, _crear_cluster_con_noticias(session, medios, f"pocos-{i}"), 3)
+        with contar_queries(session) as pocos:
+            listar_clusters(session, limite=50)
+
+        for i in range(8):
+            _crear_sintesis(session, _crear_cluster_con_noticias(session, medios, f"muchos-{i}"), 3)
         with contar_queries(session) as muchos:
             listar_clusters(session, limite=50)
 

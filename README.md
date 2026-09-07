@@ -193,7 +193,7 @@ Diecinueve endpoints. Los `POST` del pipeline son disparo manual de cada paso, q
 | `POST` | `/deliver` | Barre lo pendiente y lo entrega al back-end. Acepta `?forzar=` |
 | `POST` | `/purge` | Borra el cuerpo de las noticias huérfanas vencidas. **Irreversible**. Acepta `?solo_contar=` |
 | `GET` | `/search` | Búsqueda semántica. Parámetros `q` y `limite` |
-| `GET` | `/clusters` | Clusters con sus noticias. Parámetros `estado` y `limite` |
+| `GET` | `/clusters` | Clusters con sus noticias y **cuántas síntesis** tiene cada uno. Parámetros `estado` y `limite` |
 | `GET` | `/sintesis` | Las síntesis producidas, resumidas. Cursor + `?cluster_id=` y `?entregado=` |
 | `GET` | `/sintesis/{id}` | Una síntesis entera: comparativa por medio y fuentes |
 | `GET` | `/pipeline` | En qué anda el motor: última corrida, si hay una en curso y las previas |
@@ -326,6 +326,7 @@ Los dos primeros son el mismo hecho y comparten `cluster_id: 344` — el del eje
       "estado": "abierto",
       "fecha_creacion": "2026-08-18T14:53:58-03:00",
       "cantidad_noticias": 2,
+      "cantidad_sintesis": 0,
       "medios": ["TN"],
       "noticias": [
         { "id": 3952, "medio": "TN", "titulo": "Se filtró lo que hizo el novio de Hayden Panettiere…", "url": "https://tn.com.ar/…" },
@@ -336,7 +337,15 @@ Los dos primeros son el mismo hecho y comparten `cluster_id: 344` — el del eje
 }
 ```
 
-Este cluster tiene **un solo medio**, así que no se publica: le falta la segunda voz.
+Este cluster tiene **un solo medio**, así que no se publica: le falta la segunda voz —
+y por eso mismo `cantidad_sintesis` es `0`.
+
+`cantidad_sintesis` sale de una consulta agrupada sobre los ids que la lista ya
+trajo, así que no agrega una consulta por cluster. Está para que quien consume
+sepa qué hecho ya está resuelto **sin tener que pedir `GET /sintesis` entera**:
+medido desde la app el 07/09/2026, averiguarlo paginando costaba 5 pedidos y
+201 ms antes de dibujar una fila, contra 14 ms en uno solo — y lo primero crece
+con el histórico mientras que lo segundo no.
 
 </details>
 
