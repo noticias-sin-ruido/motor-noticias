@@ -1,0 +1,6 @@
+# Estos archivos los escribe `ts-rs`, siempre con LF. Sin esta linea git los
+# saca con CRLF (core.autocrlf=true en Windows) y quedan distintos de lo que
+# cargo acaba de escribir: los 17 aparecen como modificados en `git status`
+# aunque `git diff` no muestre un solo cambio de contenido, y `git checkout` de
+# otra rama se aborta por "local changes".
+* text eol=lf
