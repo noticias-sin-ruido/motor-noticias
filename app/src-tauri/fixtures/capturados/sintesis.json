@@ -1,0 +1,66 @@
+{
+  "status": "ok",
+  "cantidad": 3,
+  "sintesis": [
+    {
+      "id": 431,
+      "cluster_id": 646,
+      "titulo_angulo": "Incendio en un restaurante de Puerto Madero",
+      "topicos": [
+        "policiales",
+        "sociedad"
+      ],
+      "subtopicos": [],
+      "medios": [
+        "La Nación",
+        "Perfil",
+        "TN"
+      ],
+      "cantidad_notas": 3,
+      "fecha_generacion": "2026-09-06T20:17:39.023417-03:00",
+      "modelo_usado": "gemini-por-defecto",
+      "enviado_backend": false
+    },
+    {
+      "id": 430,
+      "cluster_id": 645,
+      "titulo_angulo": "La celebración de los seis meses de Gia, la hija de Oriana Sabatini y Paulo Dybala, preservando su identidad",
+      "topicos": [
+        "espectaculos"
+      ],
+      "subtopicos": [
+        "teve",
+        "chimentos"
+      ],
+      "medios": [
+        "Revista Paparazzi",
+        "TN"
+      ],
+      "cantidad_notas": 2,
+      "fecha_generacion": "2026-09-06T20:17:35.811720-03:00",
+      "modelo_usado": "gemini-por-defecto",
+      "enviado_backend": false
+    },
+    {
+      "id": 429,
+      "cluster_id": 645,
+      "titulo_angulo": "El cambio de look de Oriana Sabatini y la reacción de Paulo Dybala",
+      "topicos": [
+        "espectaculos"
+      ],
+      "subtopicos": [
+        "teve",
+        "chimentos"
+      ],
+      "medios": [
+        "Revista Paparazzi",
+        "TN"
+      ],
+      "cantidad_notas": 2,
+      "fecha_generacion": "2026-09-06T20:17:35.811084-03:00",
+      "modelo_usado": "gemini-por-defecto",
+      "enviado_backend": false
+    }
+  ],
+  "siguiente": "MjAyNi0wOS0wNlQyMzoxNzozNS44MTEwODR8NDI5"
+}

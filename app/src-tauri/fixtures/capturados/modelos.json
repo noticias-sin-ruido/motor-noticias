@@ -1,0 +1,49 @@
+{
+  "status": "ok",
+  "en_uso": "gemini-por-defecto",
+  "modelos": [
+    {
+      "modelo": "qwen/qwen3.6-27b",
+      "adaptador": "openai_compatible",
+      "temperatura": 0.3,
+      "opciones": {},
+      "activo": false,
+      "nombre": "groq-qwen",
+      "id": 2,
+      "modo_estructura": "tools",
+      "max_tokens": 900,
+      "prioridad": 100,
+      "credencial_configurada": true
+    },
+    {
+      "modelo": "gemini-3.5-flash-lite",
+      "adaptador": "gemini",
+      "temperatura": 0.2,
+      "opciones": {
+        "thinking_level": "LOW"
+      },
+      "activo": true,
+      "nombre": "gemini-por-defecto",
+      "id": 8,
+      "modo_estructura": "response_format",
+      "max_tokens": null,
+      "prioridad": 100,
+      "credencial_configurada": true
+    },
+    {
+      "modelo": "gemini-3.8-flash",
+      "adaptador": "gemini",
+      "temperatura": 0.2,
+      "opciones": {
+        "thinking_level": "LOW"
+      },
+      "activo": false,
+      "nombre": "gemini-3.8-flash",
+      "id": 9,
+      "modo_estructura": "response_format",
+      "max_tokens": null,
+      "prioridad": 100,
+      "credencial_configurada": true
+    }
+  ]
+}

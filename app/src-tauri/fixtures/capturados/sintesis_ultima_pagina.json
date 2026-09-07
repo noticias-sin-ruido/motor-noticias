@@ -1,0 +1,28 @@
+{
+  "status": "ok",
+  "cantidad": 1,
+  "sintesis": [
+    {
+      "id": 100,
+      "cluster_id": 8,
+      "titulo_angulo": "Rumores de romance entre Griselda Siciliani y Emiliano Brancciari y la desmentida de ambos",
+      "topicos": [
+        "espectaculos"
+      ],
+      "subtopicos": [
+        "chimentos"
+      ],
+      "medios": [
+        "Ciudad Magazine",
+        "La Nación",
+        "Revista Paparazzi",
+        "TN"
+      ],
+      "cantidad_notas": 5,
+      "fecha_generacion": "2026-08-12T15:45:43.183412-03:00",
+      "modelo_usado": null,
+      "enviado_backend": true
+    }
+  ],
+  "siguiente": null
+}

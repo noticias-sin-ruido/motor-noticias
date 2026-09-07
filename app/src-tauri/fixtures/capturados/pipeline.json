@@ -1,0 +1,169 @@
+{
+  "status": "ok",
+  "corriendo": false,
+  "huerfana": false,
+  "intervalo_minutos": 15,
+  "ultima": {
+    "id": 2,
+    "inicio": "2026-09-06T20:11:34.001472-03:00",
+    "fin": "2026-09-06T20:19:45.538935-03:00",
+    "duracion_segundos": 491.536052,
+    "utilizacion": 0.5461511688888888,
+    "pasos": {
+      "ingesta": [
+        {
+          "feeds": 1,
+          "medio": "El Cronista",
+          "nuevas": 0,
+          "en_vivo": 0,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 47,
+          "url_invalida": 0,
+          "sin_contenido": 0,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "Revista Gente",
+          "nuevas": 0,
+          "en_vivo": 0,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 10,
+          "url_invalida": 0,
+          "sin_contenido": 0,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "Revista Paparazzi",
+          "nuevas": 0,
+          "en_vivo": 0,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 10,
+          "url_invalida": 0,
+          "sin_contenido": 0,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "Ciudad Magazine",
+          "nuevas": 0,
+          "en_vivo": 0,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 27,
+          "url_invalida": 0,
+          "sin_contenido": 1,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "La Nación",
+          "nuevas": 6,
+          "en_vivo": 3,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 83,
+          "url_invalida": 0,
+          "sin_contenido": 0,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "TN",
+          "nuevas": 4,
+          "en_vivo": 1,
+          "errores": [],
+          "extraidas": 0,
+          "duplicadas": 89,
+          "url_invalida": 0,
+          "sin_contenido": 6,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 0
+        },
+        {
+          "feeds": 1,
+          "medio": "Perfil",
+          "nuevas": 1,
+          "en_vivo": 0,
+          "errores": [],
+          "extraidas": 1,
+          "duplicadas": 48,
+          "url_invalida": 0,
+          "sin_contenido": 0,
+          "feeds_fallados": 0,
+          "extraccion_fallida": 1
+        }
+      ],
+      "síntesis": {
+        "creados": 17,
+        "agotados": {},
+        "fallidos": 0,
+        "bloqueados": 0,
+        "pendientes": 16,
+        "por_modelo": {
+          "gemini-por-defecto": 16
+        },
+        "sin_modelo": false,
+        "descartados": 0,
+        "actualizados": 0,
+        "sintetizados": 16,
+        "sin_credencial": false,
+        "vencidos_sin_publicar": 0
+      },
+      "agrupamiento": {
+        "evaluadas": 169,
+        "sin_match": 160,
+        "clusters_creados": 3,
+        "de_otra_categoria": 7,
+        "sumadas_a_cluster": 3
+      },
+      "vectorización": {
+        "pendientes": 11,
+        "vectorizadas": 11
+      },
+      "purga de cuerpos": {
+        "purgadas": 1,
+        "evaluadas": 1,
+        "bytes_evaluados": 1711,
+        "bytes_liberados": 1711
+      },
+      "cierre de clusters": {
+        "evaluados": 0,
+        "procesados": 0,
+        "descartados": 0
+      },
+      "entrega al backend": {
+        "estado": "ok",
+        "agotadas": 0,
+        "fallidas": 21,
+        "entregadas": 0,
+        "pendientes": 21,
+        "rechazadas": 0,
+        "agotadas_total": 0
+      },
+      "fusión de clusters": {
+        "evaluados": 22,
+        "fusionados": 0
+      }
+    }
+  },
+  "anteriores": [
+    {
+      "id": 1,
+      "inicio": "2026-09-06T19:50:57.556794-03:00",
+      "fin": null,
+      "duracion_segundos": null,
+      "utilizacion": null,
+      "pasos": {}
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "corriendo": false,
+  "huerfana": false,
+  "intervalo_minutos": 15,
+  "ultima": null,
+  "anteriores": []
+}

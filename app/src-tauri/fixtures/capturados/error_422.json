@@ -1,0 +1,4 @@
+{
+  "status": "error",
+  "detalle": "El cursor no es válido. Se obtiene del campo `siguiente` de una respuesta anterior, no se arma a mano."
+}

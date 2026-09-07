@@ -1,0 +1,69 @@
+{
+  "status": "ok",
+  "sintesis": {
+    "id": 431,
+    "cluster_id": 646,
+    "titulo_angulo": "Incendio en un restaurante de Puerto Madero",
+    "topicos": [
+      "policiales",
+      "sociedad"
+    ],
+    "subtopicos": [],
+    "medios": [
+      "La Nación",
+      "Perfil",
+      "TN"
+    ],
+    "cantidad_notas": 3,
+    "fecha_generacion": "2026-09-06T20:17:39.023417-03:00",
+    "modelo_usado": "gemini-por-defecto",
+    "enviado_backend": false,
+    "titulo_evento": "Incendio en un reconocido restaurante de Puerto Madero: evacuaron a 50 personas",
+    "resumen_neutro": "Un incendio se desató en un restaurante de Puerto Madero este domingo por la tarde, lo que obligó a evacuar a unas 50 personas. Dos hombres recibieron asistencia médica en el lugar sin necesidad de ser trasladados a un hospital.",
+    "puntos_clave": [
+      "El fuego se originó en el sector de la parrilla o campana extractora.",
+      "Aproximadamente 50 personas fueron evacuadas.",
+      "Dos hombres mayores de edad fueron atendidos por el SAME con signos de exposición al humo."
+    ],
+    "comparativa_enfoques": {
+      "TN": {
+        "cita": "Un incendio se desató este domingo por la tarde en un reconocido restaurante de Puerto Madero y obligó a evacuar a unas 50 personas .",
+        "omitio": "La asistencia del SAME a los dos hombres afectados.",
+        "destaco": "Informó de manera general sobre el incendio y la evacuación de 50 personas sin mencionar la intervención del SAME."
+      },
+      "Perfil": {
+        "cita": "El fuego se inició en el sector de la terraza y provocó una densa columna de humo que pudo verse desde distintos puntos de la zona.",
+        "omitio": "El estado de actualización permanente de la noticia.",
+        "destaco": "Profundizó en las causas del inicio del fuego en la campana extractora y la acumulación de grasa."
+      },
+      "La Nación": {
+        "cita": "Un incendio se desató este domingo cerca de las 18 en Siga La Vaca , el reconocido restaurante de Puerto Madero ubicado en avenida Alicia Moreau de Justo 1714.",
+        "omitio": "Los detalles específicos sobre la zona exacta dentro de la azotea o la campana extractora.",
+        "destaco": "Identificó el local como Siga La Vaca y detalló la participación del SAME y la asistencia a dos hombres."
+      }
+    },
+    "fuentes": [
+      {
+        "id": 6587,
+        "medio": "Perfil",
+        "titulo": "Incendio en un reconocido restaurante de Puerto Madero: evacuaron a 50 personas",
+        "url": "https://www.perfil.com/noticias/sociedad/incendio-en-un-reconocido-restaurante-de-puerto-madero-evacuaron-a-50-personas.phtml",
+        "fecha_publicacion": "2026-09-06T19:44:29-03:00"
+      },
+      {
+        "id": 6578,
+        "medio": "La Nación",
+        "titulo": "Se incendió un reconocido restaurante de Puerto Madero: dos personas asistidas y 50 evacuados",
+        "url": "https://www.lanacion.com.ar/sociedad/se-incendio-un-reconocido-restaurante-de-puerto-madero-dos-personas-asistidas-y-50-evacuados-nid06092026/",
+        "fecha_publicacion": "2026-09-06T20:04:13-03:00"
+      },
+      {
+        "id": 6443,
+        "medio": "TN",
+        "titulo": "Se desató un feroz incendio en un restaurante de Puerto Madero y evacuaron a 50 personas",
+        "url": "https://tn.com.ar/sociedad/2026/09/06/se-desato-un-feroz-incendio-en-un-restaurante-de-puerto-madero-y-evacuaron-a-50-personas/",
+        "fecha_publicacion": "2026-09-06T19:43:03-03:00"
+      }
+    ]
+  }
+}
