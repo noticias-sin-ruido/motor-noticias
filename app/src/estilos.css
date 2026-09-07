@@ -1,47 +1,86 @@
-/* Paleta y tipografía de la cabina.
-   Neutros con sesgo verde-gris: es una superficie de lectura y de control, no
-   un diario. El color se gasta en una sola cosa —el estado del motor—, porque
-   ahí informa: verde anda, ámbar está arrancando, rojo no responde. */
+/* La paleta de Sin Ruido.
+
+   Tres colores de marca: **#22486A azul, #E5A823 oro y blanco**, con el blanco
+   predominante en claro y el azul predominante en oscuro. Todo lo demás se
+   deriva de esos tres, moviendo luminosidad y saturación sobre el mismo matiz.
+
+   **La restricción que define el diseño está medida**: el oro sobre blanco da
+   2,11:1 -- ni siquiera llega al 3,0 del texto grande. Así que en tema claro el
+   oro **nunca es texto**: es relleno, filete o marca, y lo que se apoya encima
+   va en azul (4,52:1). Cuando hace falta ese calor en un texto sobre blanco se
+   usa `--alerta`, que es el mismo oro oscurecido hasta 4,55:1.
+
+   En tema oscuro se da vuelta y es la combinación natural de la marca: sobre el
+   azul, el oro sí lee (7,33:1) y pasa a ser el acento.
+
+   Los tres niveles de tinta son el tono **más claro que todavía cumple** su
+   objetivo (13:1, 7:1 y 4,5:1 contra el peor fondo), así que la jerarquía es lo
+   más suave posible sin dejar de ser legible. Si se toca un valor hay que
+   volver a medirlo: el ojo no distingue 4,4 de 4,6.
+*/
 :root {
-  --fondo: #f2f4f1;
-  --superficie: #fbfcfa;
-  --hundido: #eaeee9;
-  --tinta: #161a18;
-  --tinta-suave: #566360;
-  --tinta-tenue: #8a9793;
-  --filete: #d6dcd6;
-  --acento: #2f6f62;
-  --ok: #2f7d5f;
-  --alerta: #a8791f;
+  --marca-azul: #22486A;
+  --marca-oro: #E5A823;
+
+  --fondo: #f5f8fb;
+  --superficie: #ffffff;
+  --hundido: #e9eff6;
+  --filete: #d5e0ea;
+  --tinta: #20272e;
+  --tinta-suave: #42515f;
+  --tinta-tenue: #5a6f82;
+  --acento: #22486A;
+  /* El oro oscurecido, para cuando el calor de la marca tiene que ser texto. */
+  --alerta: #8c6511;
+  --ok: #2d785b;
   --error: #a8443a;
+  /* Lo que se apoya sobre un relleno de marca. */
+  --sobre-marca: #ffffff;
+  --sobre-oro: #22486A;
+
+  /* Alto unico de los controles chicos. El filtro lleva borde en el grupo
+     y sus botones no, asi que sin una altura fija el grupo queda 2px mas
+     alto que el boton de al lado y se ve desalineado. */
+  --alto-control: 2rem;
+
   --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fondo: #111513;
-    --superficie: #191f1c;
-    --hundido: #141a17;
-    --tinta: #e7ede9;
-    --tinta-suave: #a3afaa;
-    --tinta-tenue: #74827d;
-    --filete: #2a322e;
-    --acento: #74c3ab;
+    --fondo: #0e1c28;
+    --superficie: #132636;
+    --hundido: #0b1621;
+    --filete: #304355;
+    --tinta: #e8ecef;
+    --tinta-suave: #a2b1be;
+    --tinta-tenue: #788da1;
+    /* Sobre el azul, el oro lee: pasa a ser el acento. */
+    --acento: #E5A823;
+    --alerta: #E5A823;
     --ok: #6fbf95;
-    --alerta: #d9ab5a;
     --error: #de8074;
+    --sobre-marca: #0e1c28;
+    --sobre-oro: #22486A;
   }
 }
 
 * { box-sizing: border-box; }
+
+/* La barra del motor es `sticky`, así que al tabular puede quedar tapando el
+   control que acaba de recibir el foco. Es el criterio "Focus Not Obscured"
+   (WCAG 2.2 AA): el scroll se detiene antes, dejando el foco a la vista. */
+html { scroll-padding-top: 5rem; }
 
 body {
   margin: 0;
   background: var(--fondo);
   color: var(--tinta);
   font-family: var(--sans);
-  font-size: 15px;
+  /* 16px de base: con 15px, un `0.75rem` caía en 11,2px y el texto chico
+     de las tarjetas quedaba por debajo del piso legible. */
+  font-size: 16px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   /* La ventana no es una página web: no se selecciona texto por accidente
@@ -53,7 +92,7 @@ body {
 
 .eyebrow {
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--tinta-tenue);
@@ -70,7 +109,7 @@ h1 { font-size: 1.6rem; font-weight: 600; letter-spacing: -0.01em; margin: 0.4re
 }
 
 .fila { display: grid; grid-template-columns: 9rem 1fr; gap: 0.4rem 1rem; align-items: baseline; }
-.fila dt { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tinta-tenue); }
+.fila dt { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tinta-tenue); }
 .fila dd { margin: 0; font-family: var(--mono); font-size: 0.9rem; user-select: text; }
 
 .estado { display: inline-flex; align-items: center; gap: 0.5rem; font-weight: 600; }
@@ -102,13 +141,14 @@ button {
   border-radius: 3px;
   border: 1px solid var(--acento);
   background: var(--acento);
-  color: var(--fondo);
+  color: var(--sobre-marca);
   cursor: pointer;
 }
 button:hover:not(:disabled) { filter: brightness(1.08); }
 button:disabled { opacity: 0.5; cursor: default; }
 button.secundario { background: transparent; color: var(--tinta-suave); border-color: var(--filete); }
 button:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
+a:focus-visible, select:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
 
 .acciones { display: flex; gap: 0.6rem; margin-top: 1.2rem; }
 
@@ -134,8 +174,214 @@ button:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
 
 .crudo { margin: 0.6rem 0 0; padding: 0.7rem 0.8rem; background: var(--hundido); border-radius: 3px; font-family: var(--mono); font-size: 0.75rem; line-height: 1.45; color: var(--tinta-suave); overflow-x: auto; user-select: text; }
 
-button.chico { margin-top: 0.6rem; padding: 0.25rem 0.6rem; font-size: 0.75rem; }
+/* El andamio necesita separar este boton del texto de arriba. Va acotado a
+   `.prueba` y no como `button.chico` global: asi estaba, y ese `margin-top`
+   se filtraba a los botones de la barra del motor, que quedaban medio
+   renglon mas abajo que el texto de estado. */
+.prueba button.chico { margin-top: 0.6rem; }
 
 .tarjeta.peligro { margin-top: 1.2rem; border-left: 3px solid var(--alerta); }
 
 .ayuda.sin-tope { margin-top: 0; margin-bottom: 0.9rem; }
+
+/* --- El shell: barra fija, pestanas y cuerpo ----------------------------- */
+
+.marco { display: flex; flex-direction: column; min-height: 100vh; }
+
+.barra-motor {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--superficie);
+  border-bottom: 1px solid var(--filete);
+  padding: 0.55rem 1.2rem;
+}
+.barra-motor-fila { display: flex; align-items: center; gap: 1rem; max-width: 1500px; margin: 0 auto; }
+/* El logo va como **mascara** y no como <img>.
+
+   El archivo es un trazo monocromo negro sobre transparente, asi que pintarlo
+   con `background-color` no pierde nada y lo hace seguir al tema: sobre blanco
+   sale en el azul de marca (8,23:1) y sobre el azul oscuro sale en oro
+   (7,33:1), que es la combinacion propia de la marca.
+
+   Se ata al ALTO -- es apaisado, 1,84:1 -- y el ancho lo pone `aspect-ratio`.
+   Fijar el ancho lo deformaria. */
+.barra-motor-logo {
+  flex: none;
+  display: block;
+  /* Atado al alto y no al ancho, porque es apaisado 1,84:1. A 2,75rem el
+     ancho sale en ~81px, que es lo que hace que se lea como marca y no como
+     un icono al margen. */
+  height: 2.75rem;
+  aspect-ratio: 2760 / 1504;
+  background-color: var(--acento);
+  -webkit-mask-image: url("/logo-svg.svg");
+  mask-image: url("/logo-svg.svg");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.barra-motor-acciones { margin-left: auto; display: flex; align-items: center; gap: 0.45rem; }
+.barra-motor .aviso { max-width: 1500px; margin: 0.7rem auto 0; }
+
+.pestanas {
+  display: flex; gap: 0.2rem;
+  padding: 0 1.2rem;
+  border-bottom: 1px solid var(--filete);
+  background: var(--fondo);
+}
+.pestana {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--tinta-tenue);
+  padding: 0.6rem 0.9rem; font-size: 0.85rem;
+}
+.pestana.elegida { color: var(--tinta); border-bottom-color: var(--acento); font-weight: 600; }
+.pestana:hover:not(.elegida) { color: var(--tinta-suave); filter: none; }
+
+/* Mas ancho que las 1000px de antes: con la grilla, el limite angosto era
+   justamente lo que impedia aprovechar la pantalla completa. */
+.cuerpo { flex: 1; max-width: 1500px; width: 100%; margin: 0 auto; padding: 1.4rem 1.4rem 3rem; }
+
+/* **La unica definicion de `.chico` en todo el archivo.** Habia dos con el
+   mismo selector en secciones distintas, y entre las dos se repartian las
+   propiedades: una ganaba el padding y la otra dejaba un `margin-top`
+   suelto. La altura es fija y el contenido se centra adentro, asi el boton
+   alinea con cualquier otro control de la misma altura sin depender de que
+   el padding y la fuente den la misma suma. */
+button.chico {
+  height: var(--alto-control);
+  padding: 0 0.7rem;
+  font-size: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* --- La lista de trabajo -------------------------------------------------- */
+
+.pantalla { display: flex; flex-direction: column; gap: 1.1rem; }
+.pantalla-cab { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
+.vacio { color: var(--tinta-tenue); font-size: 0.9rem; padding: 2rem 0; text-align: center; }
+
+.filtro { display: flex; gap: 1px; background: var(--filete); border: 1px solid var(--filete); border-radius: 3px; overflow: hidden; height: var(--alto-control); }
+.filtro-opcion { background: var(--superficie); border: none; border-radius: 0; color: var(--tinta-suave); padding: 0.35rem 0.8rem; font-size: 0.78rem; }
+.filtro-opcion.elegida { background: var(--acento); color: var(--sobre-marca); font-weight: 600; }
+.filtro-opcion:hover:not(.elegida):not(:disabled) { background: var(--hundido); filter: none; }
+
+/* --- El pipeline --------------------------------------------------------- */
+
+.pipeline { background: var(--superficie); border: 1px solid var(--filete); border-radius: 4px; padding: 0.7rem 0.9rem; }
+.pipeline-vacio { color: var(--tinta-tenue); font-size: 0.82rem; }
+.pipeline-fila { display: flex; align-items: baseline; gap: 0.9rem; flex-wrap: wrap; font-size: 0.8rem; }
+.pipeline-dato { color: var(--tinta-tenue); font-family: var(--mono); font-size: 0.75rem; }
+.pipeline-pasos { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-left: auto; }
+.pipeline-paso { font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); }
+.pipeline-paso b { color: var(--tinta-suave); }
+
+/* --- Las tarjetas de cluster --------------------------------------------- */
+
+/* Grilla y no columna: en pantalla completa una tarjeta por fila deja la mitad
+   derecha vacia y obliga a barrer con la vista un renglon larguisimo para leer
+   tres datos. `auto-fill` con un minimo de 21rem da 1 columna en una ventana
+   angosta y hasta 4 en pantalla completa, sin breakpoints a mano.
+
+   **`grid-auto-rows` fija el alto de la fila**, que es lo que vuelve regular a
+   la grilla: sin eso cada tarjeta mide lo que su contenido y los bordes quedan
+   a alturas distintas en cada columna. El valor sale de lo que la tarjeta
+   necesita en su peor caso -- titulo de tres renglones, cuatro datos y la fila
+   de botones -- y los titulos entran: medidos los 537 clusters reales, el mas
+   largo tiene 179 caracteres y en tres renglones a este ancho entran ~186. */
+.lista-clusters {
+  list-style: none; margin: 0; padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr));
+  grid-auto-rows: 14rem;
+  gap: 0.8rem;
+}
+
+.tarjeta-cluster {
+  background: var(--superficie);
+  border: 1px solid var(--filete);
+  border-radius: 4px;
+  padding: 0.85rem 0.95rem;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tc-cab { display: flex; align-items: flex-start; gap: 0.6rem; }
+
+/* El titulo **reserva** sus tres renglones aunque tenga uno: es lo que hace que
+   los datos arranquen a la misma altura en todas las tarjetas de la fila. El
+   recorte a tres lineas es una red de seguridad, no el caso normal. */
+.tc-titulo {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.35;
+  min-height: calc(3 * 1.35em);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: text;
+}
+
+.chip { flex: none; font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.06em; padding: 0.1rem 0.4rem; border-radius: 2px; border: 1px solid var(--filete); color: var(--tinta-tenue); }
+.chip-abierto { border-color: var(--alerta); color: var(--alerta); }
+.chip-procesado { border-color: var(--ok); color: var(--ok); }
+
+/* El hueco que comparten los datos y las notas. `min-height: 0` es lo que
+   permite que el hijo con scroll no desborde la caja flex. */
+.tc-cuerpo { flex: 1; min-height: 0; margin-top: 0.5rem; overflow: hidden; }
+
+.tc-datos { display: flex; flex-wrap: wrap; gap: 0.15rem 1.3rem; margin: 0; font-size: 0.78rem; }
+.tc-datos > div { display: flex; gap: 0.4rem; align-items: baseline; }
+.tc-datos dt { color: var(--tinta-tenue); }
+.tc-datos dd { margin: 0; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
+.tc-hecho { color: var(--ok); font-weight: 600; }
+.tc-ojo { color: var(--alerta); font-weight: 600; }
+.tc-medios-lista {
+  flex-basis: 100%; margin: 0.35rem 0 0;
+  font-size: 0.75rem; color: var(--tinta-tenue);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Las notas entran en el mismo hueco, con su propio scroll: la tarjeta no
+   cambia de alto al abrirlas y la fila entera se queda quieta. */
+.tc-notas {
+  list-style: none; margin: 0; padding: 0;
+  height: 100%; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 0.4rem;
+  font-size: 0.78rem;
+}
+.tc-notas li { display: flex; gap: 0.5rem; align-items: baseline; }
+.tc-medio { flex: none; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); min-width: 4.5rem; }
+.tc-notas a { color: var(--tinta-suave); text-decoration: none; user-select: text; }
+.tc-notas a:hover { color: var(--acento); text-decoration: underline; }
+
+.tc-acciones { display: flex; gap: 0.4rem; margin-top: 0.6rem; flex: none; }
+
+/* --- El dialogo de sintetizar -------------------------------------------- */
+
+.modal-fondo { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 1.5rem; z-index: 50; }
+.modal { background: var(--superficie); border: 1px solid var(--filete); border-radius: 5px; padding: 1.3rem 1.4rem; max-width: 32rem; width: 100%; max-height: 90vh; overflow-y: auto; }
+.modal-titulo { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.modal-hecho { margin: 0.3rem 0 1.1rem; font-size: 0.9rem; color: var(--tinta-suave); user-select: text; }
+
+.modal select { width: 100%; font-family: var(--sans); font-size: 0.88rem; padding: 0.5rem 0.6rem; border: 1px solid var(--filete); border-radius: 3px; background: var(--fondo); color: var(--tinta); }
+.modal select:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+
+/* `forzar` es lo unico de la app que gasta plata sin que el ciclo lo haya
+   decidido, asi que se ve distinto: prendido, se pinta de alerta. */
+.casilla { display: flex; gap: 0.6rem; align-items: flex-start; margin-top: 1rem; padding: 0.7rem 0.8rem; border: 1px solid var(--filete); border-radius: 3px; font-size: 0.82rem; color: var(--tinta-suave); cursor: pointer; }
+.casilla input { margin-top: 0.15rem; accent-color: var(--alerta); }
+.casilla-encendida { border-color: var(--alerta); background: var(--hundido); }
+
+.desenlace { padding: 0.9rem 1rem; border-radius: 3px; background: var(--hundido); display: flex; flex-direction: column; gap: 0.5rem; }
+.desenlace p { margin: 0; font-size: 0.85rem; color: var(--tinta-suave); }
+.desenlace-hecha { border-left: 3px solid var(--ok); }
+.desenlace-cortada { border-left: 3px solid var(--alerta); }
+.desenlace code { font-family: var(--mono); user-select: text; }

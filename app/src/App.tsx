@@ -1,36 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import * as motor from "./motor";
-import Andamio from "./Andamio";
 import type { Estado } from "./motor";
-import type { ErrorDeApi } from "./bindings/ErrorDeApi";
-import type { Salud } from "./bindings/Salud";
+import type { Cluster } from "./bindings/Cluster";
 
-/**
- * El error llega como categoría cerrada desde Rust, no como texto suelto:
- * `sin_token` y `motor_caido` piden acciones distintas de quien mira, así que
- * la interfaz tiene que poder distinguirlas sin parsear un mensaje. El tipo lo
- * genera `ts-rs` desde el enum de Rust.
- */
-function mensajeDe(error: ErrorDeApi): string {
-  switch (error.tipo) {
-    case "sin_token":
-      return "Falta configurar el token del motor.";
-    case "motor_caido":
-      return "El motor no responde.";
-    case "no_autorizado":
-      return "El motor rechazó el token. Puede haber cambiado en el .env.";
-    case "no_encontrado":
-      return "El motor no encontró eso. Puede haberse borrado; probá refrescar.";
-    case "invalida":
-      return `El motor rechazó el pedido: ${error.detalle}`;
-    case "respuesta":
-      return `El motor respondió ${error.detalle}.`;
-    case "red":
-      return `Error de red: ${error.detalle}`;
-  }
-}
+import BarraMotor from "./componentes/BarraMotor";
+import ListaDeTrabajo from "./pantallas/ListaDeTrabajo";
+import Andamio from "./Andamio";
 
 function PedirToken({ alGuardar }: { alGuardar: () => void }) {
   const [token, setToken] = useState("");
@@ -116,134 +93,14 @@ function PedirRepo({ alGuardar }: { alGuardar: () => void }) {
   );
 }
 
-function Cabina({ alOlvidarToken }: { alOlvidarToken: () => void }) {
-  const [estado, setEstado] = useState<Estado>("parado");
-  const [salud, setSalud] = useState<Salud | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [ocupado, setOcupado] = useState(false);
-  const desuscribir = useRef<(() => void) | null>(null);
-
-  // Rust avisa cada transición del arranque; sin esto la ventana no tendría
-  // nada que mostrar entre "reconstruyendo" y "listo", que pueden ser minutos.
-  useEffect(() => {
-    void motor.alCambiarEstado(setEstado).then((off) => {
-      desuscribir.current = off;
-    });
-    return () => desuscribir.current?.();
-  }, []);
-
-  const mirarSalud = useCallback(async () => {
-    try {
-      setSalud(await invoke<Salud>("motor_salud"));
-      setError(null);
-    } catch (e) {
-      setSalud(null);
-      setError(mensajeDe(e as ErrorDeApi));
-    }
-  }, []);
-
-  const sondear = useCallback(async () => {
-    const actual = await motor.estadoActual();
-    setEstado(actual);
-    if (actual === "listo") await mirarSalud();
-  }, [mirarSalud]);
-
-  useEffect(() => {
-    void sondear();
-  }, [sondear]);
-
-  async function arrancar() {
-    setOcupado(true);
-    setError(null);
-    try {
-      const final = await motor.arrancar();
-      setEstado(final);
-      if (final === "listo") await mirarSalud();
-    } catch (e) {
-      setError(motor.mensajeDeRechazo(e));
-      setEstado("error");
-    } finally {
-      setOcupado(false);
-    }
-  }
-
-  async function detener() {
-    setOcupado(true);
-    setError(null);
-    try {
-      setEstado(await motor.detener());
-      setSalud(null);
-    } catch (e) {
-      setError(motor.mensajeDeRechazo(e));
-    } finally {
-      setOcupado(false);
-    }
-  }
-
-  async function olvidar() {
-    await invoke("token_borrar");
-    alOlvidarToken();
-  }
-
-  const { texto, clase } = motor.describir(estado);
-
-  return (
-    <>
-      <div className="tarjeta">
-        <dl className="fila">
-          <dt>Motor</dt>
-          <dd>
-            <span className={`estado ${clase}`}>{texto}</span>
-          </dd>
-          {salud && (
-            <>
-              <dt>Base</dt>
-              <dd>{salud.database}</dd>
-              <dt>Entorno</dt>
-              <dd>{salud.environment}</dd>
-              <dt>Hora del motor</dt>
-              <dd>{salud.hora_local}</dd>
-            </>
-          )}
-        </dl>
-        {error && <div className="aviso">{error}</div>}
-      </div>
-
-      <div className="acciones">
-        <button
-          onClick={() => void arrancar()}
-          disabled={ocupado || estado === "listo"}
-        >
-          {ocupado ? "Trabajando…" : "Arrancar motor"}
-        </button>
-        <button
-          className="secundario"
-          onClick={() => void detener()}
-          disabled={ocupado || estado === "parado"}
-        >
-          Detener motor
-        </button>
-        <button
-          className="secundario"
-          onClick={() => void sondear()}
-          disabled={ocupado}
-        >
-          Actualizar
-        </button>
-        <button className="secundario" onClick={() => void olvidar()}>
-          Olvidar token
-        </button>
-      </div>
-    </>
-  );
-}
+/** Las vistas del cuerpo. El feed de lectura llega en la fase 5. */
+type Vista = "trabajo" | "andamio";
 
 export default function App() {
   const [hayToken, setHayToken] = useState<boolean | null>(null);
   const [hayRepo, setHayRepo] = useState<boolean | null>(null);
-  // Fase 4: el andamio que cruza el puente `invoke()`. Es temporal y se va
-  // junto con la pantalla de verdad.
-  const [andamio, setAndamio] = useState(false);
+  const [estado, setEstado] = useState<Estado>("parado");
+  const [vista, setVista] = useState<Vista>("trabajo");
 
   const revisar = useCallback(async () => {
     setHayToken(await invoke<boolean>("token_existe"));
@@ -254,30 +111,88 @@ export default function App() {
     void revisar();
   }, [revisar]);
 
-  const cargando = hayToken === null || hayRepo === null;
+  if (hayToken === null || hayRepo === null) {
+    return (
+      <main className="envoltorio">
+        <div className="tarjeta">Cargando…</div>
+      </main>
+    );
+  }
+
+  // El token y la carpeta se piden **antes** de dibujar el shell: sin ellos no
+  // hay nada que la barra pueda decir, ni pantalla que pueda pedir datos.
+  if (!hayToken) {
+    return (
+      <main className="envoltorio">
+        <p className="eyebrow">Sin Ruido · cabina</p>
+        <h1>Primero, el token</h1>
+        <PedirToken alGuardar={() => setHayToken(true)} />
+      </main>
+    );
+  }
+
+  if (!hayRepo) {
+    return (
+      <main className="envoltorio">
+        <p className="eyebrow">Sin Ruido · cabina</p>
+        <h1>Dónde está el motor</h1>
+        <PedirRepo alGuardar={() => setHayRepo(true)} />
+      </main>
+    );
+  }
 
   return (
-    <main className="envoltorio">
-      <p className="eyebrow">Sin Ruido · cabina</p>
-      <h1>{andamio ? "El puente invoke()" : "Estado del motor"}</h1>
-      {cargando ? (
-        <div className="tarjeta">Cargando…</div>
-      ) : !hayToken ? (
-        <PedirToken alGuardar={() => setHayToken(true)} />
-      ) : !hayRepo ? (
-        <PedirRepo alGuardar={() => setHayRepo(true)} />
-      ) : andamio ? (
-        <Andamio />
-      ) : (
-        <Cabina alOlvidarToken={() => setHayToken(false)} />
-      )}
-      {!cargando && hayToken && hayRepo && (
-        <div className="acciones">
-          <button className="secundario chico" onClick={() => setAndamio(!andamio)}>
-            {andamio ? "volver a la cabina" : "andamio de la fase 4"}
-          </button>
-        </div>
-      )}
-    </main>
+    <div className="marco">
+      <BarraMotor
+        estado={estado}
+        alCambiar={setEstado}
+        alOlvidarToken={() => setHayToken(false)}
+      />
+
+      <nav className="pestanas">
+        <button
+          className={`pestana${vista === "trabajo" ? " elegida" : ""}`}
+          onClick={() => setVista("trabajo")}
+        >
+          Lista de trabajo
+        </button>
+        <button
+          className={`pestana${vista === "andamio" ? " elegida" : ""}`}
+          onClick={() => setVista("andamio")}
+        >
+          Andamio
+        </button>
+      </nav>
+
+      <main className="cuerpo">
+        {/* **Ninguna pantalla le pega a la API hasta `listo`.** Antes de eso el
+            motor puede no estar escuchando todavía, o estar migrando la base, y
+            lo que volvería sería un error de red disfrazado de problema de
+            datos. */}
+        {estado !== "listo" ? (
+          <div className="tarjeta">
+            <p className="sin-tope">
+              El motor no está operativo, así que todavía no hay nada que
+              pedirle. Arrancalo desde la barra de arriba.
+            </p>
+            <p className="ayuda">
+              Estado actual: <b>{motor.describir(estado).texto}</b>.
+            </p>
+          </div>
+        ) : vista === "trabajo" ? (
+          <ListaDeTrabajo
+            alVerAngulos={(c: Cluster) => {
+              // La pantalla 2 es la fase 5. Hasta entonces el botón existe pero
+              // no lleva a ningún lado, y decirlo es mejor que un clic mudo.
+              window.alert(
+                `El feed de lectura llega en la fase 5.\n\nCluster ${c.id}: ${c.titulo_evento}`,
+              );
+            }}
+          />
+        ) : (
+          <Andamio />
+        )}
+      </main>
+    </div>
   );
 }
