@@ -378,7 +378,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 ### 14. La app de escritorio del operador — la cabina del motor
 
-**Diseñada el 06/09/2026** en una sesión de grillado completa; ninguna línea escrita todavía. Las decisiones, con lo que se evaluó y se descartó, están en `change_logs.md`.
+**Diseñada el 06/09/2026** en una sesión de grillado completa. **Fases 0 a 3 construidas el 06/09/2026** — ver el estado abajo. Las decisiones, con lo que se evaluó y se descartó, están en `change_logs.md`.
 
 **Qué es.** Una app Windows, para un solo operador, que **maneja el motor en vez de empaquetarlo**: prende y apaga los contenedores que ya existen y le habla a `localhost:8000`. Sin hosting, sin nada siempre activo, sin tocar pgvector ni empaquetar los 1,8 GB del `.venv`.
 
@@ -398,6 +398,52 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 - [x] **`GET /pipeline`** ✅ — última corrida, si hay una en curso y las previas. `corriendo` no sale solo de `fin IS NULL`: una corrida abierta y vieja se informa como `huerfana` en vez de mentir.
 
 **Los cuatro cerrados el 06/09/2026**, con 18 tests nuevos y 6 mutaciones detectadas. Detalle en `change_logs.md`. El motor pasó de 16 a 19 endpoints y ya sabe devolver lo que produce y decir en qué anda.
+
+#### Estado de la app — dónde retomar
+
+Construidas las **fases 0 a 3** del plan de nueve, y la **4 en curso**. Verde en `cargo fmt`, `clippy -D warnings`, 53 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, 796 tests y `ruff`.
+
+- **Fase 0 · toolchain** ✅ — Node, rustup con toolchain MSVC y Build Tools instalados.
+- **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
+- **Fase 2 · control del motor** ✅ — levanta y para los contenedores (`up -d --build` y `stop`, nunca `down`), con la máquina de estados `reconstruyendo → arrancando → migrando → listo` sondeada contra el 503. Detecta que Docker Desktop no está corriendo y lo dice.
+- **Fase 3 · cliente tipado** ✅ — 16 structs derivados de fixtures capturados del motor real, los tipos de TypeScript generados desde Rust con `ts-rs`, y siete comandos, uno por endpoint. `404` y `422` dejaron de colapsar en un número.
+- **Fase 4 · lista de trabajo** ⏳ — cruzado el puente `invoke()` y resuelto el punto flojo del `Set<cluster_id>` (los dos abajo). **Falta la pantalla en sí**, prender la CSP y borrar el andamio.
+
+**Fase 4, en curso — el puente `invoke()` ya se cruzó (07/09/2026).** Los seis
+comandos que nunca se habían llamado desde la ventana —`listar_clusters`,
+`listar_sintesis`, `detalle_de_sintesis`, `estado_del_pipeline`,
+`listar_modelos` y `sintetizar_cluster`— se ejercitaron con un andamio
+descartable (`app/src/Andamio.tsx`) que corre solo al montar. **Diez pruebas,
+cero fallidas.** Cruzó también el `flatten` del detalle, y `listar_modelos`
+llegó sin `api_key_env` ni `base_url`.
+
+**La conversión a camelCase quedó probada, no supuesta.** La misma consulta con
+las dos grafías: `clusterId` filtró y devolvió 1 fila, `cluster_id` fue ignorado
+y devolvió 100. Escrito en snake_case compila, pasa `tsc` y no filtra nada. La
+fuente lo confirma: `ArgumentCase::Camel` es el default en `tauri-macros 2.6.3`
+(`wrapper.rs:51`, conversión en `:506`). Un segundo control, gratis: pasarle
+`cluster_id` a `sintetizar_cluster` —donde el argumento es obligatorio— hace que
+el puente rechace mientras deserializa, antes de que salga un pedido HTTP.
+
+**El punto flojo del plan se midió y se resolvió (07/09/2026).** `GET /clusters`
+no decía si el cluster ya tenía síntesis, y la v1 lo iba a resolver del lado del
+cliente paginando `/sintesis` para armar un `Set<cluster_id>`. **Medido desde la
+ventana: 5 páginas, 438 síntesis, 201 ms antes de dibujar una fila** — y
+creciendo a ~28 síntesis por día activo, o sea que cruzaba el segundo en un par
+de meses. Peor que la lentitud: el tope de páginas del cliente habría empezado a
+truncar el `Set` en silencio, y la pantalla habría dicho que un cluster no tiene
+síntesis cuando sí las tiene.
+
+La salida fue la que el plan anticipaba: **un campo del lado del motor**.
+`GET /clusters` ahora devuelve `cantidad_sintesis`, de una consulta agrupada
+sobre los ids que la lista ya trajo — sin migración y sin agregar una consulta
+por cluster. Medido desde la misma ventana después del cambio: **14 ms en un
+solo pedido**, y constante. Cero cuando no hay ninguna, nunca ausente, para que
+la ventana no tenga que distinguir "no tiene" de "no vino el campo".
+
+**Dos cosas más, con fecha:**
+- La **CSP del webview está apagada** (`"csp": null`). Se prende en la fase 4, junto con las pantallas que renderizan titulares y citas de medios — el contenido de terceros que la justifica. Valor propuesto: `default-src 'self'`.
+- Los tests de `secretos.rs` **tocan el Credential Manager real sin `#[ignore]`**. Fue deliberado, pero **va a romper en CI cuando llegue la fase 8**, donde no hay almacén de credenciales.
 
 #### Lo que queda deliberadamente afuera de la v1
 

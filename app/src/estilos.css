@@ -115,3 +115,27 @@ button:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
 .aviso { margin-top: 1rem; padding: 0.7rem 0.9rem; border-radius: 3px; border-left: 3px solid var(--error); background: var(--hundido); font-size: 0.87rem; color: var(--tinta-suave); }
 .ayuda { font-size: 0.82rem; color: var(--tinta-tenue); margin-top: 0.8rem; }
 .ayuda code { font-family: var(--mono); user-select: text; }
+
+/* --- Andamio de la fase 4. Se borra junto con `Andamio.tsx`. --------------
+   Deliberadamente sobrio: es un instrumento de medicion, no una pantalla. */
+
+.pruebas { list-style: none; margin: 1rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; background: var(--filete); border: 1px solid var(--filete); border-radius: 4px; overflow: hidden; }
+
+.prueba { background: var(--superficie); padding: 0.85rem 1rem; }
+.prueba.suelta { margin-top: 1rem; border: 1px solid var(--filete); border-radius: 4px; }
+
+.prueba-cab { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.prueba-cab .estado { flex: none; }
+.prueba-nombre { font-family: var(--mono); font-size: 0.85rem; font-weight: 600; user-select: text; }
+.prueba-args { font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); user-select: text; }
+.prueba-ms { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); font-variant-numeric: tabular-nums; }
+
+.prueba-veredicto { margin: 0.4rem 0 0; font-size: 0.85rem; color: var(--tinta-suave); user-select: text; }
+
+.crudo { margin: 0.6rem 0 0; padding: 0.7rem 0.8rem; background: var(--hundido); border-radius: 3px; font-family: var(--mono); font-size: 0.75rem; line-height: 1.45; color: var(--tinta-suave); overflow-x: auto; user-select: text; }
+
+button.chico { margin-top: 0.6rem; padding: 0.25rem 0.6rem; font-size: 0.75rem; }
+
+.tarjeta.peligro { margin-top: 1.2rem; border-left: 3px solid var(--alerta); }
+
+.ayuda.sin-tope { margin-top: 0; margin-bottom: 0.9rem; }

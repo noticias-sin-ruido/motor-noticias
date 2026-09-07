@@ -87,6 +87,15 @@ pub struct Cluster {
     pub estado: String,
     pub fecha_creacion: String,
     pub cantidad_noticias: u32,
+    /// Cuántas síntesis tiene el cluster. **Sin `Option`**: el motor lo
+    /// devuelve siempre, con `0` cuando no hay ninguna, justamente para que la
+    /// ventana no tenga que distinguir "no tiene" de "no vino el campo".
+    ///
+    /// Existe porque sin él la lista de trabajo tenía que paginar
+    /// `GET /sintesis` entera para saber qué cluster ya estaba resuelto.
+    /// Medido el 07/09/2026 desde esta misma app: 5 páginas y 201 ms antes de
+    /// dibujar una fila, creciendo a ~28 síntesis por día.
+    pub cantidad_sintesis: u32,
     pub medios: Vec<String>,
     pub noticias: Vec<NoticiaBreve>,
 }
@@ -382,6 +391,20 @@ mod pruebas {
         // `cantidad_noticias` y el largo de `noticias` describen lo mismo: si
         // se separan, uno de los dos está mintiendo.
         assert_eq!(primero.cantidad_noticias as usize, primero.noticias.len());
+
+        // **La captura cubre los dos casos del campo nuevo a propósito.** Un
+        // fixture donde todos los clusters tuvieran síntesis no probaría que un
+        // cluster sin ninguna llega como `0` y no como campo ausente, que es la
+        // distinción por la que el campo existe. Si una recaptura pierde alguno
+        // de los dos casos, este test lo dice.
+        assert!(
+            r.clusters.iter().any(|c| c.cantidad_sintesis == 0),
+            "la captura tiene que incluir un cluster sin sintesis"
+        );
+        assert!(
+            r.clusters.iter().any(|c| c.cantidad_sintesis > 0),
+            "la captura tiene que incluir un cluster ya sintetizado"
+        );
     }
 
     #[test]

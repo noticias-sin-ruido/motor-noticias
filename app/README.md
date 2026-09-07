@@ -207,5 +207,38 @@ Son las únicas que ejercitan la cadena entera —Credential Manager, armado de 
 query, red, deserialización—; las demás deserializan fixtures. **Ninguna manda
 un POST**, para que correrlas nunca pueda terminar en una llamada paga.
 
+**Fase 4 — el puente, cruzado (07/09/2026).** Los seis comandos que la fase 3
+dejó sin invocar desde la ventana ya se ejercitaron con un andamio descartable
+(`src/Andamio.tsx`): diez pruebas, cero fallidas.
+
+Hacía falta porque entre Rust y el webview hay una capa que **ningún compilador
+ve**: `cargo test` llama las funciones directo, y `tsc` tipa el retorno de
+`invoke<T>()` con lo que uno le declare — no sabe qué comandos existen ni qué
+argumentos piden. `invoke("comando_inexistente", { fruta: 3 })` compila perfecto.
+
+⚠️ **Los argumentos van en camelCase**, y esto está **medido**, no supuesto: la
+misma consulta con las dos grafías devolvió 1 fila con `clusterId` y 100 con
+`cluster_id`, que fue ignorado.
+
+```ts
+invoke("sintetizar_cluster", { clusterId: 8, modeloId: null, forzar: false })
+//                             ^^^^^^^^^ NO `cluster_id`
+```
+
+Escribirlo en snake_case compila, pasa `tsc` y falla en ejecución.
+`ArgumentCase::Camel` es el default en `tauri-macros 2.6.3` (`wrapper.rs:51`,
+la conversión en `:506`).
+
+**El andamio es descartable y se borra con la pantalla de verdad.** Corre solo al
+montar y es todo de lectura; el único POST está detrás de un botón aparte,
+apuntando a un cluster que ya tiene síntesis para que `forzar: false` corte en
+`sin_material_nuevo` sin llegar al proveedor.
+
+**El `Set<cluster_id>` se midió y se resolvió.** Saber qué cluster ya está
+sintetizado costaba **5 pedidos y 201 ms** paginando `/sintesis` antes de dibujar
+una fila, creciendo con el histórico. Ahora `GET /clusters` trae
+`cantidad_sintesis`: **14 ms en un pedido**, y constante. Ver el punto 14 de
+`specs/roadmap.md`.
+
 Lo que **todavía no hace**: las dos pantallas (fases 4 y 5), el ícono en la
 bandeja (fase 6) y el instalador (fase 9).

@@ -3116,3 +3116,110 @@ Recién con eso a la vista se corrió el build largo. Terminó solo, sin abortar
 #### Y una consecuencia operativa que conviene recordar
 
 El bucle de reinicio que destapó todo esto no era un bug: **aplicar una migración desde el host deja la imagen atrás.** La base quedó marcada en `b963fe84825f` y la imagen no tenía ese archivo, así que el `alembic upgrade head` del arranque no encontraba la revisión y el contenedor moría en loop. Se arregla reconstruyendo, y es algo a tener presente cuando la app de escritorio levante contenedores por su cuenta.
+
+### `codebase-memory-mcp` se evaluó y NO se instala, con la condición que lo reabre (07/09/2026)
+
+Se propuso sumar [`DeusData/codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp) a los proyectos: un servidor MCP que indexa el código en un grafo persistente para que el agente consulte estructura en vez de leer archivos. Queda documentado porque **la herramienta no tiene nada malo** — el motivo del descarte es del proyecto, no de ella, y sin eso escrito la discusión se repite.
+
+#### Lo que la herramienta es, verificado contra la API de GitHub y no contra el README
+
+42.564 estrellas, 3.474 forks, MIT, creado el 24/02/2026 y con push el mismo día de esta evaluación. Binario estático en C, 158-162 lenguajes vía tree-sitter vendorizado, SQLite en `~/.cache/`, **todo local: sin API keys, sin telemetría, sin servicios hosteados**. La postura de seguridad tampoco es marketing: cada artefacto de release trae su bundle de Sigstore, hay `sbom.json`, evidencia de VirusTotal, y en CI están `codeql.yml`, `scorecard.yml` y `dco.yml`. El zip de Windows lleva 30.459 descargas.
+
+Los dos reparos de madurez, dichos igual: es **v0.10.8** (pre-1.0, última release del 19/08) con 545 issues abiertos, y de ~1.900 commits **1.611 son de una sola persona** — los 147 contribuidores son mayormente parches sueltos. Si se rompe, se depura C ajeno.
+
+*Lo que se corrió:* la API de GitHub. *Lo que no:* no se descargó el binario ni se validó una firma; solo se comprobó que los bundles existen.
+
+#### El motivo del descarte: el problema no existe acá
+
+| | archivos | líneas |
+|---|---|---|
+| `src/` | 36 | 9.530 |
+| `app/` (Rust + TS, sin bindings) | 12 | 2.086 |
+| `alembic/` | 16 | 1.154 |
+| **Fuente** | **64** | **12.770** |
+| `tests/` | 19 | 11.508 |
+
+El archivo más grande del sistema es `src/main.py`, con 1.420 líneas. **Un `grep` encuentra cualquier cosa de este repo en una llamada**, y el árbol de fuente entero entra en un contexto.
+
+El "99,2% menos tokens" que la herramienta publica está medido contra explorar archivo por archivo el kernel de Linux: 28 millones de líneas. Es un ahorro real y es de otro problema. A cambio, el costo se paga siempre: ~40 MB de binario, un índice por proyecto, y **15 descripciones de herramientas entrando en cada turno**, haya o no algo que buscar.
+
+#### El reparo que pesó más: un índice desactualizado es una mentira nueva
+
+Los errores que este proyecto viene coleccionando no son de búsqueda. En una sola sesión: PowerShell destruyendo el UTF-8 de un `.rs`, `cargo` resolviendo `.cargo/config.toml` desde el directorio actual y no desde el manifiesto, `ts-rs` escribiendo fuera del directorio vigilado, una mutación que reportó "SOBREVIVE" porque en realidad no había compilado, y el puente `invoke()` que ningún compilador ve.
+
+**Un grafo de código no habría cazado ninguno.** Todos tienen la misma forma: *el artefacto en disco no es el que yo creía*. Son fallas de verificación, no de navegación — y agregar una capa que contesta rápido sobre una copia del código es exactamente el modo de falla contra el que este repo entrena. Es el caso de `bindings:check` otra vez: el guardián pasaba en verde **porque** medía un artefacto viejo, y por eso el error sobrevivió tanto.
+
+#### El otro camino, y su contra
+
+La alternativa evaluada era instalarlo acotado y medirlo contra `grep` en tres preguntas reales del repo. Se descartó por el costo de la prueba misma, no por el resultado esperado: **el instalador auto-configura 45 superficies de agentes**, o sea que escribe en los archivos de configuración de Claude Code y de todo lo demás que haya instalado. Es reversible, pero hay que auditar qué tocó, y eso es más trabajo que el que ahorraría.
+
+#### La condición que lo reabre
+
+Esto se vuelve a discutir cuando pase **cualquiera** de las dos:
+
+- el árbol de **fuente** supera las ~40.000 líneas (hoy 12.770), o
+- arranca un segundo proyecto grande cuyo mapa no esté en la cabeza de nadie.
+
+Mientras tanto la decisión es la regla que este repo ya tiene escrita: no resolver problemas de escala que todavía no existen.
+### El puente `invoke()`, y el `Set<cluster_id>` medido y resuelto (07/09/2026)
+
+Primer tramo de la fase 4 de la app. Dos cosas que el plan había dejado abiertas a propósito: una capa sin verificar y una decisión esperando un número.
+
+#### Los seis comandos que ningún compilador estaba mirando
+
+La fase 3 dejó siete comandos escritos y probados, pero **sólo `motor_salud` se había invocado desde la ventana**. No era desconfianza en el código: entre Rust y el webview hay una capa que ningún compilador ve. `cargo test` llama las funciones directo, y `tsc` tipa el retorno de `invoke<T>()` con lo que uno le declare — no sabe qué comandos existen ni qué argumentos piden. `invoke("comando_inexistente", { fruta: 3 })` compila perfecto.
+
+Se cruzó con un **andamio descartable** (`app/src/Andamio.tsx`) que corre solo al montar y es todo de lectura, salvo un POST detrás de un botón aparte. **Diez pruebas, cero fallidas.** Cruzaron los seis comandos, el `flatten` de `DetalleSintesis`, y `listar_modelos` llegó sin `api_key_env` ni `base_url` — la primera vez que esa respuesta real llega a la ventana.
+
+#### La conversión a camelCase quedó probada, no supuesta
+
+El riesgo conocido era que **Tauri convierte los nombres de los argumentos a camelCase**. Hasta la fase 2 ningún comando tenía argumentos de más de una palabra, así que la conversión era la identidad y nunca se había ejercitado.
+
+En vez de afirmarlo, se midió: la misma consulta con las dos grafías. **`clusterId` filtró y devolvió 1 fila; `cluster_id` fue ignorado y devolvió 100.** Escrito en snake_case compila, pasa `tsc` y no filtra nada. La fuente lo confirma: `ArgumentCase::Camel` es el default en `tauri-macros 2.6.3` (`wrapper.rs:51`, la conversión en `:506`).
+
+Un segundo control, y **gratis**: pasarle `cluster_id` a `sintetizar_cluster` —donde el argumento es obligatorio— hace que el puente rechace mientras deserializa los argumentos, antes de entrar al cuerpo del comando y por lo tanto antes de que salga un pedido HTTP. Probar la trampa en el comando que gasta plata no cuesta nada.
+
+#### El `Set<cluster_id>`: el número que faltaba
+
+`GET /clusters` no decía si un cluster ya tenía síntesis, y la v1 lo iba a resolver del lado del cliente paginando `/sintesis` para armar un `Set<cluster_id>`. El plan lo había marcado como **la parte más floja** y había dejado escrito que se mediría antes de resolverlo.
+
+**Medido desde la ventana, con la base real:**
+
+| | pedidos | tiempo |
+|---|---|---|
+| Paginar `/sintesis` (lo que iba a hacer la v1) | 5 | **201 ms** |
+| `cantidad_sintesis` en `GET /clusters` | 1 | **14 ms** |
+
+201 ms antes de dibujar una sola fila, bajando 438 objetos completos —con sus arrays de tópicos y medios— para calcular un conjunto de enteros, y para responder una pregunta sobre los veinte clusters que se ven.
+
+**Y no era el número de hoy lo que decidía, sino su pendiente.** El histórico crece a ~28,5 síntesis por día activo (428 en 15 días activos). A ese ritmo: ~480 ms en tres semanas, ~960 ms en dos meses. Peor que la lentitud, hay un punto donde **deja de ser lento y pasa a ser incorrecto**: cualquier tope de páginas del lado del cliente empieza a truncar el `Set` en silencio, y la pantalla dice que un cluster no tiene síntesis cuando sí las tiene.
+
+#### El arreglo, y por qué es del lado del motor
+
+Se evaluaron dos caminos. **Acotar del lado del cliente** —pedir `/sintesis?cluster_id=X` sólo para los veinte clusters visibles— se descartó: cambia 5 viajes por 20, se rehace con cada filtro, y probablemente empeora la latencia que se quería arreglar.
+
+El elegido es el que el propio plan anticipaba: **un campo del lado del motor**. `listar_clusters` devuelve `cantidad_sintesis`, de **una consulta agrupada** sobre los ids que la lista ya trajo — el mismo criterio del `selectinload` que ya estaba ahí para no ser 1 + N. Sin migración y sin cambio de esquema.
+
+**`0` y nunca ausente.** Un campo faltante obligaría a la ventana a tratar "no tiene síntesis" igual que "no vino el dato", que son cosas distintas.
+
+Esto **no contradice** la decisión de la fase anterior de no engordar `GET /clusters` con los ángulos: eso era traer el contenido, esto es un entero que responde "¿ya está resuelto?". La regla sigue siendo que el cluster no carga las síntesis.
+
+#### El banco de medición se estaba midiendo a sí mismo
+
+La primera corrida dio **240 ms y 19 ms**. Los números buenos son **201 y 14**, y la diferencia no fue ruido: en los logs del motor **cada GET aparecía dos veces**.
+
+La causa es `React.StrictMode`, que en desarrollo invoca cada efecto dos veces a propósito para destapar efectos que no son idempotentes. El del andamio lo es —correr las pruebas dos veces no rompe nada—, así que no fallaba nada visible. Pero **no era gratis**: salían dos corridas simultáneas compitiendo por la red, y los tiempos que el andamio reportaba venían inflados por su propia duplicación.
+
+Se arregló con una guarda de `useRef` sobre el efecto de montaje, y se comprobó del lado del motor: dos corridas separadas por 48 segundos, **un solo pedido por endpoint en cada una**.
+
+Lo anotable es cómo apareció. No lo encontró un test: **salió de ir a mirar el log del motor para verificar otra cosa**. Se estaba comprobando que `sintetizar_cluster` con `forzar: false` no llamara al proveedor —y ahí sí, la ausencia de la línea `Sintetizando con` es evidencia, porque el motor la escribe siempre antes de llamar (`synthesis.py:1175`)—. La duplicación estaba a la vista en el mismo log, sin relación con lo que se buscaba.
+
+#### Verificación
+
+- Motor: 796 tests y `ruff` limpio. **Tres mutaciones, las tres cazadas**: quitar el default `0` y contar sobre un solo id caen en el test de conteo; volver el conteo una consulta por cluster tumba los dos guardianes de cantidad de queries.
+- App: 53 tests, `cargo fmt`, `clippy -D warnings`, `tsc --noEmit`, `npm run build` y `bindings:check`.
+- **El fixture se recapturó del motor real** después de reconstruir la imagen, y trae a propósito un cluster con `0` y dos con `1`. **Dos mutaciones más, cazadas**: si el motor deja de mandar el campo revienta la deserialización, y si una recaptura pierde el caso del cero el test lo dice.
+
+#### Lo que queda de la fase 4
+
+La pantalla en sí, prender la CSP (`default-src 'self'`) y **borrar el andamio**, que es descartable por diseño y no debería sobrevivir a la pantalla que lo reemplaza.

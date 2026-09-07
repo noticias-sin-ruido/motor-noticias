@@ -6,9 +6,17 @@ que el motor devuelve** y no lo que suponemos que devuelve.
 
 La separación en dos carpetas es la parte importante:
 
-- **`capturados/`** — salieron de una corrida real contra `127.0.0.1:8000` el
-  **6 de septiembre de 2026**, con la base de desarrollo (485 clusters, 431
-  síntesis). Son evidencia.
+- **`capturados/`** — salieron de corridas reales contra `127.0.0.1:8000`. Casi
+  todos son del **6 de septiembre de 2026**, con la base de desarrollo (485
+  clusters, 431 síntesis). **`clusters.json` se recapturó el 7 de septiembre**,
+  cuando `GET /clusters` sumó `cantidad_sintesis`: el fixture viejo ya no
+  describía la respuesta. Son evidencia.
+
+  Esa recaptura se eligió **con los dos casos adentro** —un cluster con `0`
+  síntesis y dos con `1`—, porque una captura donde todos estuvieran
+  sintetizados no probaría que un cluster sin ninguna llega como `0` y no como
+  campo ausente, que es la distinción por la que el campo existe. Hay un test
+  que falla si una recaptura futura pierde alguno de los dos casos.
 - **`derivados/`** — los armamos a mano leyendo el código, porque la base real
   no produce ese caso hoy o porque capturarlo costaba plata. Son un supuesto
   fundado, no evidencia, y por eso viven aparte en vez de mezclados con una

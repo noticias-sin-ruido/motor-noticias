@@ -7,4 +7,15 @@ export type Cluster = { id: number, titulo_evento: string,
  * enum: el motor lo guarda como string libre en la columna, así que un
  * enum cerrado acá inventaría una garantía que la base no da.
  */
-estado: string, fecha_creacion: string, cantidad_noticias: number, medios: Array<string>, noticias: Array<NoticiaBreve>, };
+estado: string, fecha_creacion: string, cantidad_noticias: number, 
+/**
+ * Cuántas síntesis tiene el cluster. **Sin `Option`**: el motor lo
+ * devuelve siempre, con `0` cuando no hay ninguna, justamente para que la
+ * ventana no tenga que distinguir "no tiene" de "no vino el campo".
+ *
+ * Existe porque sin él la lista de trabajo tenía que paginar
+ * `GET /sintesis` entera para saber qué cluster ya estaba resuelto.
+ * Medido el 07/09/2026 desde esta misma app: 5 páginas y 201 ms antes de
+ * dibujar una fila, creciendo a ~28 síntesis por día.
+ */
+cantidad_sintesis: number, medios: Array<string>, noticias: Array<NoticiaBreve>, };

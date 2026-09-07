@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import * as motor from "./motor";
+import Andamio from "./Andamio";
 import type { Estado } from "./motor";
 import type { ErrorDeApi } from "./bindings/ErrorDeApi";
 import type { Salud } from "./bindings/Salud";
@@ -240,6 +241,9 @@ function Cabina({ alOlvidarToken }: { alOlvidarToken: () => void }) {
 export default function App() {
   const [hayToken, setHayToken] = useState<boolean | null>(null);
   const [hayRepo, setHayRepo] = useState<boolean | null>(null);
+  // Fase 4: el andamio que cruza el puente `invoke()`. Es temporal y se va
+  // junto con la pantalla de verdad.
+  const [andamio, setAndamio] = useState(false);
 
   const revisar = useCallback(async () => {
     setHayToken(await invoke<boolean>("token_existe"));
@@ -255,15 +259,24 @@ export default function App() {
   return (
     <main className="envoltorio">
       <p className="eyebrow">Sin Ruido · cabina</p>
-      <h1>Estado del motor</h1>
+      <h1>{andamio ? "El puente invoke()" : "Estado del motor"}</h1>
       {cargando ? (
         <div className="tarjeta">Cargando…</div>
       ) : !hayToken ? (
         <PedirToken alGuardar={() => setHayToken(true)} />
       ) : !hayRepo ? (
         <PedirRepo alGuardar={() => setHayRepo(true)} />
+      ) : andamio ? (
+        <Andamio />
       ) : (
         <Cabina alOlvidarToken={() => setHayToken(false)} />
+      )}
+      {!cargando && hayToken && hayRepo && (
+        <div className="acciones">
+          <button className="secundario chico" onClick={() => setAndamio(!andamio)}>
+            {andamio ? "volver a la cabina" : "andamio de la fase 4"}
+          </button>
+        </div>
       )}
     </main>
   );

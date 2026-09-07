@@ -3,84 +3,85 @@
   "cantidad": 3,
   "clusters": [
     {
-      "id": 646,
-      "titulo_evento": "Incendio en un reconocido restaurante de Puerto Madero: evacuaron a 50 personas",
+      "id": 678,
+      "titulo_evento": "Murió el historiador Norberto Galasso",
       "estado": "abierto",
-      "fecha_creacion": "2026-09-06T20:12:08.888232-03:00",
+      "fecha_creacion": "2026-09-07T15:28:46.215145-03:00",
       "cantidad_noticias": 3,
+      "cantidad_sintesis": 1,
       "medios": [
         "La Nación",
-        "Perfil",
         "TN"
       ],
       "noticias": [
         {
-          "id": 6443,
-          "titulo": "Se desató un feroz incendio en un restaurante de Puerto Madero y evacuaron a 50 personas",
-          "url": "https://tn.com.ar/sociedad/2026/09/06/se-desato-un-feroz-incendio-en-un-restaurante-de-puerto-madero-y-evacuaron-a-50-personas/",
-          "medio": "TN"
-        },
-        {
-          "id": 6578,
-          "titulo": "Se incendió un reconocido restaurante de Puerto Madero: dos personas asistidas y 50 evacuados",
-          "url": "https://www.lanacion.com.ar/sociedad/se-incendio-un-reconocido-restaurante-de-puerto-madero-dos-personas-asistidas-y-50-evacuados-nid06092026/",
+          "id": 6787,
+          "titulo": "Murió el historiador Norberto Galasso",
+          "url": "https://www.lanacion.com.ar/cultura/murio-el-historiador-norberto-galasso-nid07092026/",
           "medio": "La Nación"
         },
         {
-          "id": 6587,
-          "titulo": "Incendio en un reconocido restaurante de Puerto Madero: evacuaron a 50 personas",
-          "url": "https://www.perfil.com/noticias/sociedad/incendio-en-un-reconocido-restaurante-de-puerto-madero-evacuaron-a-50-personas.phtml",
-          "medio": "Perfil"
+          "id": 6790,
+          "titulo": "A los 90 años, murió el historiador y ensayista Norberto Galasso",
+          "url": "https://www.lanacion.com.ar/cultura/a-los-90-anos-murio-el-historiador-y-ensayista-norberto-galasso-nid07092026/",
+          "medio": "La Nación"
+        },
+        {
+          "id": 6825,
+          "titulo": "Murió el ensayista e historiador Norberto Galasso",
+          "url": "https://tn.com.ar/sociedad/2026/09/07/murio-el-ensayista-e-historiador-norberto-galasso/",
+          "medio": "TN"
         }
       ]
     },
     {
-      "id": 645,
-      "titulo_evento": "El radical cambio de look de Oriana Sabatini que dejó en shock a Paulo Dybala: “¿Perdón?”",
+      "id": 677,
+      "titulo_evento": "La historia de amor de Camila Galante y Leandro Paredes, el ídolo de Boca que formó su familia con su novia de la infancia",
       "estado": "abierto",
-      "fecha_creacion": "2026-09-06T20:12:08.855493-03:00",
+      "fecha_creacion": "2026-09-07T15:28:46.168754-03:00",
       "cantidad_noticias": 2,
+      "cantidad_sintesis": 1,
       "medios": [
-        "Revista Paparazzi",
-        "TN"
+        "La Nación",
+        "Revista Paparazzi"
       ],
       "noticias": [
         {
-          "id": 6338,
-          "titulo": "La decisión que tomó Oriana Sabatini a seis meses del nacimiento de Gia, que sorprendió a Paulo Dybala: “Perdón”",
-          "url": "https://www.paparazzi.com.ar/teve/la-decision-que-tomo-oriana-sabatini-a-seis-meses-del-nacimiento-de-gia-que-sorprendio-a-paulo-dybala-perdon/",
+          "id": 6804,
+          "titulo": "La historia de amor de Camila Galante y Leandro Paredes, el ídolo de Boca que formó su familia con su novia de la infancia",
+          "url": "https://www.lanacion.com.ar/deportes/la-historia-de-amor-de-camila-galante-y-leandro-paredes-el-idolo-de-boca-que-formo-su-familia-con-su-nid07092026/",
+          "medio": "La Nación"
+        },
+        {
+          "id": 6728,
+          "titulo": "Camila Galante se sinceró sobre sus crisis con Leandro Paredes y reveló cómo hicieron para seguir juntos: “Nos hemos peleado y...\"",
+          "url": "https://www.paparazzi.com.ar/romances/camila-galante-se-sincero-sobre-sus-crisis-con-leandro-paredes-y-revelo-como-hicieron-para-seguir-juntos-nos-hemos-peleado-y/",
           "medio": "Revista Paparazzi"
-        },
-        {
-          "id": 6584,
-          "titulo": "El radical cambio de look de Oriana Sabatini que dejó en shock a Paulo Dybala: “¿Perdón?”",
-          "url": "https://tn.com.ar/show/famosos/2026/09/06/el-radical-cambio-de-look-de-oriana-sabatini-que-dejo-en-shock-a-paulo-dybala-perdon/",
-          "medio": "TN"
         }
       ]
     },
     {
-      "id": 644,
-      "titulo_evento": "Antonelli, una victoria épica para devolver después de 60 años a un piloto italiano a lo más alto del podio en Monza",
+      "id": 676,
+      "titulo_evento": "A cuánto cotiza el dólar blue hoy, lunes 7 de septiembre",
       "estado": "abierto",
-      "fecha_creacion": "2026-09-06T20:12:08.687948-03:00",
+      "fecha_creacion": "2026-09-07T15:28:46.148914-03:00",
       "cantidad_noticias": 2,
+      "cantidad_sintesis": 0,
       "medios": [
-        "La Nación",
-        "TN"
+        "Perfil"
       ],
       "noticias": [
         {
-          "id": 6425,
-          "titulo": "Antonelli, una victoria épica para devolver después de 60 años a un piloto italiano a lo más alto del podio en Monza",
-          "url": "https://www.lanacion.com.ar/deportes/antonelli-una-victoria-epica-para-devolver-despues-de-60-anos-a-un-piloto-italiano-a-lo-mas-alto-del-nid06092026/",
-          "medio": "La Nación"
+          "id": 6910,
+          "titulo": "A cuánto cotiza el euro blue hoy, lunes 7 de septiembre",
+          "url": "https://www.perfil.com/noticias/economia/a-cuanto-cotiza-el-euro-blue-hoy-lunes-7-de-septiembre.phtml",
+          "medio": "Perfil"
         },
         {
-          "id": 6586,
-          "titulo": "Hazaña histórica de Antonelli en el Gran Premio de Italia: largó último, ganó la carrera y es el líder del campeonato",
-          "url": "https://tn.com.ar/deportes/formula-1/2026/09/06/hazana-historica-de-antonelli-en-el-gran-premio-de-italia-largo-ultimo-gano-la-carrera-y-es-el-lider-indiscutido-del-campeonato/",
-          "medio": "TN"
+          "id": 6907,
+          "titulo": "A cuánto cotiza el dólar blue hoy, lunes 7 de septiembre",
+          "url": "https://www.perfil.com/noticias/economia/a-cuanto-cotiza-el-dolar-blue-hoy-lunes-7-de-septiembre.phtml",
+          "medio": "Perfil"
         }
       ]
     }
