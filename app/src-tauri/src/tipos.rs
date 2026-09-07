@@ -431,6 +431,38 @@ mod pruebas {
         assert!(sin_cerrar.utilizacion.is_none());
     }
 
+    /// La red de `anulable`, que hasta ahora no tenía ninguna.
+    ///
+    /// Los tres campos donde `None` **afirma algo** tienen que exigir que la
+    /// clave esté. Sin la guarda, serde da `None` por defecto y la ausencia se
+    /// leería como la afirmación: "no hay más páginas", "el motor nunca corrió",
+    /// "la corrida no terminó". Eso estaba comprobado con una mutación de una
+    /// sola vez; acá queda comprobado siempre.
+    #[test]
+    fn una_clave_ausente_no_se_lee_como_una_afirmacion() {
+        // `siguiente` ausente NO puede significar "última página".
+        let sin_siguiente = r#"{"status":"ok","cantidad":0,"sintesis":[]}"#;
+        assert!(serde_json::from_str::<RespuestaSintesis>(sin_siguiente).is_err());
+
+        // Con la clave presente y en null, sí: eso es el motor diciéndolo.
+        let con_null = r#"{"status":"ok","cantidad":0,"sintesis":[],"siguiente":null}"#;
+        let r: RespuestaSintesis = serde_json::from_str(con_null).unwrap();
+        assert!(r.siguiente.is_none());
+
+        // `ultima` ausente NO puede significar "el motor nunca corrió".
+        let sin_ultima = r#"{"status":"ok","corriendo":false,"huerfana":false,
+                             "intervalo_minutos":15,"anteriores":[]}"#;
+        assert!(serde_json::from_str::<RespuestaPipeline>(sin_ultima).is_err());
+
+        // `fin` ausente NO puede significar "la corrida no terminó".
+        let sin_fin = r#"{"status":"ok","corriendo":false,"huerfana":false,
+                          "intervalo_minutos":15,"anteriores":[],
+                          "ultima":{"id":1,"inicio":"2026-09-06T19:50:57-03:00",
+                                    "duracion_segundos":null,"utilizacion":null,
+                                    "pasos":{}}}"#;
+        assert!(serde_json::from_str::<RespuestaPipeline>(sin_fin).is_err());
+    }
+
     #[test]
     fn pipeline_de_un_motor_que_nunca_corrio() {
         let r: RespuestaPipeline =

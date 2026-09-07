@@ -5,9 +5,12 @@ use std::time::Duration;
 use serde::Serialize;
 use ts_rs::TS;
 
-/// Dónde publica el motor. El `docker-compose.yml` liga `127.0.0.1:8000` a
-/// propósito, para que un despliegue con IP pública no exponga la API.
-const SALUD: &str = "http://127.0.0.1:8000/";
+/// El `GET /` del motor. La base sale de `api::BASE` y no se repite acá: eran
+/// dos constantes con el mismo host y puerto, y nada avisaba si una cambiaba
+/// sin la otra.
+fn salud() -> String {
+    format!("{}/", crate::api::BASE)
+}
 
 /// Cada cuánto se pregunta mientras arranca. Es local: 750 ms se siente
 /// inmediato y no castiga a nadie.
@@ -71,7 +74,7 @@ pub async fn sondear() -> Sondeo {
         Err(_) => return Sondeo::Rechazada,
     };
 
-    match cliente.get(SALUD).send().await {
+    match cliente.get(salud()).send().await {
         Ok(r) => match r.status().as_u16() {
             200 => Sondeo::Lista,
             503 => Sondeo::Degradada,
@@ -137,5 +140,20 @@ mod pruebas {
         // tardar más que un arranque en vacío.
         assert_eq!(intentos_maximos(), 160);
         assert!(TECHO >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn la_url_de_salud_se_arma_bien_desde_api() {
+        // La base la aporta `api::BASE` y la barra la pone esta funcion. Si
+        // alguna de las dos cambia, esto se rompe antes que el arranque.
+        assert_eq!(salud(), "http://127.0.0.1:8000/");
+    }
+
+    #[tokio::test]
+    #[ignore = "necesita el motor arriba"]
+    async fn el_sondeo_llega_al_motor_real() {
+        // El unico test que ejercita `salud()` contra la red. Sin esto, el
+        // refactor que saco la constante duplicada no lo cubria nada.
+        assert_eq!(sondear().await, Sondeo::Lista);
     }
 }

@@ -115,12 +115,39 @@ que `cargo test` lanzado desde `app/` la ignoraba y escribía los tipos en
 `src-tauri/bindings/` sin avisar. El guardián pasaba en verde con los bindings
 desactualizados.
 
-Los errores cruzan a la interfaz como **categorías cerradas**
-(`sin_token`, `motor_caido`, `no_autorizado`, …) y no como texto suelto: "falta
-el token" y "el motor está apagado" piden acciones distintas de quien mira, así
-que la UI tiene que poder separarlas sin parsear un mensaje. Es el mismo criterio
-que el motor aplicó a su campo `agotados` después de que un mensaje de error
-filtrara el nombre de una variable de entorno.
+**Los errores que vienen del motor o de Docker** cruzan a la interfaz como
+**categorías cerradas** (`sin_token`, `motor_caido`, `no_autorizado`,
+`demonio_caido`, …) y no como texto suelto: "falta el token" y "el motor está
+apagado" piden acciones distintas de quien mira, así que la UI tiene que poder
+separarlas sin parsear un mensaje. Es el mismo criterio que el motor aplicó a su
+campo `agotados` después de que un mensaje de error filtrara el nombre de una
+variable de entorno.
+
+**Los comandos del token y de la ruta del repo quedan afuera a propósito**, y
+devuelven un texto: `token_existe`, `token_guardar`, `token_borrar`, `repo_leer`
+y `repo_guardar`. La regla nació porque distintas causas piden distintas
+acciones; en estos cinco la acción es una sola en cada caso —el almacén de
+credenciales de Windows falló, o esa carpeta no es el repo— y una categoría no
+agregaría nada que el mensaje no diga ya. Lo que sí se cuidó es que esos
+mensajes no arrastren nada sensible: **el token nunca se interpola en ellos**,
+solo el error del sistema.
+
+## La CSP está apagada, y es una decisión con fecha
+
+`tauri.conf.json` tiene `"csp": null` — el default del scaffold. Hoy no hay
+riesgo concreto: la ventana no renderiza HTML de nadie, no hay un solo
+`dangerouslySetInnerHTML` en `src/`, y React escapa por defecto.
+
+**Deja de ser inocuo en la fase 4.** Ahí entran a la pantalla titulares, URLs y
+citas textuales de TN, Perfil y La Nación, más resúmenes generados por un
+modelo: contenido de terceros que ninguno de nosotros escribió. La CSP es la
+segunda capa para ese caso, debajo del escapado de React.
+
+Se prende **junto con esas pantallas** y no antes, por una razón práctica: una
+CSP mal puesta rompe el HMR de Vite en modo dev sin decir por qué, así que hay
+que probarla abriendo la app — y conviene probarla contra el contenido real que
+la justifica, no contra una ventana vacía. El valor propuesto para entonces es
+`default-src 'self'`, ajustando lo que el modo dev pida.
 
 ## Docker Desktop tiene que estar corriendo
 
@@ -144,11 +171,16 @@ vez dónde está el repo —comprobando que tenga `docker-compose.yml` antes de
 aceptarlo—, levanta y para los contenedores, y muestra en qué anda mientras
 tanto: `reconstruyendo → arrancando → migrando → listo`.
 
-Los estados intermedios existen porque el servicio `app` **no tiene
-healthcheck**: que el contenedor esté arriba no quiere decir que la API conteste,
-y menos que haya terminado el `alembic upgrade head`. Eso se sondea contra
-`GET /`, reusando el **503** que el motor ya devuelve cuando la base no responde
-como la señal de "migrando".
+Los estados intermedios salen de sondear `GET /`, reusando el **503** que el
+motor ya devuelve cuando la base no responde como la señal de "migrando".
+
+⚠️ Una versión anterior de este párrafo decía que el servicio `app` "no tiene
+healthcheck", y es **falso**: el `Dockerfile` define uno (`curl -f` contra
+`GET /`, y `-f` falla con el 503, así que ya codifica exactamente la condición
+que nos interesa). Se sondea igual por otro motivo: el healthcheck de Docker
+solo se lee con `docker inspect`, corre cada 30 s, y lo que la ventana necesita
+es contar el progreso al ritmo de quien está mirando. Pero el motivo escrito
+antes no era ése.
 
 `up -d --build`, y `stop` — **nunca `down`**, que borra los contenedores y con la
 bandera equivocada se lleva puesto el volumen de Postgres.

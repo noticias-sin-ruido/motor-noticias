@@ -39,11 +39,14 @@ fn token_existe() -> Result<bool, String> {
     secretos::leer().map(|t| t.is_some())
 }
 
+/// Guarda el token. Es lo unico que lo recibe desde la ventana, y no lo
+/// devuelve nadie: de aca en adelante vive solo en el Credential Manager.
 #[tauri::command]
 fn token_guardar(token: String) -> Result<(), String> {
     secretos::guardar(&token)
 }
 
+/// Olvida el token. La app vuelve a pedirlo en el proximo arranque.
 #[tauri::command]
 fn token_borrar() -> Result<(), String> {
     secretos::borrar()
@@ -118,13 +121,26 @@ async fn motor_arrancar(app: AppHandle) -> Result<Estado, ErrorDocker> {
     avisar(&app, ultimo);
 
     for _ in 0..motor::intentos_maximos() {
-        let estado = motor::estado_de(&motor::sondear().await);
+        let sondeo = motor::sondear().await;
+        let estado = motor::estado_de(&sondeo);
         if estado != ultimo {
             ultimo = estado;
             avisar(&app, estado);
         }
-        if matches!(estado, Estado::Listo | Estado::Error) {
+        if estado == Estado::Listo {
             return Ok(estado);
+        }
+        // **Un fallo se devuelve como `Err` y no como `Ok(Estado::Error)`.**
+        // La ventana solo entra a su `catch` con un `Err`: devolviendo `Ok` con
+        // el estado en error, el semáforo quedaba rojo y el cuadro de aviso
+        // vacío. El camino del plazo vencido, abajo, sí explicaba qué pasó —
+        // dos finales igual de malos contaban cosas distintas.
+        if let motor::Sondeo::Otra(codigo) = sondeo {
+            avisar(&app, Estado::Error);
+            return Err(ErrorDocker::Fallo(format!(
+                "El motor contestó {codigo} mientras arrancaba. Mirá los logs del \
+                 contenedor: `docker compose logs app`."
+            )));
         }
         tokio::time::sleep(motor::intervalo()).await;
     }

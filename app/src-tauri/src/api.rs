@@ -1,9 +1,14 @@
 //! El cliente HTTP contra el motor. Vive en Rust y no en el webview.
 //!
-//! Con `fetch` desde React, el token tendría que viajar al JavaScript para
-//! poder mandarlo en el header. Haciéndolo acá, sale del Credential Manager y
-//! va directo al pedido: el front nunca lo ve. De paso no hay CORS que
+//! Con `fetch` desde React, el token tendría que viajar al JavaScript en cada
+//! pedido para poder mandarlo en el header. Haciéndolo acá sale del Credential
+//! Manager y va directo, sin pasar por la ventana. De paso no hay CORS que
 //! configurar, porque el pedido no sale de un navegador.
+//!
+//! **El front lo ve una sola vez: cuando alguien lo tipea.** Eso es inevitable
+//! —el campo está en la ventana— y termina ahí: `token_guardar` lo manda a
+//! Rust y ningún comando lo devuelve nunca. Decir "el front nunca lo ve", como
+//! decía antes este comentario, prometía de más.
 
 use std::time::Duration;
 
@@ -16,7 +21,7 @@ use crate::secretos;
 /// El motor publica en loopback y solo en loopback: su `docker-compose.yml`
 /// liga `127.0.0.1:8000` a propósito, para que un despliegue con IP pública no
 /// exponga endpoints que gastan plata.
-const BASE: &str = "http://127.0.0.1:8000";
+pub const BASE: &str = "http://127.0.0.1:8000";
 
 /// Corto a propósito. Estos pedidos son a la máquina local, así que si tardan
 /// segundos no es lentitud: es que el motor no está levantado, y eso hay que
@@ -156,6 +161,7 @@ async fn traducir_error(estado: reqwest::StatusCode, respuesta: reqwest::Respons
     }
 }
 
+/// Un GET al motor, ya autenticado y deserializado al tipo que se pida.
 pub async fn get<T: DeserializeOwned>(
     ruta: &str,
     parametros: &[(&str, String)],

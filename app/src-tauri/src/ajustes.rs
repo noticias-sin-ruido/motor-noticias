@@ -46,6 +46,8 @@ pub fn leer(app: &AppHandle) -> Resultado<Ajustes> {
     }
 }
 
+/// Pisa los ajustes con lo que se le pase. Son un campo: no hay merge que
+/// hacer, y fingir uno seria inventar complejidad que nadie pidio.
 pub fn guardar(app: &AppHandle, ajustes: &Ajustes) -> Resultado<()> {
     let ruta = archivo(app)?;
     let texto = serde_json::to_string_pretty(ajustes)

@@ -1,3 +1,16 @@
+# El nombre del proyecto, fijado a mano y NO deducido de la carpeta.
+#
+# Sin esto, compose lo toma del nombre del directorio, y el volumen de Postgres
+# pasa a llamarse `<carpeta>_sin_ruido_pgdata`. Mover o renombrar la carpeta del
+# repo crea entonces un proyecto nuevo con un volumen VACIO: la app muestra cero
+# clusters y cero sintesis, y parece que se borro todo. No se borra nada -- el
+# volumen viejo sigue ahi, se ve con `docker volume ls` -- pero es un susto que
+# no hace falta pasar.
+#
+# El valor es `motor-noticias` porque es el que compose venia usando: cambiarlo
+# por cualquier otro produce exactamente el accidente que esta linea evita.
+name: motor-noticias
+
 services:
   db:
     image: pgvector/pgvector:pg16
