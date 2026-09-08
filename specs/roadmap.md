@@ -408,6 +408,7 @@ Construidas las **fases 0 a 3** del plan de nueve, y la **4 en curso**. Verde en
 - **Fase 2 · control del motor** ✅ — levanta y para los contenedores (`up -d --build` y `stop`, nunca `down`), con la máquina de estados `reconstruyendo → arrancando → migrando → listo` sondeada contra el 503. Detecta que Docker Desktop no está corriendo y lo dice.
 - **Fase 3 · cliente tipado** ✅ — 16 structs derivados de fixtures capturados del motor real, los tipos de TypeScript generados desde Rust con `ts-rs`, y siete comandos, uno por endpoint. `404` y `422` dejaron de colapsar en un número.
 - **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio no se borró**: se decidió mantenerlo como banco de pruebas del puente hasta la fase 9, porque cubre comandos que ninguna pantalla ejercita todavía y mide lo que sólo se mide con la ventana abierta.
+- **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 
 **Fase 4, en curso — el puente `invoke()` ya se cruzó (07/09/2026).** Los seis
 comandos que nunca se habían llamado desde la ventana —`listar_clusters`,

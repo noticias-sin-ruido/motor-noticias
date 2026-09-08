@@ -323,10 +323,43 @@ export default function Andamio() {
       },
     );
 
+    // --- El cursor roto: la categoria que la pantalla espera -------------
+
+    await probar(
+      "CURSOR ROTO · llega como «invalida»",
+      "listar_sintesis con un cursor que el motor no puede leer",
+      async () => {
+        // El feed reacciona a un cursor caducado reseteando la lista, y bifurca
+        // sobre `tipo === "invalida"`. Si el motor devolviera otra categoria esa
+        // rama no dispararia nunca y la pantalla quedaria trabada -- justo lo
+        // que ese codigo existe para evitar. Aca se comprueba la categoria, que
+        // es lo unico de lo que depende la rama.
+        try {
+          await invoke<RespuestaSintesis>("listar_sintesis", {
+            limite: 3,
+            cursor: "esto-no-es-un-cursor",
+          });
+          return {
+            veredicto: "SOBREVIVE: el motor acepto un cursor ilegible en vez de rechazarlo.",
+            marca: "error",
+          };
+        } catch (e) {
+          const err = e as { tipo?: string; detalle?: unknown };
+          const esperada = err.tipo === "invalida";
+          return {
+            veredicto: esperada
+              ? `correcto — categoria «${err.tipo}». Es la que el feed usa para resetear la lista. Detalle: ${String(err.detalle).slice(0, 70)}…`
+              : `categoria inesperada «${err.tipo}»: el feed espera «invalida» y con esta su reset no dispara.`,
+            marca: esperada ? "ok" : "error",
+          };
+        }
+      },
+    );
+
     // --- La CSP: comprobar que de verdad bloquea -------------------------
 
     await probar(
-      "CSP · bloquea lo externo",
+      "CSP · bloquea lo externo (solo dictamina compilada)",
       "fetch a un host de afuera, que la politica no permite",
       async () => {
         // **La senal que distingue los dos casos.** Si la CSP esta activa, el
@@ -356,8 +389,21 @@ export default function Andamio() {
             veredicto: `bloqueado por la CSP · directiva «${v.violatedDirective}» · destino «${v.blockedURI}». La politica esta activa y aplicandose.`,
           };
         }
+        // **En desarrollo la ausencia de violacion es lo correcto**, y decirlo
+        // importa: Tauri inyecta la CSP solo cuando sirve el frontend por su
+        // propio protocolo, y en dev lo sirve Vite. Marcarlo en rojo cada
+        // corrida seria una falsa alarma fija, y un instrumento que grita lobo
+        // siempre entrena a ignorarlo. En un ejecutable compilado, en cambio,
+        // que no haya violacion si es un fallo real.
+        if (import.meta.env.DEV) {
+          return {
+            veredicto:
+              "sin violacion, y es lo esperado: en desarrollo el HTML lo sirve Vite y Tauri no inyecta la CSP. Esta prueba solo dictamina en el ejecutable compilado.",
+            marca: "alerta",
+          };
+        }
         return {
-          veredicto: `SIN VIOLACION: el pedido salio a la red y ${fallo || "no fallo"}. La CSP no esta bloqueando nada -- esta escrita pero no aplicada.`,
+          veredicto: `SIN VIOLACION en un ejecutable compilado: el pedido salio a la red y ${fallo || "no fallo"}. La politica esta escrita y no se esta aplicando.`,
           marca: "error",
         };
       },

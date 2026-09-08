@@ -3255,7 +3255,9 @@ Se corrigió antes de conocer los colores de marca, y la corrección se rehízo 
 
 La lista pasó de una tarjeta por fila a una grilla `auto-fill`. Lo que la volvía irregular no era la grilla sino el contenido: título de uno a tres renglones, un aviso que aparecía sólo en algunas tarjetas, y las notas desplegables.
 
-Se fijó el alto de fila con `grid-auto-rows` y **el título reserva sus tres renglones aunque tenga uno**. Que tres alcancen no se supuso: medidos los 537 clusters reales, el más largo tiene 179 caracteres y a ese ancho entran ~186, así que no se trunca ninguno. Las notas desplegadas entran en el mismo hueco que los datos, con scroll propio, para que abrir una tarjeta no estire su fila.
+Se fijó el alto de fila con `grid-auto-rows` y **el título reserva sus tres renglones aunque tenga uno**.
+
+**Corrección de lo que se escribió acá primero.** Se afirmó que tres renglones alcanzaban para los 537 títulos porque "a ese ancho entran ~186 caracteres" contra un máximo de 179. Ese 186 salió de un valor por renglón inventado, no medido. Hecha la cuenta con los anchos de columna que la grilla produce de verdad, la capacidad es de **133 a 161 caracteres según el tamaño de la ventana**: los títulos más largos sí se recortan. El recorte va con puntos suspensivos y el texto completo queda en el `title` del elemento, así que la decisión de fijar el alto se sostiene — lo que no se sostenía era la justificación. Las notas desplegadas entran en el mismo hueco que los datos, con scroll propio, para que abrir una tarjeta no estire su fila.
 
 #### Un bug que la barra fija destapó
 
@@ -3304,3 +3306,42 @@ Lo que distingue los casos es el evento **`securitypolicyviolation`**, que sólo
 #### Lo que costó
 
 Se eligió compilar en release para probarla de verdad, en vez de dejar la de producción sin comprobar hasta la fase 9. El build tardó varios minutos y de paso dejó los dos instaladores (MSI y NSIS) en `target/release/bundle/`, que no se pidieron y que recién hacen falta en la fase 9.
+### Fase 5: el feed de lectura, y tres cosas que salieron de mirarlo funcionando (07/09/2026)
+
+La segunda pantalla: leer lo que el motor produjo. Ritmo distinto al de la lista de trabajo —allá se mira, se decide y se dispara; acá se lee de corrido— que es la razón por la que son dos y no una.
+
+La unidad del feed es el **ángulo**, no el hecho: un cluster produce varias síntesis porque separar el material en recortes es trabajo del modelo. Por eso las tarjetas titulan con `titulo_angulo`. El contenido —resumen, puntos clave y comparativa— se pide aparte con `detalle_de_sintesis`, igual que del lado del motor: traer la comparativa completa de veinte ítems para elegir uno sería pagar la lectura entera para tomar una decisión.
+
+**La comparativa se pinta como una columna por medio**, con qué destacó, qué omitió y la cita textual que lo respalda. Enfrentadas y no en párrafo corrido, porque leerlas juntas es la tesis del proyecto.
+
+#### El 422 resetea la lista, y la categoría se verificó antes de confiar en ella
+
+Un cursor caducado es una entrada nuestra que quedó vieja, no un error del motor —que por eso devuelve 422 y no 500—. Si se dejara el cursor roto en el estado, un tropiezo se convertiría en una pantalla que ya no carga más y quien mira no tendría cómo saber por qué. Así que se avisa y se recarga desde cero.
+
+Esa rama bifurca sobre `tipo === "invalida"`, y **eso era una suposición**: si el motor devolviera otra categoría, el reset no dispararía nunca y la pantalla quedaría trabada — justo lo que el código existe para evitar. Se verificó eslabón por eslabón: el motor devuelve 422 con tres cursores basura distintos, `api.rs:149` mapea `UNPROCESSABLE_ENTITY` a `Invalida`, serde lo etiqueta `invalida`, el binding lo confirma, y una sonda del andamio comprobó que llega así **cruzando el puente**, que era el único eslabón que no se podía leer.
+
+#### El `Modal` se extrajo al aparecer el segundo, no antes
+
+Con un solo diálogo, el manejo de foco vivía adentro del componente y estaba bien ahí. Con dos, dejar duplicadas cuarenta líneas de lógica de teclado es pedir que se desincronicen — y lo que se desincroniza en silencio es siempre la mitad menos visible, o sea la del teclado.
+
+Se le sumó el **bloqueo del scroll de fondo**: sin eso la rueda del mouse mueve la lista de atrás y quien cierra el diálogo aparece en otro lugar sin haber pedido moverse. Va por clase y no tocando `style`, porque el atributo `style` lo bloquea la CSP de producción. Y `scrollbar-gutter: stable` en `html`, porque al bloquear el scroll desaparece la barra y todo el contenido salta unos píxeles.
+
+#### `pasos` es un mapa abierto, y tratarlo como struct se veía
+
+La barra del pipeline mostraba `[object Object]` en cada paso. La causa: `pasos` no es un struct sino un mapa cuyas claves decide `_correr_paso`, y el render hacía `String(valor)` sobre cada uno.
+
+Medido sobre las 35 corridas de la base, el segundo nivel trae **cinco tipos**: enteros, booleanos, strings, listas y objetos anidados. Con `String()` los últimos tres se perdían. El normalizador nuevo baja un nivel, suma los numéricos de `ingesta` —que es una lista con un objeto por medio— y lo que no encaje lo resume en vez de descartarlo, porque este mapa puede cambiar del lado del motor sin avisar. Verificado con un port del mismo algoritmo contra las 35 corridas: 1.472 pares etiqueta/valor, ninguno cae en `[object Object]` ni en el descarte.
+
+El detalle salió de la barra a un desplegable: ocho pasos con sus contadores no entran en una línea. Los contadores en cero se atenúan en vez de esconderse — que un contador exista y esté en cero dice algo distinto de que no exista.
+
+#### La cabecera, y por qué se pegan juntas
+
+La barra del motor y las pestañas quedaron envueltas en un solo contenedor `sticky`. La alternativa era darle a las pestañas un `top` igual al alto de la barra: un número que se desactualiza en silencio en cuanto cambia el logo o el alto de un botón.
+
+Eso obligó a recalcular el `scroll-padding-top` del criterio *Focus Not Obscured*: pasó de 5rem a 7rem, porque ahora lo pegajoso mide ~103px y no ~62.
+
+**La barra dejó de tener `max-width`.** Se le había copiado el límite del cuerpo, y ese límite tiene sentido para el texto que se lee, no para el cromo: en pantalla grande el logo quedaba flotando lejos del borde izquierdo y los botones lejos del derecho.
+
+#### Una sonda que gritaba lobo
+
+La prueba de la CSP marcaba en rojo, en cada corrida de desarrollo, una condición que en desarrollo es **la correcta**: ahí no hay CSP y no puede haberla. Un instrumento que da falsa alarma fija entrena a ignorarlo, y el andamio ahora es permanente. Ahora distingue: en desarrollo informa que no dictamina; en un ejecutable compilado, la ausencia de violación sí es un fallo.
