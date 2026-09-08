@@ -12,6 +12,11 @@ cruza este archivo.
 forma de su propio mock, no sobre la del motor, y pasaría en verde con el motor
 roto. Acá se siembran datos reales y se ejercita el camino entero.
 
+**Este archivo lee archivos de `app/`** —los bindings, para vigilar la deriva, y
+`CONTRATO.md`, para que el documento y el diccionario no se separen—. Por eso
+`ci.yml` filtra por inclusión y no con `paths-ignore: ['app/**']`: con exclusión,
+alguien toca `tipos.rs`, se regeneran los bindings, y estos tests no correrían.
+
 Ver `app/CONTRATO.md`.
 """
 import re
