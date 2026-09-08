@@ -409,7 +409,7 @@ Construidas las **fases 0 a 7** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 3 · cliente tipado** ✅ — 16 structs derivados de fixtures capturados del motor real, los tipos de TypeScript generados desde Rust con `ts-rs`, y siete comandos, uno por endpoint. `404` y `422` dejaron de colapsar en un número.
 - **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio no se borró**: se decidió mantenerlo como banco de pruebas del puente hasta la fase 9, porque cubre comandos que ninguna pantalla ejercita todavía y mide lo que sólo se mide con la ventana abierta.
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
-- **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. **Los íconos siguen siendo los de Tauri**: hace falta un isotipo cuadrado, ver la fase 9.
+- **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. Los íconos pasaron a ser los de Sin Ruido el 08/09/2026, generados desde `app/public/isotipo.svg`.
 - **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
 
 **Por dónde seguir: la fase 8.** Partir la CI por rutas: `ci.yml` con
@@ -425,10 +425,18 @@ dejaría ese chequeo sin correr.
 
 **Deudas anotadas, ninguna bloquea:**
 
-- **Los íconos son los del scaffold de Tauri.** `tauri icon` exige una imagen
-  cuadrada y el logotipo es 1,84:1: metido en un cuadrado, a los 16×16 que
-  Windows dibuja en la bandeja el nombre queda en 8,7 píxeles de alto. Hace
-  falta el **isotipo** —el símbolo sin el nombre—. Es un archivo, no toca código.
+- **Los íconos ya son los de Sin Ruido (08/09/2026).** Se generaron con
+  `tauri icon` desde `app/public/isotipo.svg`, un cuadrado de 512×512 con los
+  tres colores de marca. Hacía falta el **isotipo** y no el logotipo: éste es
+  1,84:1 y en un cuadrado deja el nombre en 8,7 píxeles a los 16×16 de la
+  bandeja. **Son dos archivos con usos distintos y no intercambiables**:
+  `isotipo.svg` es multicolor y va a los íconos; `logo-svg.svg` es un trazo
+  monocromo apaisado y va a la barra, donde entra como máscara CSS y toma el
+  color del tema. Se verificó midiendo el resultado —el de 32px da 65% azul de
+  marca, 16% blanco y cero negro—, porque el SVG lleva su CSS en un `<style>`
+  interno y un rasterizador que lo ignorara habría producido formas negras.
+  Se borraron las carpetas `android/` e `ios/` que `tauri icon` genera de yapa:
+  35 archivos de plataformas que este proyecto excluye.
 - **Los tests de `secretos.rs` no tienen `#[ignore]`** y tocan el Administrador
   de credenciales real. Son cuatro, y **van a romper en CI en la fase 8**, donde
   no hay almacén de credenciales.

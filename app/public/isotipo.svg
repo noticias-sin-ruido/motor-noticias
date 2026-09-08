@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <style>
+      .bg-card { fill: #22486A; }
+      .speech-bubble { fill: #FFFFFF; }
+      .audio-wave { fill: none; stroke: #22486A; stroke-width: 14; stroke-linecap: round; stroke-linejoin: round; }
+      .diagonal-bar-border { fill: none; stroke: #22486A; stroke-width: 32; stroke-linecap: round; }
+      .diagonal-bar { fill: none; stroke: #FFFFFF; stroke-width: 18; stroke-linecap: round; }
+      .attenuated-line { fill: none; stroke: #E5A823; stroke-width: 14; stroke-linecap: round; }
+    </style>
+  </defs>
+
+  <!-- Fondo / Contenedor principal -->
+  <rect class="bg-card" x="32" y="32" width="448" height="448" rx="100" />
+
+  <!-- Globo de Texto -->
+  <path class="speech-bubble" d="
+    M 140 160 
+    H 372 
+    A 30 30 0 0 1 402 190 
+    V 330 
+    A 30 30 0 0 1 372 360 
+    H 220 
+    L 160 405 
+    V 360 
+    H 140 
+    A 30 30 0 0 1 110 330 
+    V 190 
+    A 30 30 0 0 1 140 160 
+    Z" 
+  />
+
+  <!-- Onda de Audio Principal -->
+  <path class="audio-wave" d="
+    M 130 276 
+    L 180 276 
+    L 200 220 
+    L 225 332 
+    L 250 200 
+    L 275 340 
+    L 300 240 
+    L 325 300 
+    L 345 276
+    " 
+  />
+
+  <!-- Salida Atenuada (Línea Amarilla) -->
+  <path class="attenuated-line" d="M 345 276 H 425" />
+
+  <!-- Barra Diagonal Blanca con Borde del Color de Fondo -->
+  <line class="diagonal-bar-border" x1="120" y1="412" x2="392" y2="140" />
+  <line class="diagonal-bar" x1="120" y1="412" x2="392" y2="140" />
+</svg>
