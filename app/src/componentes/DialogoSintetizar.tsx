@@ -6,9 +6,10 @@
  * gesto aparte, y los tres desenlaces del `200` se muestran distinto en vez de
  * colapsar en "listo".
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import * as datos from "../datos";
+import Modal from "./Modal";
 import type { Cluster } from "../bindings/Cluster";
 import type { ModeloPublico } from "../bindings/ModeloPublico";
 import type { Motivo } from "../bindings/Motivo";
@@ -32,10 +33,6 @@ function explicarCorte(motivo: Motivo): string {
   }
 }
 
-/** Lo que puede recibir foco adentro del diálogo. */
-const ENFOCABLES =
-  'button:not([disabled]), select:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
-
 export default function DialogoSintetizar({
   cluster,
   alCerrar,
@@ -52,54 +49,6 @@ export default function DialogoSintetizar({
   const [trabajando, setTrabajando] = useState(false);
   const [resultado, setResultado] = useState<Sintetizado | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const caja = useRef<HTMLDivElement>(null);
-  // `trabajando` y `alCerrar` se leen desde refs y no desde las dependencias:
-  // si entraran al `useEffect` de abajo, cada render volvería a montar el
-  // manejador y a robar el foco de donde el usuario lo hubiera dejado.
-  const trabajandoRef = useRef(false);
-  const cerrarRef = useRef(alCerrar);
-  trabajandoRef.current = trabajando;
-  cerrarRef.current = alCerrar;
-
-  /**
-   * Las cuatro cosas que un diálogo modal le debe al teclado, y que no tenía:
-   * foco inicial adentro, Escape para salir, el tabulador atrapado en la caja,
-   * y devolver el foco a donde estaba al cerrar. Sin esto se podía abrir el
-   * diálogo y quedar encerrado sin mouse.
-   */
-  useEffect(() => {
-    const veniaDe = document.activeElement as HTMLElement | null;
-    caja.current?.querySelector<HTMLElement>(ENFOCABLES)?.focus();
-
-    function alTeclado(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        // Mientras hay un pedido en vuelo no se cierra: el resultado del POST
-        // llega igual y perderlo dejaría sin saber si costó plata o no.
-        if (!trabajandoRef.current) cerrarRef.current();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const lista = Array.from(caja.current?.querySelectorAll<HTMLElement>(ENFOCABLES) ?? []);
-      if (lista.length === 0) return;
-      const primero = lista[0];
-      const ultimo = lista[lista.length - 1];
-      if (primero === undefined || ultimo === undefined) return;
-      if (e.shiftKey && document.activeElement === primero) {
-        e.preventDefault();
-        ultimo.focus();
-      } else if (!e.shiftKey && document.activeElement === ultimo) {
-        e.preventDefault();
-        primero.focus();
-      }
-    }
-
-    document.addEventListener("keydown", alTeclado);
-    return () => {
-      document.removeEventListener("keydown", alTeclado);
-      veniaDe?.focus();
-    };
-  }, []);
 
   useEffect(() => {
     let vigente = true;
@@ -134,11 +83,7 @@ export default function DialogoSintetizar({
   const yaTiene = cluster.cantidad_sintesis > 0;
 
   return (
-    <div className="modal-fondo" role="dialog" aria-modal="true" aria-label="Sintetizar cluster">
-      <div className="modal" ref={caja}>
-        <h2 className="modal-titulo">Sintetizar</h2>
-        <p className="modal-hecho">{cluster.titulo_evento}</p>
-
+    <Modal titulo="Sintetizar" bajada={cluster.titulo_evento} bloqueado={trabajando} alCerrar={alCerrar}>
         {resultado === null ? (
           <>
             <label htmlFor="modelo">Con qué modelo</label>
@@ -245,7 +190,6 @@ export default function DialogoSintetizar({
             </div>
           </>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

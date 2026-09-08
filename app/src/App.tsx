@@ -7,6 +7,7 @@ import type { Cluster } from "./bindings/Cluster";
 
 import BarraMotor from "./componentes/BarraMotor";
 import ListaDeTrabajo from "./pantallas/ListaDeTrabajo";
+import FeedDeLectura from "./pantallas/FeedDeLectura";
 import Andamio from "./Andamio";
 
 function PedirToken({ alGuardar }: { alGuardar: () => void }) {
@@ -93,14 +94,17 @@ function PedirRepo({ alGuardar }: { alGuardar: () => void }) {
   );
 }
 
-/** Las vistas del cuerpo. El feed de lectura llega en la fase 5. */
-type Vista = "trabajo" | "andamio";
+/** Las vistas del cuerpo. */
+type Vista = "trabajo" | "feed" | "andamio";
 
 export default function App() {
   const [hayToken, setHayToken] = useState<boolean | null>(null);
   const [hayRepo, setHayRepo] = useState<boolean | null>(null);
   const [estado, setEstado] = useState<Estado>("parado");
   const [vista, setVista] = useState<Vista>("trabajo");
+  // Con qué cluster entrar al feed. Vive acá y no adentro del feed porque
+  // lo decide la otra pantalla: es el único dato que cruza entre las dos.
+  const [clusterDelFeed, setClusterDelFeed] = useState<number | null>(null);
 
   const revisar = useCallback(async () => {
     setHayToken(await invoke<boolean>("token_existe"));
@@ -143,26 +147,38 @@ export default function App() {
 
   return (
     <div className="marco">
-      <BarraMotor
-        estado={estado}
-        alCambiar={setEstado}
-        alOlvidarToken={() => setHayToken(false)}
-      />
+      {/* La barra y las pestañas se pegan **juntas**, envueltas en un solo
+          contenedor `sticky`. Pegarlas por separado obligaría a que la segunda
+          conozca el alto exacto de la primera, y ese número se desactualiza en
+          silencio en cuanto cambia el logo o el alto de un botón. */}
+      <div className="cabecera">
+        <BarraMotor
+          estado={estado}
+          alCambiar={setEstado}
+          alOlvidarToken={() => setHayToken(false)}
+        />
 
-      <nav className="pestanas">
-        <button
-          className={`pestana${vista === "trabajo" ? " elegida" : ""}`}
-          onClick={() => setVista("trabajo")}
-        >
-          Lista de trabajo
-        </button>
-        <button
-          className={`pestana${vista === "andamio" ? " elegida" : ""}`}
-          onClick={() => setVista("andamio")}
-        >
-          Andamio
-        </button>
-      </nav>
+        <nav className="pestanas">
+          <button
+            className={`pestana${vista === "trabajo" ? " elegida" : ""}`}
+            onClick={() => setVista("trabajo")}
+          >
+            Lista de trabajo
+          </button>
+          <button
+            className={`pestana${vista === "feed" ? " elegida" : ""}`}
+            onClick={() => setVista("feed")}
+          >
+            Feed de lectura
+          </button>
+          <button
+            className={`pestana${vista === "andamio" ? " elegida" : ""}`}
+            onClick={() => setVista("andamio")}
+          >
+            Andamio
+          </button>
+        </nav>
+      </div>
 
       <main className="cuerpo">
         {/* **Ninguna pantalla le pega a la API hasta `listo`.** Antes de eso el
@@ -182,12 +198,14 @@ export default function App() {
         ) : vista === "trabajo" ? (
           <ListaDeTrabajo
             alVerAngulos={(c: Cluster) => {
-              // La pantalla 2 es la fase 5. Hasta entonces el botón existe pero
-              // no lleva a ningún lado, y decirlo es mejor que un clic mudo.
-              window.alert(
-                `El feed de lectura llega en la fase 5.\n\nCluster ${c.id}: ${c.titulo_evento}`,
-              );
+              setClusterDelFeed(c.id);
+              setVista("feed");
             }}
+          />
+        ) : vista === "feed" ? (
+          <FeedDeLectura
+            clusterId={clusterDelFeed}
+            alQuitarFiltro={() => setClusterDelFeed(null)}
           />
         ) : (
           <Andamio />

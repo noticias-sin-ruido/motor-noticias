@@ -68,10 +68,21 @@
 
 * { box-sizing: border-box; }
 
-/* La barra del motor es `sticky`, así que al tabular puede quedar tapando el
-   control que acaba de recibir el foco. Es el criterio "Focus Not Obscured"
-   (WCAG 2.2 AA): el scroll se detiene antes, dejando el foco a la vista. */
-html { scroll-padding-top: 5rem; }
+/* La cabecera es `sticky`, asi que al tabular puede quedar tapando el control
+   que acaba de recibir el foco. Es el criterio "Focus Not Obscured" (WCAG 2.2
+   AA): el scroll se detiene antes, dejando el foco a la vista.
+   El valor cubre barra (~62px) mas pestanas (~40px), con margen. */
+html {
+  scroll-padding-top: 7rem;
+  /* El hueco de la barra de scroll se reserva siempre. Sin esto, al abrir un
+     modal el fondo deja de scrollear, la barra desaparece y todo el contenido
+     salta unos pixeles hacia la derecha. */
+  scrollbar-gutter: stable;
+}
+
+/* Mientras hay un modal abierto. La lleva el `<body>` y no un contenedor
+   nuestro porque el que scrollea es el documento. */
+body.sin-scroll { overflow: hidden; }
 
 body {
   margin: 0;
@@ -188,13 +199,20 @@ a:focus-visible, select:focus-visible { outline: 2px solid var(--acento); outlin
 
 .marco { display: flex; flex-direction: column; min-height: 100vh; }
 
+/* La barra y las pestanas se pegan juntas: una sola caja `sticky` en vez de dos
+   con offsets calculados a mano. */
+.cabecera { position: sticky; top: 0; z-index: 20; }
+
 .barra-motor {
-  position: sticky; top: 0; z-index: 10;
   background: var(--superficie);
   border-bottom: 1px solid var(--filete);
   padding: 0.55rem 1.2rem;
 }
-.barra-motor-fila { display: flex; align-items: center; gap: 1rem; max-width: 1500px; margin: 0 auto; }
+/* **Sin `max-width`, al reves que el cuerpo.** Limitar el ancho tiene sentido
+   para el texto que se lee, no para el cromo: en una pantalla grande el logo
+   quedaba flotando lejos del borde izquierdo y los botones lejos del derecho,
+   con un vacio en el medio que no era de nadie. */
+.barra-motor-fila { display: flex; align-items: center; gap: 1rem; }
 /* El logo va como **mascara** y no como <img>.
 
    El archivo es un trazo monocromo negro sobre transparente, asi que pintarlo
@@ -223,8 +241,10 @@ a:focus-visible, select:focus-visible { outline: 2px solid var(--acento); outlin
   mask-size: contain;
 }
 .barra-motor-acciones { margin-left: auto; display: flex; align-items: center; gap: 0.45rem; }
-.barra-motor .aviso { max-width: 1500px; margin: 0.7rem auto 0; }
+.barra-motor .aviso { margin: 0.7rem 0 0; }
 
+/* El fondo es opaco a proposito: pegada, la barra tiene contenido pasandole por
+   debajo al scrollear. */
 .pestanas {
   display: flex; gap: 0.2rem;
   padding: 0 1.2rem;
@@ -275,9 +295,19 @@ button.chico {
 .pipeline-vacio { color: var(--tinta-tenue); font-size: 0.82rem; }
 .pipeline-fila { display: flex; align-items: baseline; gap: 0.9rem; flex-wrap: wrap; font-size: 0.8rem; }
 .pipeline-dato { color: var(--tinta-tenue); font-family: var(--mono); font-size: 0.75rem; }
-.pipeline-pasos { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-left: auto; }
-.pipeline-paso { font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); }
-.pipeline-paso b { color: var(--tinta-suave); }
+.pipeline-toggle { margin-left: auto; }
+
+/* El detalle de los pasos: una columna por paso, y adentro los contadores. Es
+   un mapa abierto del lado del motor, asi que el ancho lo pone el contenido. */
+.pipeline-detalle { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.7rem; margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid var(--filete); }
+.pipeline-paso { background: var(--hundido); border-radius: 3px; padding: 0.55rem 0.7rem; }
+.pipeline-paso h4 { margin: 0 0 0.4rem; font-size: 0.78rem; font-weight: 600; color: var(--acento); }
+.pipeline-paso dl { margin: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.pipeline-paso dl > div { display: flex; align-items: baseline; gap: 0.5rem; }
+.pipeline-paso dt { font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); }
+.pipeline-paso dd { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta); font-variant-numeric: tabular-nums; }
+.pipeline-paso dl > div.en-cero dt, .pipeline-paso dl > div.en-cero dd { color: var(--tinta-tenue); opacity: 0.65; }
+.pipeline-nada { font-size: 0.75rem; color: var(--tinta-tenue); }
 
 /* --- Las tarjetas de cluster --------------------------------------------- */
 
@@ -290,8 +320,15 @@ button.chico {
    la grilla: sin eso cada tarjeta mide lo que su contenido y los bordes quedan
    a alturas distintas en cada columna. El valor sale de lo que la tarjeta
    necesita en su peor caso -- titulo de tres renglones, cuatro datos y la fila
-   de botones -- y los titulos entran: medidos los 537 clusters reales, el mas
-   largo tiene 179 caracteres y en tres renglones a este ancho entran ~186. */
+   de botones.
+
+   **Los titulos mas largos se recortan, y esto corrige lo que decia antes.**
+   Aca se afirmaba que en tres renglones entraban ~186 caracteres y que por eso
+   no se truncaba ninguno de los 537 clusters. Ese 186 salio de un valor por
+   renglon inventado. La cuenta real, con los anchos de columna que produce la
+   grilla: entre 133 y 161 caracteres segun el tamano de la ventana, contra un
+   titulo mas largo de 179. Se recorta con puntos suspensivos, y el texto
+   completo vive en el `title` del elemento. */
 .lista-clusters {
   list-style: none; margin: 0; padding: 0;
   display: grid;
@@ -367,7 +404,9 @@ button.chico {
 /* --- El dialogo de sintetizar -------------------------------------------- */
 
 .modal-fondo { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 1.5rem; z-index: 50; }
-.modal { background: var(--superficie); border: 1px solid var(--filete); border-radius: 5px; padding: 1.3rem 1.4rem; max-width: 32rem; width: 100%; max-height: 90vh; overflow-y: auto; }
+.modal { background: var(--superficie); border: 1px solid var(--filete); border-radius: 5px; padding: 1.3rem 1.4rem; width: 100%; max-height: 90vh; overflow-y: auto; }
+.modal-normal { max-width: 32rem; }
+.modal-ancho { max-width: 52rem; }
 .modal-titulo { margin: 0; font-size: 1.1rem; font-weight: 600; }
 .modal-hecho { margin: 0.3rem 0 1.1rem; font-size: 0.9rem; color: var(--tinta-suave); user-select: text; }
 
@@ -385,3 +424,83 @@ button.chico {
 .desenlace-hecha { border-left: 3px solid var(--ok); }
 .desenlace-cortada { border-left: 3px solid var(--alerta); }
 .desenlace code { font-family: var(--mono); user-select: text; }
+
+/* --- El feed de lectura --------------------------------------------------- */
+
+.pantalla-titulo { margin: 0; font-size: 1rem; font-weight: 600; }
+.filtro-activo { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; color: var(--tinta-suave); }
+.aviso.aviso-suave { border-left-color: var(--alerta); }
+
+/* Filas de alto fijo, igual que la lista de clusters y por el mismo motivo:
+   con tarjetas que miden lo que su contenido, los bordes y los botones quedan a
+   alturas distintas en cada columna y la lista deja de leerse como lista. */
+.lista-angulos {
+  list-style: none; margin: 0; padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  grid-auto-rows: 15rem;
+  gap: 0.8rem;
+}
+
+.tarjeta-angulo {
+  background: var(--superficie); border: 1px solid var(--filete);
+  border-radius: 4px; padding: 0.85rem 0.95rem;
+  height: 100%; display: flex; flex-direction: column; gap: 0.5rem;
+  overflow: hidden;
+}
+/* Los topicos y los datos comparten un hueco elastico; los botones quedan
+   abajo por el `margin-top: auto` de `.ta-acciones`. */
+.ta-cuerpo { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 0.5rem; }
+.ta-cab { display: flex; align-items: flex-start; gap: 0.6rem; }
+/* Reserva sus tres renglones aunque tenga uno: es lo que hace que los datos
+   arranquen a la misma altura en toda la fila. **No alcanzan para todos los
+   titulos**: a los anchos de columna reales entran entre 133 y 183 caracteres
+   segun el tamano de la ventana, y el mas largo de la base tiene 144. Lo que se
+   pase se recorta con puntos suspensivos y el texto completo queda en el
+   `title` del elemento. */
+.ta-titulo {
+  margin: 0; font-size: 0.95rem; font-weight: 600; line-height: 1.35;
+  min-height: calc(3 * 1.35em);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: text;
+}
+
+.chip-entregado { border-color: var(--ok); color: var(--ok); }
+.chip-pendiente { border-color: var(--alerta); color: var(--alerta); }
+
+.ta-topicos { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; max-height: 1.5rem; overflow: hidden; flex: none; }
+.ta-topicos li { font-family: var(--mono); font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 2px; background: var(--hundido); color: var(--tinta-suave); }
+.ta-topicos li.ta-subtopico { background: none; border: 1px solid var(--filete); color: var(--tinta-tenue); }
+
+.ta-datos { display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.78rem; color: var(--tinta-tenue); }
+.ta-modelo { font-family: var(--mono); font-size: 0.75rem; }
+
+.ta-acciones { display: flex; align-items: center; gap: 0.6rem; margin-top: auto; flex: none; }
+.ta-id { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); font-variant-numeric: tabular-nums; }
+
+.feed-pie { display: flex; align-items: center; gap: 1rem; padding-top: 0.4rem; }
+.feed-cuenta { font-size: 0.78rem; color: var(--tinta-tenue); }
+.feed-pie button { margin-left: auto; }
+
+/* --- El detalle de un angulo ---------------------------------------------- */
+
+.det { display: flex; flex-direction: column; gap: 1.3rem; }
+.det-rotulo { margin: 0 0 0.5rem; font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tinta-tenue); font-weight: 500; }
+.det-resumen { margin: 0; font-size: 0.9rem; line-height: 1.6; user-select: text; }
+.det-puntos { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: var(--tinta-suave); user-select: text; }
+
+/* Una columna por medio: la gracia de la comparativa es leerlas enfrentadas. */
+.det-comparativa { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.7rem; }
+.det-medio { background: var(--hundido); border-radius: 3px; padding: 0.7rem 0.8rem; }
+.det-medio h4 { margin: 0 0 0.5rem; font-size: 0.85rem; font-weight: 600; color: var(--acento); }
+.det-medio dl { margin: 0; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.82rem; }
+.det-medio dt { font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); }
+.det-medio dd { margin: 0; color: var(--tinta-suave); user-select: text; }
+.det-medio blockquote { margin: 0.6rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--marca-oro); font-size: 0.82rem; font-style: italic; color: var(--tinta-suave); user-select: text; }
+
+.det-fuentes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.82rem; }
+.det-fuentes li { display: flex; gap: 0.6rem; align-items: baseline; }
+.det-fuente-medio { flex: none; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); min-width: 6rem; }
+.det-fuentes a { color: var(--tinta-suave); text-decoration: none; user-select: text; }
+.det-fuentes a:hover { color: var(--acento); text-decoration: underline; }
