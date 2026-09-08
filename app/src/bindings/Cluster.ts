@@ -13,6 +13,11 @@ estado: string, fecha_creacion: string, cantidad_noticias: number,
  * devuelve siempre, con `0` cuando no hay ninguna, justamente para que la
  * ventana no tenga que distinguir "no tiene" de "no vino el campo".
  *
+ * Este campo forma parte del contrato con el motor
+ * (`tests/test_contrato_api.py`), así que tocarlo hace correr las dos
+ * CI: la de la app por el archivo, y la del motor por el binding que se
+ * regenera.
+ *
  * Existe porque sin él la lista de trabajo tenía que paginar
  * `GET /sintesis` entera para saber qué cluster ya estaba resuelto.
  * Medido el 07/09/2026 desde esta misma app: 5 páginas y 201 ms antes de
