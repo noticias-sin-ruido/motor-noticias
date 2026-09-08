@@ -2,9 +2,50 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # También la rama de trabajo: sin esto, nada se verifica hasta abrir el PR,
+    # con todo el trabajo ya hecho. Los minutos son gratis, el repo es público.
+    branches: [main, mejoras-post-1.0]
+    # Filtro por **inclusión y no por exclusión**, a propósito.
+    #
+    # Lo obvio sería `paths-ignore: ['app/**']`, pero rompería una guarda real:
+    # `tests/test_contrato_api.py` lee archivos de la app —los bindings, para
+    # vigilar que el contrato no derive de lo que la app exige, y `CONTRATO.md`,
+    # para que el documento y el diccionario no se separen—. Con `paths-ignore`,
+    # alguien toca `tipos.rs`, se regeneran los bindings, y ese guardián no corre.
+    #
+    # Listadas por inclusión, esas dos rutas de la app quedan declaradas como lo
+    # que son: parte del contrato del motor.
+    #
+    # `paths` va anidado dentro de cada evento. Como hermano de `push` GitHub lo
+    # ignora en silencio, y la CI correría siempre creyendo estar filtrada.
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'alembic/**'
+      - 'alembic.ini'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - 'ruff.toml'
+      - '.github/workflows/ci.yml'
+      - 'app/src/bindings/**'
+      - 'app/CONTRATO.md'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'alembic/**'
+      - 'alembic.ini'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - 'ruff.toml'
+      - '.github/workflows/ci.yml'
+      - 'app/src/bindings/**'
+      - 'app/CONTRATO.md'
+
+concurrency:
+  group: motor-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tests:

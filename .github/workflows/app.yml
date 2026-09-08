@@ -1,0 +1,90 @@
+name: Cabina
+
+# La CI de la app de escritorio, separada de la del motor.
+#
+# **Corre en Windows y no es una preferencia.** `keyring` está declarado con la
+# feature `windows-native` (`app/src-tauri/Cargo.toml`), así que en Ubuntu la
+# app ni siquiera compilaría. Y la app es Windows-only por decisión del punto 14
+# del backlog, no por accidente.
+#
+# **No arma el instalador.** Eso se le suma en la fase 9 como job aparte, que
+# corra sólo en `main` o al taguear: `tauri build` compila en release y tardaría
+# mucho más que los checks, en cada push, para producir un artefacto que
+# todavía no se distribuye.
+
+on:
+  push:
+    branches: [main, mejoras-post-1.0]
+    # Anidado dentro de cada evento: como hermano de `push`, GitHub lo ignora
+    # en silencio y el workflow correría siempre creyendo estar filtrado.
+    paths:
+      - 'app/**'
+      - '.github/workflows/app.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/app.yml'
+
+concurrency:
+  group: cabina-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    name: Verificar la cabina (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Son 483 dependencias en `Cargo.lock`: sin caché, cada corrida
+      # recompila el árbol entero de Tauri.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Instalar dependencias del front
+        run: npm ci
+
+      # `npm run build` es `tsc && vite build`, así que ya verifica los tipos.
+      - name: Tipos y build del front
+        run: npm run build
+
+      - name: Formato de Rust
+        run: cargo fmt --check
+        working-directory: app/src-tauri
+
+      - name: Clippy sin warnings
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: app/src-tauri
+
+      # Los 5 tests de integración contra el motor real llevan `#[ignore]`, así
+      # que esto no necesita contenedores levantados.
+      #
+      # Los 4 de `secretos.rs` sí hablan con el almacén de credenciales real,
+      # contra un servicio propio (`sin-ruido-motor--test`) y con limpieza. En un
+      # runner de Windows deberían funcionar; si no, hay que marcarlos
+      # `#[ignore]` con el error real anotado y no con una sospecha.
+      - name: Tests de Rust
+        run: cargo test
+        working-directory: app/src-tauri
+
+      # Último a propósito: termina en `git diff --exit-code`, así que conviene
+      # que sea lo último que toque el árbol. Falla si alguien cambió un struct
+      # de `tipos.rs` y no commiteó los bindings regenerados.
+      - name: Los bindings están al día
+        run: npm run bindings:check
