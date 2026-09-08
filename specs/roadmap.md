@@ -401,7 +401,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 #### Estado de la app — dónde retomar
 
-Construidas las **fases 0 a 6** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, 796 tests y `ruff`.
+Construidas las **fases 0 a 7** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, **815 tests** y `ruff`.
 
 - **Fase 0 · toolchain** ✅ — Node, rustup con toolchain MSVC y Build Tools instalados.
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
@@ -410,14 +410,18 @@ Construidas las **fases 0 a 6** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio no se borró**: se decidió mantenerlo como banco de pruebas del puente hasta la fase 9, porque cubre comandos que ninguna pantalla ejercita todavía y mide lo que sólo se mide con la ventana abierta.
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 - **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. **Los íconos siguen siendo los de Tauri**: hace falta un isotipo cuadrado, ver la fase 9.
+- **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
 
-**Por dónde seguir: la fase 7.** Es un test de contrato del lado del motor, en
-pytest: un diccionario literal endpoint → campos requeridos que afirme
-**subconjunto y no igualdad**, para que agregar campos no rompa la app pero
-renombrarlos o borrarlos sí. Más un test que compare el conjunto de
-`(método, path)` del `openapi.json` contra lo documentado, para que un endpoint
-nuevo obligue a tocar `app/CONTRATO.md`. Verificación por mutación: renombrar
-`titulo_angulo` y confirmar que el test falla.
+**Por dónde seguir: la fase 8.** Partir la CI por rutas: `ci.yml` con
+`paths-ignore: ['app/**']` y un `app.yml` nuevo con `paths: ['app/**']` que
+corra `npm ci`, `tsc --noEmit`, `cargo fmt --check`, `clippy -D warnings` y
+`cargo test`.
+
+**Dos cuidados que ya se conocen.** Si los checks son requeridos en `main`, los
+filtros dejan PRs colgados y hace falta un job "skip" que reporte éxito. Y el
+test de contrato de la fase 7 **lee archivos de la app** —los bindings, para
+vigilar la deriva—, así que un cambio en `app/**` que no dispare la CI del motor
+dejaría ese chequeo sin correr.
 
 **Deudas anotadas, ninguna bloquea:**
 
@@ -440,3 +444,23 @@ nuevo obligue a tocar `app/CONTRATO.md`. Verificación por mutación: renombrar
 #### Lo que queda deliberadamente afuera de la v1
 
 La consola completa del operador —medios, modelos, alertas, webhook— que es lo que absorbería los puntos 9 y 11. Llega cuando la v1 demuestre que se usa. Y el instalador que empaquete el motor entero, que costaría sacar pgvector: si algún día hace falta, la UI ya va a estar hecha.
+### 15. Lector de voz para las síntesis — escuchar en vez de leer
+
+**Anotado el 08/09/2026, posterior a las nueve fases de la app.** No se construye hasta que la cabina esté terminada.
+
+Escuchar es el modo natural de consumir noticias mientras se hace otra cosa —manejar, cocinar, viajar—, y es justo el momento en que nadie va a abrir una pantalla a leer la comparativa de enfoques. El feed de lectura de la fase 5 ya tiene el texto en la mano: `resumen_neutro` es un párrafo neutro escrito para ser leído de corrido, que es exactamente lo que un lector de voz necesita.
+
+**Qué se construiría**: un botón por ángulo que lea en voz alta, y probablemente una cola para encadenar varios.
+
+**La decisión que hay que tomar primero es de dónde sale la voz**, y no es menor:
+
+- **`speechSynthesis` del webview** (la voz de Windows). Es **gratis, local y sin red**: nada del texto sale de la máquina, no toca la CSP y no hay proveedor que facturar. La contra es la calidad — depende de qué voces en español tenga instaladas Windows, y suelen sonar robóticas.
+- **Un proveedor de TTS en la nube**. Suena mucho mejor y **cobra por carácter**. Con ~28 síntesis por día activo, leer todo sería un costo recurrente nuevo, y este proyecto ya tiene el gasto de IA como límite duro. Además mandaría el texto a un tercero más.
+
+**Recomendación anticipada**: empezar por la voz local, que cuesta cero y se prueba en una tarde. Si la calidad no alcanza, ahí sí **medir cuántos caracteres por día** implicaría lo otro antes de evaluar un proveedor — no al revés.
+
+**Cuidados anotados desde ahora**:
+
+- **Qué se lee y qué no.** `resumen_neutro` sí. La comparativa por medio es una tabla y leída en voz corrida se vuelve incomprensible; si se incluye, hay que redactarla distinta para el oído.
+- **Esto no reemplaza un lector de pantalla.** Es una función de consumo, no de accesibilidad: quien usa NVDA o Narrador ya tiene el texto, y agregar una segunda voz encima estorba. Los dos usos conviven pero no son el mismo.
+- **Empezar y cortar tienen que ser evidentes.** Una voz que arranca sola, o que no se puede parar rápido, es peor que no tenerla.

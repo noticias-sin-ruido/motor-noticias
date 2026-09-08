@@ -3390,3 +3390,42 @@ Queda sin probar la cuarta combinación —bandeja con "salir sin detener"—, q
 #### Los íconos siguen siendo los de Tauri
 
 `tauri icon` exige una imagen **cuadrada** y el logotipo es 1,84:1. Metido en un cuadrado ocupa el 100% del ancho y el 54% del alto: a los 16×16 que Windows dibuja en la bandeja, eso son 16 × 8,7 píxeles, donde un nombre no se lee. Hace falta el **isotipo** —el símbolo solo, sin el nombre—, que es para lo que las marcas tienen las dos versiones. Queda pendiente para la fase 9, y no bloquea nada: es un archivo que se reemplaza sin tocar código.
+### Fase 7: el test de contrato, y dos cosas que encontró al escribirlo (08/09/2026)
+
+El motor y la app se versionan juntos pero **se rompen por separado**: renombrar un campo de una respuesta compila perfecto en Python, pasa todos los demás tests, y hace que la ventana muestre una tarjeta vacía o falle al deserializar. Ningún compilador cruza esa frontera.
+
+El contrato vive del lado del motor —`tests/test_contrato_api.py`— porque es el motor el que puede romperlo sin enterarse.
+
+#### La regla: subconjunto y no igualdad
+
+La respuesta tiene que traer **al menos** los campos pactados. Agregar campos no rompe la app —los structs de Rust no llevan `deny_unknown_fields`, y fue deliberado— pero renombrar o borrar sí. El motor puede crecer sin pedir permiso; no puede achicarse sin avisar. Hay un test que fija esa asimetría, para que nadie "endurezca" los demás a igualdad sin darse cuenta de lo que rompe.
+
+#### Estos tests no mockean, y esa es la decisión de fondo
+
+Los tests de endpoints de `test_api.py` mockean la capa de servicio, y está bien: prueban el endpoint, no el servicio. **Un test de contrato no puede hacerlo.** Uno que mockee `listar_sintesis` afirma sobre la forma de su propio mock y pasaría en verde con el motor roto — es medir el propio mock, en el lugar exacto donde eso es fatal. Acá se siembran datos reales y se ejercita el camino entero.
+
+Del mismo criterio salió una guarda del sembrado: hay un `assert` de que la lista devuelta **no venga vacía**. Sin él, `GET /modelos` sin modelos sembrados pasaba el test sin haber mirado un solo registro.
+
+#### El diccionario tiene un guardián, y hacía falta
+
+El plan pedía un diccionario literal endpoint → campos. Es legible, pero **es una segunda copia**: la primera son los structs de `tipos.rs`. Sin nada que las ate, alguien agrega un campo obligatorio en Rust, la app empieza a exigirlo, y el contrato sigue protegiendo el de antes.
+
+Se agregó un test que compara el diccionario contra los **bindings generados** por `ts-rs` desde esos structs. Se eligió parsear el TypeScript generado y no el Rust a mano porque lo primero es estable por construcción. **Mutación**: se agregó un campo obligatorio a `ResumenSintesis`, se regeneraron los bindings, y el guardián lo detectó.
+
+Contra: acopla la suite del motor a archivos de la app. **Hay que tenerlo en cuenta al partir la CI por rutas en la fase 8**, o un cambio del lado de la app no dispararía el chequeo de deriva.
+
+#### Dos cosas que el trabajo encontró y la lectura no
+
+**Las rutas `PATCH`.** El inventario manual se hizo con un `grep` de `get|post|put|delete` y **se comió `PATCH /medios/{id}` y `PATCH /modelos/{id}`**. El motor tiene 19 rutas, no 17. El test las encontró en su primera corrida porque lee `openapi.json` en vez de confiar en una lectura del código. Quedó anotado en `CONTRATO.md` como evidencia de para qué sirve el chequeo.
+
+**`hay_material_nuevo` no mira la síntesis.** Al sembrar un cluster "ya sintetizado" para probar el corte, el test devolvió **422 en vez de 200**: el pedido había llegado hasta el proveedor. La función mira `cluster.noticias_al_sintetizar` —una marca con cuántas noticias había al sintetizar— y no la existencia de la síntesis. El sembrado no representaba un cluster real, y sin el test eso no se habría notado.
+
+#### El POST se cubre en dos de sus tres desenlaces, y sin gastar
+
+Se había dicho que `POST /clusters/{id}/synthesize` no era cubrible sin llamar al proveedor. **Es falso, y la corrección la trajo el usuario**: los dos cortes —`sin_medios_suficientes` y `sin_material_nuevo`— ocurren antes de cualquier llamada, y antes incluso del chequeo de credencial. Se ejercitan de verdad sembrando los datos que los provocan.
+
+Queda sin cubrir sólo `sintetizado: true`, el único que cuesta plata. Su forma sigue en `fixtures/derivados/post_sintetizado.json`, **derivada leyendo el código y no capturada**, y por eso vive en `derivados/`: es un supuesto fundado, no evidencia. Cerrarlo requiere una síntesis real, que se paga una vez.
+
+#### Verificación
+
+22 tests nuevos, 815 en total del lado del motor, `ruff` limpio. **Seis mutaciones, las seis cazadas**: renombrar `titulo_angulo` (la que pedía el plan), borrar `cantidad_sintesis`, un campo obligatorio nuevo en `tipos.rs`, renombrar `motivo`, inventar un motivo que la app no discrimina, y que desaparezca `sintetizado` de la respuesta que corta.
