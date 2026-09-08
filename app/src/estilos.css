@@ -504,3 +504,12 @@ button.chico {
 .det-fuente-medio { flex: none; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); min-width: 6rem; }
 .det-fuentes a { color: var(--tinta-suave); text-decoration: none; user-select: text; }
 .det-fuentes a:hover { color: var(--acento); text-decoration: underline; }
+
+/* --- El dialogo de salida ------------------------------------------------- */
+
+/* Cada opcion con su explicacion debajo: la diferencia entre las dos no es
+   evidente por el nombre del boton, y elegir mal deja el motor apagado sin que
+   nadie se entere. */
+.salidas { display: flex; flex-direction: column; gap: 0.3rem; }
+.salidas button { align-self: flex-start; }
+.salidas .ayuda { margin-bottom: 0.9rem; }

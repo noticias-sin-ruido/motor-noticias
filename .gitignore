@@ -20,3 +20,8 @@ htmlcov/
 
 # Orquestación (si alguien la crea por error localmente)
 docker-compose*.yml
+
+# Configuracion local de Claude Code. La crea `/plugin install` y solo
+# registra que plugins tiene habilitados quien trabaja en esta maquina:
+# es preferencia de herramienta, no del proyecto.
+.claude/

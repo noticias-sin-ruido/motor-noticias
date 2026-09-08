@@ -7,6 +7,7 @@
 
 mod ajustes;
 mod api;
+mod bandeja;
 mod docker;
 mod motor;
 mod secretos;
@@ -256,9 +257,32 @@ async fn sintetizar_cluster(
     Ok(cruda.into())
 }
 
+/// Cierra la aplicación. **No para el motor**: quien la llama ya decidió qué
+/// hacer con los contenedores, y mezclar las dos cosas acá volvería a hacer que
+/// el destino del motor dependa de por dónde se salió.
+#[tauri::command]
+fn salir(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            bandeja::construir(app.handle())?;
+            Ok(())
+        })
+        // **La cruz no cierra: pregunta.** Un programa que maneja contenedores
+        // tiene dos cierres legítimos, y cuál ocurre no puede ser un efecto de
+        // dónde se hizo clic. El `prevent_close` deja la ventana viva y le pasa
+        // la decisión a la pantalla, que es la única que puede mostrar en qué
+        // anda mientras el motor se detiene.
+        .on_window_event(|ventana, evento| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = evento {
+                api.prevent_close();
+                let _ = ventana.emit(bandeja::CANAL_SALIDA, bandeja::pedido::PREGUNTAR);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             token_existe,
             token_guardar,
@@ -274,7 +298,8 @@ pub fn run() {
             detalle_de_sintesis,
             estado_del_pipeline,
             listar_modelos,
-            sintetizar_cluster
+            sintetizar_cluster,
+            salir
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar la cabina");

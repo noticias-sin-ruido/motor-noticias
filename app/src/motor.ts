@@ -93,6 +93,26 @@ export function detener(): Promise<Estado> {
   return invoke<Estado>("motor_detener");
 }
 
+/**
+ * Cierra la aplicación. **No toca los contenedores**: quién decidió qué hacer
+ * con el motor ya lo decidió antes de llamar acá, y mezclarlo volvería a hacer
+ * que el destino del motor dependa de por dónde se salió.
+ */
+export function salir(): Promise<void> {
+  return invoke("salir");
+}
+
+/** Lo que la bandeja o la cruz le piden a la ventana. */
+export type PedidoDeSalida = "preguntar" | "detener_y_salir" | "salir_sin_detener";
+
+/**
+ * Se suscribe a los pedidos de salida. Los emite la bandeja y también la cruz
+ * de la ventana, que no cierra sino que pregunta.
+ */
+export function alPedirSalida(fn: (pedido: PedidoDeSalida) => void): Promise<() => void> {
+  return listen<PedidoDeSalida>("pedido-de-salida", (e) => fn(e.payload));
+}
+
 export function repoLeer(): Promise<string | null> {
   return invoke<string | null>("repo_leer");
 }

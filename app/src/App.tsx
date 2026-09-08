@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import * as motor from "./motor";
@@ -6,6 +6,7 @@ import type { Estado } from "./motor";
 import type { Cluster } from "./bindings/Cluster";
 
 import BarraMotor from "./componentes/BarraMotor";
+import DialogoSalida from "./componentes/DialogoSalida";
 import ListaDeTrabajo from "./pantallas/ListaDeTrabajo";
 import FeedDeLectura from "./pantallas/FeedDeLectura";
 import Andamio from "./Andamio";
@@ -105,6 +106,9 @@ export default function App() {
   // Con qué cluster entrar al feed. Vive acá y no adentro del feed porque
   // lo decide la otra pantalla: es el único dato que cruza entre las dos.
   const [clusterDelFeed, setClusterDelFeed] = useState<number | null>(null);
+  // Lo que la bandeja o la cruz pidieron. `null` es "nadie pidió salir".
+  const [salida, setSalida] = useState<motor.PedidoDeSalida | null>(null);
+  const desuscribirSalida = useRef<(() => void) | null>(null);
 
   const revisar = useCallback(async () => {
     setHayToken(await invoke<boolean>("token_existe"));
@@ -114,6 +118,16 @@ export default function App() {
   useEffect(() => {
     void revisar();
   }, [revisar]);
+
+  // **La suscripción vive acá y no adentro del diálogo**, porque el diálogo no
+  // existe hasta que llega el pedido: si escuchara él, no habría nadie oyendo
+  // cuando alguien aprieta la cruz.
+  useEffect(() => {
+    void motor.alPedirSalida(setSalida).then((off) => {
+      desuscribirSalida.current = off;
+    });
+    return () => desuscribirSalida.current?.();
+  }, []);
 
   if (hayToken === null || hayRepo === null) {
     return (
@@ -211,6 +225,12 @@ export default function App() {
           <Andamio />
         )}
       </main>
+
+      {/* Fuera del `main` a propósito: puede llegar con el motor apagado, con la
+          ventana en cualquier pestaña, y hasta antes de que haya token. */}
+      {salida !== null && (
+        <DialogoSalida pedido={salida} alCancelar={() => setSalida(null)} />
+      )}
     </div>
   );
 }

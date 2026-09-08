@@ -3345,3 +3345,48 @@ Eso obligó a recalcular el `scroll-padding-top` del criterio *Focus Not Obscure
 #### Una sonda que gritaba lobo
 
 La prueba de la CSP marcaba en rojo, en cada corrida de desarrollo, una condición que en desarrollo es **la correcta**: ahí no hay CSP y no puede haberla. Un instrumento que da falsa alarma fija entrena a ignorarlo, y el andamio ahora es permanente. Ahora distingue: en desarrollo informa que no dictamina; en un ejecutable compilado, la ausencia de violación sí es un fallo.
+### Fase 6: la bandeja, y las dos formas de salir con nombre propio (07/09/2026)
+
+Un programa que maneja contenedores tiene **dos cierres legítimos**: irse dejando el motor produciendo, o pararlo todo. El pipeline corre cada 15 minutos y no necesita la ventana abierta, así que cerrar la cabina y cerrar el motor son decisiones distintas.
+
+La decisión de fondo, que venía del grillado: **cuál ocurre no puede depender de dónde se hizo clic.** Así que la cruz de la ventana no cierra — pregunta —, y el menú de bandeja ofrece las dos salidas escritas con todas las letras en vez de un "Salir" ambiguo.
+
+#### La bandeja no ejecuta nada por su cuenta
+
+Cada opción del menú le avisa a la ventana y la ventana hace el trabajo. Dos motivos: parar el motor tarda segundos, y hacerlo desde el menú dejaría a quien mira sin ninguna señal de que algo está pasando; y la alternativa era duplicar en Rust la lógica que la pantalla ya tiene.
+
+Antes de pedir la decisión, la ventana se trae al frente: puede estar minimizada, y un diálogo mostrado donde no se ve no es un diálogo.
+
+**Si detener falla, no se sale igual.** Cerrar dejaría los contenedores corriendo justo cuando se pidió lo contrario, y sin nadie mirando. Se muestra qué pasó y se deja elegir de nuevo.
+
+#### Minimizar minimiza
+
+El plan original pedía que minimizar escondiera la ventana en la bandeja. Se cambió: va a la barra de tareas como cualquier programa de Windows. El motivo es que esconderla deja **una sola forma de volver**, y el ícono de bandeja puede quedar oculto en el desplegable de Windows sin que nadie lo note. Con la barra de tareas hay siempre dos vías.
+
+#### Un bug encontrado antes de que existiera
+
+La bandeja estaba declarada en `tauri.conf.json` **y** construida en `bandeja.rs`. Leyendo la fuente apareció que Tauri arma una desde la config si esa clave existe (`app.rs:2420`, *"initialize default tray icon if defined"*), así que habrían salido dos íconos con el mismo id. Como el menú sólo se puede definir en código, la config quedó sin `trayIcon` y `bandeja.rs` es la única fuente.
+
+#### Los tests, y por qué el primero que escribí no servía
+
+La primera versión afirmaba que las etiquetas contenían la palabra "motor" — sobre literales escritos **en el propio test**. Pasaba siempre, dijera lo que dijera el menú. Es medir el propio mock, en su forma más pura.
+
+Corregido en dos pasos: las etiquetas pasaron a ser constantes que el menú usa de verdad, y la tabla que decide qué pedido emite cada opción se extrajo de `al_elegir` —que necesita un `AppHandle` inexistente en un test— a una función propia. Ahora el test afirma sobre el código que corre.
+
+**Tres mutaciones, las tres cazadas**: un id del menú que deja de matchear, alguien que acorta una etiqueta a "Salir", y las dos salidas diciendo lo mismo. La última es la que importa: es exactamente lo que esta fase existe para evitar.
+
+#### Verificación de los tres caminos
+
+Lo que vale de esta tabla no es que den verde, sino que **dos dan resultados opuestos**. Si el segundo hubiera parado el motor se habría visto idéntico al primero, así que se probó con el motor arriba y mirando que el contador de `Up` no se reiniciara.
+
+| camino | el motor quedó |
+|---|---|
+| Cruz → Detener motor y salir | parado, con 11s entre un contenedor y el otro |
+| Cruz → Salir dejando el motor corriendo | vivo, sin reiniciar, contestando 200 |
+| Bandeja → Detener motor y salir | parado, y la ventana se trajo al frente sola |
+
+Queda sin probar la cuarta combinación —bandeja con "salir sin detener"—, que va por el mismo despachador cambiando sólo qué pedido emite.
+
+#### Los íconos siguen siendo los de Tauri
+
+`tauri icon` exige una imagen **cuadrada** y el logotipo es 1,84:1. Metido en un cuadrado ocupa el 100% del ancho y el 54% del alto: a los 16×16 que Windows dibuja en la bandeja, eso son 16 × 8,7 píxeles, donde un nombre no se lee. Hace falta el **isotipo** —el símbolo solo, sin el nombre—, que es para lo que las marcas tienen las dos versiones. Queda pendiente para la fase 9, y no bloquea nada: es un archivo que se reemplaza sin tocar código.
