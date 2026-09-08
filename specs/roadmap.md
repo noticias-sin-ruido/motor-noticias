@@ -411,6 +411,7 @@ Construidas las **fases 0 a 7** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 - **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. Los íconos pasaron a ser los de Sin Ruido el 08/09/2026, generados desde `app/public/isotipo.svg`.
 - **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
+- **Fase 8 · CI separada por rutas** ⏳ — `ci.yml` con filtro por **inclusión** y `app.yml` nuevo en `windows-latest`. Escrita; falta verificarla pusheando y provocando cada caso.
 
 **Por dónde seguir: la fase 8.** Partir la CI por rutas: `ci.yml` con
 `paths-ignore: ['app/**']` y un `app.yml` nuevo con `paths: ['app/**']` que
@@ -422,6 +423,33 @@ filtros dejan PRs colgados y hace falta un job "skip" que reporte éxito. Y el
 test de contrato de la fase 7 **lee archivos de la app** —los bindings, para
 vigilar la deriva—, así que un cambio en `app/**` que no dispare la CI del motor
 dejaría ese chequeo sin correr.
+
+**Una decisión que la fase 9 tiene que tomar ANTES de empaquetar (08/09/2026).**
+
+El plan dice «sin firma y con updater deshabilitado en la v1: **un operador, una
+máquina**». Esa premisa **ya no se cumple**: el objetivo pasó a ser un producto
+usable por cualquier usuario, y con eso reempaquetar deja de ser un trámite y se
+vuelve una campaña de avisar y esperar que cada uno reinstale.
+
+Son dos cosas independientes y conviene no confundirlas:
+
+- **El updater** resuelve *cómo llega la versión nueva*. Tauri lo trae: la app
+  consulta un JSON al arrancar y aplica la actualización sola. Necesita un par
+  de claves propias de Tauri —gratis, se generan con un comando— y un lugar
+  donde publicar el manifiesto; GitHub Releases alcanza y no cuesta en un repo
+  público. Estaba anotado como «fase 10 opcional» y con el objetivo nuevo pasa a
+  ser bastante menos opcional.
+- **La firma de código** resuelve *por qué confiar en el archivo*. Sin ella,
+  Windows muestra «Windows protegió su PC» a todo el que no sea el autor. Un
+  certificado son cientos de dólares al año, y el gasto es un límite duro acá.
+
+Se puede tener **updater sin firma**: el updater funciona igual, y lo que queda
+es la advertencia en la primera instalación.
+
+**Por qué antes y no después**: quien instale una versión sin updater no se
+entera nunca de las siguientes. Hay que volver a buscarlo a mano — justo lo que
+el updater viene a evitar. Si entra, tiene que estar en el primer instalador que
+se distribuya.
 
 **Deudas anotadas, ninguna bloquea:**
 
