@@ -465,9 +465,15 @@ se distribuya.
   interno y un rasterizador que lo ignorara habría producido formas negras.
   Se borraron las carpetas `android/` e `ios/` que `tauri icon` genera de yapa:
   35 archivos de plataformas que este proyecto excluye.
-- **Los tests de `secretos.rs` no tienen `#[ignore]`** y tocan el Administrador
-  de credenciales real. Son cuatro, y **van a romper en CI en la fase 8**, donde
-  no hay almacén de credenciales.
+- **La deuda de `secretos.rs` era falsa, y se cerró midiéndola (08/09/2026).**
+  Acá decía que sus tests «van a romper en CI en la fase 8, donde no hay almacén
+  de credenciales». **Pasaron los cinco** en el runner de Windows. La afirmación
+  se había deducido de que tocan el Credential Manager, sin mirar que lo hacen
+  contra un servicio propio (`sin-ruido-motor--test`) con limpieza, y sin
+  preguntarse en qué sistema operativo iba a correr la CI — que tiene que ser
+  Windows porque `keyring` usa la feature `windows-native`. De haber seguido esta
+  nota se habría perdido la cobertura del único código que habla con el almacén
+  real, para arreglar un problema inexistente.
 - **Nadie cierra las corridas huérfanas.** Reiniciar los contenedores a mitad de
   ciclo deja la fila abierta para siempre; la pantalla lo informa bien, pero el
   motor no las limpia al arrancar. Había tres al 07/09.
