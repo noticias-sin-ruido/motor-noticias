@@ -401,7 +401,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 #### Estado de la app — dónde retomar
 
-Construidas las **fases 0 a 3** del plan de nueve, y la **4 en curso**. Verde en `cargo fmt`, `clippy -D warnings`, 53 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, 796 tests y `ruff`.
+Construidas las **fases 0 a 6** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, 796 tests y `ruff`.
 
 - **Fase 0 · toolchain** ✅ — Node, rustup con toolchain MSVC y Build Tools instalados.
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
@@ -411,41 +411,31 @@ Construidas las **fases 0 a 3** del plan de nueve, y la **4 en curso**. Verde en
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 - **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. **Los íconos siguen siendo los de Tauri**: hace falta un isotipo cuadrado, ver la fase 9.
 
-**Fase 4, en curso — el puente `invoke()` ya se cruzó (07/09/2026).** Los seis
-comandos que nunca se habían llamado desde la ventana —`listar_clusters`,
-`listar_sintesis`, `detalle_de_sintesis`, `estado_del_pipeline`,
-`listar_modelos` y `sintetizar_cluster`— se ejercitaron con un andamio
-descartable (`app/src/Andamio.tsx`) que corre solo al montar. **Diez pruebas,
-cero fallidas.** Cruzó también el `flatten` del detalle, y `listar_modelos`
-llegó sin `api_key_env` ni `base_url`.
+**Por dónde seguir: la fase 7.** Es un test de contrato del lado del motor, en
+pytest: un diccionario literal endpoint → campos requeridos que afirme
+**subconjunto y no igualdad**, para que agregar campos no rompa la app pero
+renombrarlos o borrarlos sí. Más un test que compare el conjunto de
+`(método, path)` del `openapi.json` contra lo documentado, para que un endpoint
+nuevo obligue a tocar `app/CONTRATO.md`. Verificación por mutación: renombrar
+`titulo_angulo` y confirmar que el test falla.
 
-**La conversión a camelCase quedó probada, no supuesta.** La misma consulta con
-las dos grafías: `clusterId` filtró y devolvió 1 fila, `cluster_id` fue ignorado
-y devolvió 100. Escrito en snake_case compila, pasa `tsc` y no filtra nada. La
-fuente lo confirma: `ArgumentCase::Camel` es el default en `tauri-macros 2.6.3`
-(`wrapper.rs:51`, conversión en `:506`). Un segundo control, gratis: pasarle
-`cluster_id` a `sintetizar_cluster` —donde el argumento es obligatorio— hace que
-el puente rechace mientras deserializa, antes de que salga un pedido HTTP.
+**Deudas anotadas, ninguna bloquea:**
 
-**El punto flojo del plan se midió y se resolvió (07/09/2026).** `GET /clusters`
-no decía si el cluster ya tenía síntesis, y la v1 lo iba a resolver del lado del
-cliente paginando `/sintesis` para armar un `Set<cluster_id>`. **Medido desde la
-ventana: 5 páginas, 438 síntesis, 201 ms antes de dibujar una fila** — y
-creciendo a ~28 síntesis por día activo, o sea que cruzaba el segundo en un par
-de meses. Peor que la lentitud: el tope de páginas del cliente habría empezado a
-truncar el `Set` en silencio, y la pantalla habría dicho que un cluster no tiene
-síntesis cuando sí las tiene.
-
-La salida fue la que el plan anticipaba: **un campo del lado del motor**.
-`GET /clusters` ahora devuelve `cantidad_sintesis`, de una consulta agrupada
-sobre los ids que la lista ya trajo — sin migración y sin agregar una consulta
-por cluster. Medido desde la misma ventana después del cambio: **14 ms en un
-solo pedido**, y constante. Cero cuando no hay ninguna, nunca ausente, para que
-la ventana no tenga que distinguir "no tiene" de "no vino el campo".
-
-**Dos cosas más, con fecha:**
-- La **CSP del webview quedó prendida (07/09/2026)**, junto con las pantallas que la justifican. El valor que este punto proponía —`default-src 'self'` a secas— **era el que rompe la app**: el `invoke()` viaja por `ipc://localhost`, que `'self'` no cubre. El bueno es `default-src 'self'; connect-src ipc: http://ipc.localhost`. Comprobado en el ejecutable de release, no supuesto: bloquea un `fetch` externo con evento `securitypolicyviolation`, y la app siguió mandándole 26 pedidos al motor. **En desarrollo no hay CSP y no puede haberla**: Tauri sólo la inyecta cuando sirve el frontend él mismo, y en dev lo sirve Vite.
-- Los tests de `secretos.rs` **tocan el Credential Manager real sin `#[ignore]`**. Fue deliberado, pero **va a romper en CI cuando llegue la fase 8**, donde no hay almacén de credenciales.
+- **Los íconos son los del scaffold de Tauri.** `tauri icon` exige una imagen
+  cuadrada y el logotipo es 1,84:1: metido en un cuadrado, a los 16×16 que
+  Windows dibuja en la bandeja el nombre queda en 8,7 píxeles de alto. Hace
+  falta el **isotipo** —el símbolo sin el nombre—. Es un archivo, no toca código.
+- **Los tests de `secretos.rs` no tienen `#[ignore]`** y tocan el Administrador
+  de credenciales real. Son cuatro, y **van a romper en CI en la fase 8**, donde
+  no hay almacén de credenciales.
+- **Nadie cierra las corridas huérfanas.** Reiniciar los contenedores a mitad de
+  ciclo deja la fila abierta para siempre; la pantalla lo informa bien, pero el
+  motor no las limpia al arrancar. Había tres al 07/09.
+- **El camino `hecha` de `sintetizar_cluster` nunca se ejercitó de punta a
+  punta**: es el único que gasta plata. Los dos desenlaces que cortan sí.
+- **Sin probar**: bandeja → "salir dejando el motor corriendo". Va por el mismo
+  despachador que sí se probó, cambiando qué pedido emite.
+- **`groq-qwen` quedó con `max_tokens=900`** de una prueba vieja.
 
 #### Lo que queda deliberadamente afuera de la v1
 
