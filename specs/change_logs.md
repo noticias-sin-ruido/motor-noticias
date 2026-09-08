@@ -3429,3 +3429,46 @@ Queda sin cubrir sólo `sintetizado: true`, el único que cuesta plata. Su forma
 #### Verificación
 
 22 tests nuevos, 815 en total del lado del motor, `ruff` limpio. **Seis mutaciones, las seis cazadas**: renombrar `titulo_angulo` (la que pedía el plan), borrar `cantidad_sintesis`, un campo obligatorio nuevo en `tipos.rs`, renombrar `motivo`, inventar un motivo que la app no discrimina, y que desaparezca `sintetizado` de la respuesta que corta.
+### Fase 8: partir la CI, y una deuda propia que resultó falsa (08/09/2026)
+
+Desde que existe `app/`, cada cambio de la interfaz disparaba la suite entera del motor —que no puede romper— y ningún cambio del motor verificaba la app, que no tenía CI en absoluto.
+
+#### El filtro va por inclusión, y no es un detalle de estilo
+
+Lo obvio era `paths-ignore: ['app/**']`, que es lo que el plan pedía. **Rompería una guarda real.** El test de contrato de la fase 7 lee archivos de la app: los bindings, para vigilar que el contrato no derive de lo que la app exige, y `CONTRATO.md`, para que el documento y el diccionario no se separen. Con exclusión, alguien toca `tipos.rs`, se regeneran los bindings, y ese guardián no corre.
+
+Se listó por inclusión, con `app/src/bindings/**` y `app/CONTRATO.md` entre las rutas del motor: quedan declaradas como lo que son, parte de su contrato.
+
+#### Tres cuidados del plan que se cayeron al medirlos
+
+| lo que el plan advertía | lo que se midió |
+|---|---|
+| "si los checks son requeridos en `main`, hace falta un job skip" | `main` **no está protegida**. No hace falta |
+| el costo de los minutos de Windows | el repo es **público**: gratis e ilimitados |
+| "los tests de `secretos.rs` van a romper en CI" | **pasaron los cinco** |
+
+Y apareció algo que el plan no tenía: **el runner de la app tiene que ser Windows y no es preferencia**. `keyring` está declarado con la feature `windows-native`, así que en Ubuntu la app ni siquiera compilaría.
+
+#### La deuda de `secretos.rs` era mía y era falsa
+
+Estaba anotada en el roadmap como un hecho: «van a romper en CI en la fase 8, donde no hay almacén de credenciales». **Se dedujo** de que tocan el Credential Manager, sin mirar que lo hacen contra un servicio propio (`sin-ruido-motor--test`) con limpieza antes y después, y sin preguntarse en qué sistema operativo iba a correr la CI.
+
+De haber seguido esa nota se les habría puesto `#[ignore]` y se habría perdido la cobertura del **único código que habla con el almacén real**, para arreglar un problema inexistente. Es el mismo patrón que `default-src 'self'` y que "tres renglones alcanzan para todos los títulos": una afirmación escrita con seguridad y nunca medida. Esta vez el costo fue nulo porque se comprobó antes de actuar.
+
+#### Un error atajado antes de pushear
+
+`paths` iba escrito como hermano de `push` y `pull_request`. **GitHub lo ignora en silencio ahí**: la CI habría corrido siempre creyéndose filtrada, y se habría reportado como funcionando. Apareció validando el YAML antes de subirlo, y el motivo quedó escrito en los dos archivos.
+
+#### Verificación: se provocó cada caso
+
+Una CI no se verifica leyéndola. Se hicieron tres pushes a la rama de trabajo, cada uno tocando una ruta distinta:
+
+| tocó | se disparó |
+|---|---|
+| `specs/` | nada |
+| `tests/` | sólo `CI` |
+| `tipos.rs` + su binding regenerado | **los dos** |
+
+El tercero es el que justifica todo el diseño: un cambio confinado a `app/**` que igual tiene que despertar al motor. Con `paths-ignore` habría corrido sólo la CI de la app.
+
+**El caché de Rust funciona**: `Cabina` pasó de 445 s en frío a 148 s. Y quedó verificado de casualidad el bloque `concurrency`: una corrida aparece `cancelled` porque el push siguiente la reemplazó, que es exactamente lo que se buscaba mientras se trabaja.

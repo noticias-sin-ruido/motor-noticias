@@ -401,7 +401,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 #### Estado de la app — dónde retomar
 
-Construidas las **fases 0 a 7** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, **815 tests** y `ruff`.
+Construidas las **fases 0 a 8** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, **815 tests** y `ruff`.
 
 - **Fase 0 · toolchain** ✅ — Node, rustup con toolchain MSVC y Build Tools instalados.
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
@@ -411,7 +411,7 @@ Construidas las **fases 0 a 7** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 - **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. Los íconos pasaron a ser los de Sin Ruido el 08/09/2026, generados desde `app/public/isotipo.svg`.
 - **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
-- **Fase 8 · CI separada por rutas** ⏳ — `ci.yml` con filtro por **inclusión** y `app.yml` nuevo en `windows-latest`. Escrita; falta verificarla pusheando y provocando cada caso.
+- **Fase 8 · CI separada por rutas** ✅ — `ci.yml` con filtro por **inclusión** —para que un cambio en los bindings despierte al motor— y `app.yml` nuevo en `windows-latest`, forzado por `keyring`. Verificada provocando cada caso: `specs/` no dispara nada, `tests/` sólo el motor, y `tipos.rs` con su binding **los dos**. El caché baja la corrida de la app de 445 s a 148 s.
 
 **Por dónde seguir: la fase 8.** Partir la CI por rutas: `ci.yml` con
 `paths-ignore: ['app/**']` y un `app.yml` nuevo con `paths: ['app/**']` que
