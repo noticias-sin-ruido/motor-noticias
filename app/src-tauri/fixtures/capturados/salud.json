@@ -2,5 +2,7 @@
   "status": "ok",
   "database": "ok",
   "environment": "development",
-  "hora_local": "2026-09-06T20:48:32-03:00"
+  "hora_local": "2026-09-08T19:01:05-03:00",
+  "exige_token": true,
+  "entrega_configurada": true
 }

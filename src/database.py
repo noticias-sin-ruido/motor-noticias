@@ -101,4 +101,25 @@ def verificar_conexion(session: Session) -> bool:
         return True
     except Exception as error:
         logger.error(f"Health check: no se pudo consultar la base: {error}")
+        # **El rollback no es prolijidad: sin él la sesión queda envenenada.**
+        # SQLAlchemy marca la sesión para rollback cuando una sentencia falla, y
+        # a partir de ahí *cualquier* consulta siguiente sobre esa misma sesión
+        # levanta `PendingRollbackError` en vez de intentar nada. O sea que este
+        # `return False` le dejaba al llamador una sesión que parecía usable y no
+        # lo era.
+        #
+        # No es teórico: `GET /` empezó a consultar la base después de llamar
+        # acá, y con Postgres apagado devolvía **500 en vez de 503** — reventaba
+        # en la consulta siguiente antes de llegar a mirar este booleano.
+        # Verificado parando `sin_ruido_db` contra el motor real: 500 las tres
+        # veces. El 503 es contrato: la cabina lo usa para distinguir "la base no
+        # está" de "el motor no está" (`app/src-tauri/src/motor.rs`).
+        #
+        # Va en su propio `try` porque si la conexión se cortó, el rollback
+        # también puede fallar, y esta función no puede levantar nunca: es la que
+        # el healthcheck usa para decidir.
+        try:
+            session.rollback()
+        except Exception:
+            pass
         return False

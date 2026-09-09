@@ -15,11 +15,17 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from .auth import RUTAS_ABIERTAS, avisar_si_esta_abierta, exigir_token
+from .auth import (
+    RUTAS_ABIERTAS,
+    avisar_si_esta_abierta,
+    exigir_token,
+    exigir_token_estricto,
+    hay_token,
+)
 from .config import settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
-from .models import Adaptador, Cluster, Medio, ModeloIA
+from .models import Adaptador, Cluster, ConfiguracionEntrega, Medio, ModeloIA
 from .services.alerts import enviar_alerta
 from .services.corridas import (
     cerrar_corrida,
@@ -64,8 +70,14 @@ from .services.synthesis import (
     sintetizar_pendientes,
 )
 from .services.vectorization import vectorizar_pendientes
-from .services.webhook_delivery import entregar_pendientes
-from .tiempo import ahora_local
+from .services.entrega import (
+    DestinoInvalido,
+    configuracion as configuracion_de_entrega,
+    guardar_url,
+    validar_url_de_entrega,
+)
+from .services.webhook_delivery import entregar_pendientes, hay_destino_de_entrega
+from .tiempo import a_local, ahora_local
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +459,17 @@ def root(session: Session = Depends(get_session)):
     Salud del servicio. Verifica conectividad real a la base -- es lo que usa
     el HEALTHCHECK del Dockerfile para decidir si el contenedor está sano. La
     hora sirve para verificar el reloj del contenedor.
+
+    **`exige_token` y `entrega_configurada` son booleanos, y eso es a propósito.**
+    Esta ruta está en `auth.RUTAS_ABIERTAS`: contesta sin credencial. Decir *si*
+    la API pide token no agrega nada que un pedido sin token no revele igual, y
+    decir *si* hay un destino de entrega tampoco expone nada — pero **la URL del
+    destino no sale de acá**, ni siquiera recortada. Quien la quiera leer pasa
+    por `GET /entrega`, que exige token siempre.
+
+    Los dos existen porque la cabina no tiene otra forma de saberlo, y sin ellos
+    hace dos cosas mal: pide un token que el motor quizás no exige, y marca
+    síntesis como "sin entregar" cuando no hay a dónde entregar.
     """
     db_ok = verificar_conexion(session)
     payload = {
@@ -454,6 +477,23 @@ def root(session: Session = Depends(get_session)):
         "database": "ok" if db_ok else "error",
         "environment": settings.ENVIRONMENT,
         "hora_local": ahora_local().isoformat(timespec="seconds"),
+        "exige_token": hay_token(),
+        # **`entrega_configurada` se consulta sólo si la base contestó**, y el
+        # orden es lo único que hace que esta ruta cumpla su contrato. El destino
+        # vive en una fila desde el punto 11, así que leerlo es una consulta más:
+        # hacerla igual, después de haber comprobado que la base no responde,
+        # devolvía **500 en vez de 503**. Verificado parando `sin_ruido_db`
+        # contra el motor real: 500 las tres veces.
+        #
+        # El 503 es contrato y no un detalle: la cabina distingue con él "la base
+        # no está" (503 -> migrando) de "el motor no está" (conexión rechazada ->
+        # arrancando). Ver `app/src-tauri/src/motor.rs`.
+        #
+        # Con la base caída el valor **no se sabe**, y `False` es lo que se
+        # informa. No es una mentira escondida: la misma respuesta trae
+        # `status: degradado` y `database: error`, que es lo que dice que este
+        # campo no significa nada en esa respuesta.
+        "entrega_configurada": hay_destino_de_entrega(session) if db_ok else False,
     }
     if not db_ok:
         return JSONResponse(status_code=503, content=payload)
@@ -1149,6 +1189,121 @@ def _apagar_los_demas(session: Session, id_que_queda: Optional[int]) -> None:
         otro.activo = False
         session.add(otro)
         logger.info(f"Se apaga '{otro.nombre}': solo puede haber un modelo activo")
+
+
+# ============================================================
+# Entrega: el destino lo maneja el operador (backlog punto 11)
+# ============================================================
+#
+# Hasta acá el destino era `WEBHOOK_URL` en el entorno, o sea que cambiarlo era
+# editar un archivo y reiniciar un contenedor. Es la misma forma que tenían el
+# roster de medios (punto 3) y el modelo de IA (punto 2) antes de sus puntos: una
+# decisión que el producto dice que es del operador, implementada como una
+# decisión de quien despliega.
+#
+# **Los dos endpoints exigen token SIEMPRE**, aunque el despliegue haya dejado la
+# API abierta, y es la única excepción a la regla de `auth.py`. El motivo está
+# escrito en `exigir_token_estricto`: acá se redirige la salida del motor, y las
+# síntesis salen **firmadas** — quien reciba una entrega desviada obtiene
+# contenido que parece legítimo porque lo es.
+#
+# **El secreto no se toca desde acá.** `WEBHOOK_SECRET` sigue en el entorno, y de
+# él sólo se informa un booleano. Ver `models/entrega.py` por qué la URL puede
+# vivir en la base y el secreto no.
+
+
+class CambioEntrega(BaseModel):
+    """El destino nuevo. `null` lo desconfigura y la entrega deja de correr."""
+
+    # Mismo criterio que `AltaModelo` y `AltaMedio`: **los campos de más se
+    # rechazan**. Acá importa especialmente, porque el campo de más que alguien
+    # va a intentar mandar es `secreto` — y descartárselo en silencio lo dejaría
+    # creyendo que el motor lo guardó.
+    model_config = ConfigDict(extra="forbid")
+
+    # **Obligatorio y nullable, que no es lo mismo que opcional.** Si tuviera
+    # default, un cuerpo `{}` sería indistinguible de "borrá el destino", y el
+    # error de tipeo más barato del mundo apagaría la entrega sin decir nada. Así
+    # `{}` es un 422 y `{"url": null}` es un borrado explícito.
+    url: Optional[str] = Field(..., max_length=MAX_LARGO_URL)
+
+
+def _vista_entrega(fila: ConfiguracionEntrega) -> dict:
+    """
+    Lo que se devuelve de la configuración de entrega.
+
+    **Acá sí va la URL**, a diferencia de `GET /`: esta ruta exige token siempre,
+    y el operador no puede corregir un destino que no ve. Lo que no sale nunca es
+    `WEBHOOK_SECRET`, del que se informa sólo si existe — que es el dato que hace
+    falta para entender por qué el barrido no corre.
+
+    **`valido` no es lo mismo que `configurado`, y por eso son dos campos.**
+    `configurado` dice que hay una URL guardada; `valido` dice que el motor la va
+    a aceptar cuando entregue. Pueden diferir: `guardar_url` valida al escribir,
+    pero la fila también llega sembrada por la migración desde un `.env` viejo, o
+    editada a mano en la base. Sin este campo, el operador veía
+    `configurado: true` mientras el barrido descartaba el destino **y sólo lo
+    decía en el log del scheduler**, que corre cada 15 minutos y no expone su
+    resultado por ninguna ruta.
+
+    **`GET /` no hace esta comprobación, a propósito.** Es el healthcheck: lo
+    golpea Docker cada pocos segundos, y validar implica resolver DNS. Ahí
+    `entrega_configurada` sigue significando "hay una URL guardada", que es lo
+    que la cabina necesita para no marcar síntesis como "sin entregar". Saber si
+    esa URL sirve es una pregunta de operador y se paga donde el operador la
+    hace.
+    """
+    momento = a_local(fila.actualizado_en)
+    valido, problema = True, None
+    if fila.url:
+        try:
+            validar_url_de_entrega(fila.url)
+        except DestinoInvalido as error:
+            valido, problema = False, str(error)
+
+    return {
+        "url": fila.url,
+        "configurado": bool(fila.url),
+        "valido": valido,
+        # El mensaje del validador tal cual: dice qué revisar. `None` cuando no
+        # hay nada que revisar.
+        "problema": problema,
+        "secreto_configurado": bool(settings.WEBHOOK_SECRET),
+        "actualizado_en": momento.isoformat(timespec="seconds") if momento else None,
+    }
+
+
+@app.get("/entrega", dependencies=[Depends(exigir_token_estricto)])
+def ver_entrega(session: Session = Depends(get_session)):
+    """A dónde se están entregando las síntesis. Ver `_vista_entrega`."""
+    return {"status": "ok", "entrega": _vista_entrega(configuracion_de_entrega(session))}
+
+
+@app.patch("/entrega", dependencies=[Depends(exigir_token_estricto)])
+def cambiar_entrega(datos: CambioEntrega, session: Session = Depends(get_session)):
+    """
+    Cambia el destino de entrega.
+
+    **No reenvía nada.** Cambiar la URL no toca `Sintesis.enviado_backend`, así
+    que el destino nuevo recibe desde la próxima síntesis y no el histórico. La
+    alternativa se evaluó y se descartó: son cientos de síntesis firmadas
+    saliendo de golpe hacia un back-end que quizá recién se levanta, disparadas
+    por lo que para quien lo hace es corregir un tipeo. Un reenvío masivo tiene
+    que ser una acción con ese nombre, y ya existe: `POST /deliver?forzar=true`.
+
+    La validación del destino está en `services/entrega.validar_url_de_entrega`,
+    que **permite la red interna** —un back-end en la misma máquina es el caso
+    normal— y bloquea link-local, que es donde viven los metadata de las nubes.
+    """
+    try:
+        fila = guardar_url(session, datos.url)
+    except DestinoInvalido as error:
+        # 422 y no 400: la forma del cuerpo es correcta, el valor no sirve. El
+        # mensaje del validador viaja tal cual porque dice qué revisar.
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+    return {"status": "ok", "entrega": _vista_entrega(fila)}
 
 
 # ============================================================

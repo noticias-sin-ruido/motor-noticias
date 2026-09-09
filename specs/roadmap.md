@@ -331,21 +331,25 @@ La confusión era de vocabulario. Lo que este roadmap difirió (arriba, en Fase 
 
 **Lo que NO cubre**: no es TLS ni firewall. El token viaja en claro si la API se expone por HTTP sin proxy adelante.
 
-### 11. La URL del webhook la configura el operador, no el `.env`
+### 11. La URL del webhook la configura el operador, no el `.env` ✅ COMPLETO (08/09/2026)
 
-Hoy el destino de las síntesis vive en `settings.WEBHOOK_URL` ([webhook_delivery.py:239](../src/services/webhook_delivery.py#L239)), así que cambiarlo exige editar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2, 3 y 9 —cada operador con su modelo, su roster de medios y sus alertas— no, porque **el back-end también es suyo**.
+**Cerrado el 08/09/2026**, dentro del punto 14: la pantalla de Ajustes de la cabina no podía existir sin esto. El destino vive en la tabla `configuracion_entrega` (una fila, migración `a1f27c93b8e0`) y se cambia con `GET`/`PATCH /entrega`. `WEBHOOK_URL` **dejó de ser un campo de `Settings`**: el `.env` sólo lo sembró una vez, en la migración, para no romperle la entrega a un despliegue que ya funcionaba.
 
-Es la misma forma que `modelo_ia`: una fila con la configuración, endpoints para verla y cambiarla, y la credencial —el `WEBHOOK_SECRET`— **quedándose en el entorno**, nunca en la base.
+El `WEBHOOK_SECRET` se quedó en el entorno, como estaba previsto. La distinción tiene contenido y no es prolijidad: la URL es *a dónde* va el producto, el secreto es *lo que prueba que el producto es nuestro*. Robar la primera desvía; robar el segundo permite falsificar.
 
-**Pero es el más delicado de la familia, y por un motivo que no tienen los otros.** `POST /modelos` deja que alguien redirija una *credencial*; esto dejaría redirigir **el producto**: los cuerpos sintetizados, las comparativas por medio, todo lo que el motor genera. Y peor, **firmado**: el payload viaja con una firma HMAC válida, así que quien reciba una entrega desviada obtiene contenido que *parece legítimo* porque lo es.
+Los tres cuidados, uno por uno:
 
-Tres cuidados que no se pueden saltear:
+1. **Exige token siempre** ✅. `auth.exigir_token_estricto`, declarado en el decorador de las dos rutas y no en una segunda lista al lado de `RUTAS_ABIERTAS` — una lista más obligaría a leer dos para saber qué protege qué, y el modo de fallo sería que una ruta nueva naciera laxa. Sin `API_TOKEN` el endpoint contesta **503** y dice qué configurar; no 403, porque lo que falta es configuración del servidor y no permiso de quien llama.
 
-1. **Exige token siempre**, no solo cuando el operador activó `API_TOKEN`. Es el mismo caso que el punto 9: un despliegue abierto no puede tener un endpoint que redirija su propia salida.
-2. **Validación del destino**, con el patrón de `proveedores/base.validar_base_url` pero más estricto: acá no hay caso de uso legítimo para un destino en la red interna.
-3. **Cambiar la URL no debería re-entregar lo ya entregado.** `enviado_backend` marca la síntesis, no el destino, así que apuntar a otro back-end lo deja con la base vacía y sin forma de pedir el histórico — hay que decidir si eso es lo correcto o si el cambio de destino resetea las marcas.
+2. **Validación del destino** ⚠️ **cambiada, y este punto la tenía mal**. Decía «acá no hay caso de uso legítimo para un destino en la red interna». **Es falso, y se comprobó antes de escribir código**: el destino real de este despliegue es `http://localhost:3011`. Con la regla que este punto pedía, lo primero que hace el operador en la pantalla nueva —guardar la URL que ya usa— habría sido rechazado, y la migración habría sembrado una fila que el endpoint nunca aceptaría volver a guardar. Un estado alcanzable y no reingresable.
 
-**Va después del punto 3**, que comparte el diseño de "el operador configura por API" y es el que más valor entrega.
+   El **razonamiento** —no el mecanismo— ya estaba escrito en el repo, en `proveedores/base._exigir_host_declarado`: *«la regla queda invertida respecto de `services/medios.py` —allá lo interno es lo sospechoso— porque lo que se protege es otra cosa»*. Allá, que no nos usen de escáner de la red; acá, que el producto firmado no se vaya lejos. Así que `services/entrega.REDES_PROHIBIDAS` bloquea link-local y NAT64 —donde viven los metadata de las nubes— y **permite loopback y red privada**, que es donde vive el back-end del operador y el único escenario en que las síntesis no salen de la máquina. **El mecanismo de aquella función —lista blanca para los destinos públicos— se evaluó aparte y se descartó**: protege más, y obligaría a editar el `.env` y reiniciar el contenedor para apuntar a un dominio público, que es la fricción que este punto existe para sacar.
+
+   Lo que eso deja abierto queda dicho y no escondido: quien tenga el token puede apuntar la entrega a la red interna y usar `POST /deliver` como sonda ciega, porque el conteo de `rechazadas` contra `fallidas` distingue "hay algo escuchando" de "no hay nada". Lo que sostiene la defensa es el cuidado 1, que no se movió.
+
+3. **Cambiar la URL no re-entrega nada** ✅. El punto lo dejaba abierto («hay que decidir»); se decidió **nunca reenviar**. Son 519 síntesis firmadas saliendo de golpe hacia un back-end que quizá recién se levanta, disparadas por lo que para quien lo hace es corregir un tipeo. El reenvío masivo tiene que ser una acción con ese nombre, y ya existe: `POST /deliver?forzar=true`. Verificado contra la base real: tres cambios de URL, 388 entregadas y 131 pendientes antes y después.
+
+**Lo que este punto NO cerró**: la pantalla de Ajustes que consume estos endpoints. Está en el bloque siguiente del punto 14, y hasta entonces `GET /entrega` y `PATCH /entrega` figuran en `app/CONTRATO.md` como **no consumidas**.
 
 ### 12. El motor tenía logging pero no salida ✅ COMPLETO (21/08/2026)
 
@@ -401,7 +405,7 @@ Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el l
 
 #### Estado de la app — dónde retomar
 
-Construidas las **fases 0 a 8** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, **815 tests** y `ruff`.
+Construidas las **fases 0 a 8** del plan de nueve. Verde en `cargo fmt`, `clippy -D warnings`, 57 tests + 5 de integración contra el motor real, `tsc --noEmit`, `npm run build` y `bindings:check`; del lado del motor, **844 tests** y `ruff`.
 
 - **Fase 0 · toolchain** ✅ — Node, rustup con toolchain MSVC y Build Tools instalados.
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
@@ -413,16 +417,22 @@ Construidas las **fases 0 a 8** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
 - **Fase 8 · CI separada por rutas** ✅ — `ci.yml` con filtro por **inclusión** —para que un cambio en los bindings despierte al motor— y `app.yml` nuevo en `windows-latest`, forzado por `keyring`. Verificada provocando cada caso: `specs/` no dispara nada, `tests/` sólo el motor, y `tipos.rs` con su binding **los dos**. El caché baja la corrida de la app de 445 s a 148 s.
 
-**Por dónde seguir: la fase 8.** Partir la CI por rutas: `ci.yml` con
-`paths-ignore: ['app/**']` y un `app.yml` nuevo con `paths: ['app/**']` que
-corra `npm ci`, `tsc --noEmit`, `cargo fmt --check`, `clippy -D warnings` y
-`cargo test`.
+#### Antes de la fase 9 — los huecos del checklist del operador
 
-**Dos cuidados que ya se conocen.** Si los checks son requeridos en `main`, los
-filtros dejan PRs colgados y hace falta un job "skip" que reporte éxito. Y el
-test de contrato de la fase 7 **lee archivos de la app** —los bindings, para
-vigilar la deriva—, así que un cambio en `app/**` que no dispare la CI del motor
-dejaría ese chequeo sin correr.
+Auditada contra siete puntos, la app cubría tres (leer clusters sin sintetizar, ver los ángulos con sus noticias, sintetizar y resintetizar) y no cubría cuatro. El punto 2 quedó descartado por el usuario —«no es problema ni ahora ni a futuro»—, así que se planificaron 1, 5, 6 y 7 más sacar el andamio.
+
+- [x] **Bloque A1 · `GET /` suma `exige_token` y `entrega_configurada`** ✅ (08/09/2026) — aditivo, así que el contrato no se rompe. Arrastró el struct `Salud`, su binding, el fixture recapturado del motor real y el diccionario del contrato. Tres mutaciones cazadas. De paso destapó que los tests de `secretos.rs` eran intermitentes: 2 fallos de 12 corridas en paralelo, arreglado con un candado propio y verificado 0 de 20.
+- [x] **Bloque A2 · el destino de entrega sale del `.env`** ✅ (08/09/2026) — cierra el **punto 11** del backlog entero, con su tabla, su migración corrida contra la base real y sus dos endpoints con token obligatorio. Siete mutaciones cazadas. La validación del destino **se apartó del plan a propósito** y el motivo está en el punto 11.
+> ✅ **A1 y A2 pasaron por `/revisar`** (08/09/2026): dos ejes más el tercer par
+> de ojos, **nueve hallazgos y ninguno falso**. Los dos defectos reales —`GET /`
+> devolviendo 500 en vez de 503 con la base caída, y `{"url": ""}` apagando la
+> entrega con un 200— están arreglados, con test y mutación. El detalle y lo que
+> se aprendió del método están en `change_logs.md`.
+
+- [ ] **Bloque B · configuración y credenciales** (puntos 1 y 7 del checklist) — `token_borrar` cableado a "Olvidar token", que hoy sólo hace `setHayToken(false)` y deja la credencial viva; una pantalla de Ajustes que hoy no existe; revalidar la ruta del repo **al usarla** y no sólo al guardarla, para que mover la carpeta no deje la app con un error de Docker crudo; no pedir token cuando `exige_token` es `false`; y los dos `String(e)` de `App.tsx` convertidos en mensajes con categoría.
+- [ ] **Bloque C · modelos** (punto 5) — activar/desactivar con `PATCH /modelos/{id}` y alta con `POST /modelos`, con la limitación dicha en pantalla: la credencial va al `.env` del motor y hay que reiniciar el contenedor. **No puede decir cuál variable falta** —`GET /modelos` no la nombra, y esa regla se cerró después de una fuga—, sólo que falta, vía `credencial_configurada`.
+- [ ] **Bloque D · la entrega** (punto 6, mitad app) — `TarjetaAngulo` deja de mostrar "sin entregar" cuando `entrega_configurada` es `false`, y Ajustes edita la URL consumiendo `GET`/`PATCH /entrega`. Recién ahí esas dos rutas pasan de "no consumidas" a parte del contrato en `app/CONTRATO.md`.
+- [ ] **Bloque E · limpieza** — borrar el andamio entero (componente, pestaña, estilos y su entrada en la lista de permitidos del puente); la sonda de la CSP, que es lo único que se pierde, pasa a ser un paso de la lista de verificación de release en `app/README.md`. Y resucitar `motor_salud`, que no llama nadie desde la fase 4, como el contenido de la pantalla de Ajustes.
 
 **Una decisión que la fase 9 tiene que tomar ANTES de empaquetar (08/09/2026).**
 

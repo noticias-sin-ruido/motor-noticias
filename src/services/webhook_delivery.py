@@ -45,6 +45,7 @@ from ..tiempo import ahora_utc
 from ..models import Medio, Sintesis
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO
+from .entrega import DestinoInvalido, url_de_entrega, validar_url_de_entrega
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,18 @@ class EntregaRechazada(Exception):
     No se reintenta: el mismo cuerpo va a dar el mismo rechazo. Un 4xx acá
     significa que el contrato se rompió (un campo que cambió de forma, una firma
     que no valida), y eso se arregla con una corrección, no con insistir.
+    """
+
+
+class EntregaSinDestino(Exception):
+    """
+    Se pidió entregar y no hay a dónde.
+
+    Antes esto no podía pasar en `entregar_sintesis`: el destino venía del
+    entorno y el barrido lo comprobaba arriba. Con el destino en una fila que
+    se cambia por la API, una entrega suelta puede encontrarse sin él, y
+    fallar con un `TypeError` de httpx sería esconder una condición
+    perfectamente normal detrás de un error de programación.
     """
 
 
@@ -228,15 +241,20 @@ def firmar(cuerpo: bytes, timestamp: str) -> str:
     wait=wait_exponential(multiplier=2, min=2, max=30),
     reraise=True,
 )
-def _postear(cuerpo: bytes, headers: Dict[str, str]) -> int:
+def _postear(url: str, cuerpo: bytes, headers: Dict[str, str]) -> int:
     """
     Manda el request. Reintenta lo pasajero y no lo definitivo.
 
     `EntregaRechazada` no hereda de `httpx.HTTPError`, así que `tenacity` la deja
     pasar sin reintentar — que es exactamente lo que se busca para un 4xx.
+
+    **La URL llega por parámetro y ya no se lee de `settings`.** Desde el punto
+    11 el destino vive en una fila que el operador cambia por la API, y leerlo
+    acá adentro significaría que un cambio a mitad de un barrido parta las
+    entregas entre dos destinos.
     """
     respuesta = httpx.post(
-        settings.WEBHOOK_URL,
+        url,
         content=cuerpo,
         headers=headers,
         timeout=settings.WEBHOOK_TIMEOUT,
@@ -251,15 +269,28 @@ def _postear(cuerpo: bytes, headers: Dict[str, str]) -> int:
     return respuesta.status_code
 
 
-def entregar_sintesis(session: Session, sintesis: Sintesis) -> int:
+def entregar_sintesis(
+    session: Session, sintesis: Sintesis, url: Optional[str] = None
+) -> int:
     """
     Entrega una síntesis y deja el intento contado, haya salido bien o mal.
+
+    `url` es el destino ya resuelto. `None` lo busca en la configuración, que
+    es lo que necesita quien entrega una sola síntesis; el barrido lo resuelve
+    una vez y lo pasa, para que todas las de una corrida vayan al mismo lado.
 
     El `finally` es la parte que importa: si el contador solo avanzara con el
     éxito, un back-end permanentemente caído nunca alcanzaría
     `WEBHOOK_MAX_INTENTOS` y el barrido lo reintentaría cada 15 minutos para
     siempre, sin que nadie se entere.
     """
+    destino = url or url_de_entrega(session)
+    if not destino:
+        raise EntregaSinDestino(
+            "No hay URL de entrega configurada. Se configura con "
+            "PATCH /entrega, o desde la pantalla de Ajustes de la cabina."
+        )
+
     payload = construir_payload(session, sintesis)
     cuerpo = serializar(payload)
 
@@ -279,7 +310,7 @@ def entregar_sintesis(session: Session, sintesis: Sintesis) -> int:
 
     sintesis.intentos_envio += 1
     try:
-        codigo = _postear(cuerpo, headers)
+        codigo = _postear(destino, cuerpo, headers)
         sintesis.enviado_backend = True
         sintesis.fecha_envio = ahora_utc()
         return codigo
@@ -323,6 +354,21 @@ def sintesis_pendientes(session: Session, forzar: bool = False) -> List[Sintesis
     )
 
 
+def hay_destino_de_entrega(session: Session) -> bool:
+    """
+    Si el motor tiene a dónde entregar las síntesis.
+
+    **Devuelve un booleano y nunca la URL.** Lo consume `GET /`, que es una ruta
+    abierta: quien quiera leer el destino pasa por `GET /entrega`, que exige
+    token siempre.
+
+    El punto 11 mudó el destino del `.env` a una fila, y —como decía la versión
+    anterior de este comentario— cambió sólo esta función del lado de los
+    lectores. Lo que sí cambió es la firma: ahora hace falta una sesión.
+    """
+    return bool(url_de_entrega(session))
+
+
 def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
     """
     Barre las síntesis sin entregar y las empuja al back-end.
@@ -331,13 +377,32 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
     registra, en vez de fallar: durante el desarrollo el webhook todavía no
     existe, y hacer fallar el paso convertiría en ruido la alerta del pipeline,
     que es justo la que tiene que seguir significando algo.
+
+    **El destino se resuelve una vez, acá, y se le pasa a cada entrega.** Si
+    cada síntesis lo releyera, un cambio de URL a mitad del barrido partiría la
+    corrida entre dos back-ends sin que quedara registro de cuál recibió qué.
+
+    **Y se revalida antes de usarlo**, aunque `guardar_url` ya lo validó al
+    escribirlo. No es paranoia: la fila también puede llegar sembrada por la
+    migración desde un `.env` viejo, o editada a mano en la base. El validador
+    es el control de seguridad, así que tiene que custodiar la salida real y no
+    solamente el camino de escritura.
     """
-    if not settings.WEBHOOK_URL or not settings.WEBHOOK_SECRET:
+    destino = url_de_entrega(session)
+    if not destino or not settings.WEBHOOK_SECRET:
         logger.error(
-            "Webhook sin configurar (WEBHOOK_URL / WEBHOOK_SECRET): las síntesis "
-            "quedan pendientes de entrega en la base"
+            "Entrega sin configurar (destino: %s, WEBHOOK_SECRET: %s): las "
+            "síntesis quedan pendientes en la base",
+            "sí" if destino else "no",
+            "sí" if settings.WEBHOOK_SECRET else "no",
         )
         return {"estado": "sin configurar", "pendientes": 0, "entregadas": 0}
+
+    try:
+        destino = validar_url_de_entrega(destino)
+    except DestinoInvalido as error:
+        logger.error("El destino de entrega guardado no es usable: %s", error)
+        return {"estado": "destino inválido", "pendientes": 0, "entregadas": 0}
 
     pendientes = sintesis_pendientes(session, forzar=forzar)
     stats = {
@@ -380,7 +445,7 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
         for sintesis in pendientes:
             sintesis_id = sintesis.id
             try:
-                entregar_sintesis(session, sintesis)
+                entregar_sintesis(session, sintesis, destino)
             except EntregaRechazada as error:
                 stats["rechazadas"] += 1
                 logger.error(f"El back-end rechazó la síntesis {sintesis_id}: {error}")

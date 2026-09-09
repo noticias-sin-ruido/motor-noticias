@@ -64,6 +64,19 @@ pub struct Salud {
     pub database: String,
     pub environment: String,
     pub hora_local: String,
+    /// Si el motor exige `Authorization` en el resto de sus endpoints.
+    ///
+    /// `API_TOKEN` es opcional del lado del motor: sin definir, la API queda
+    /// abierta. Sin este campo la cabina pedía un token igual, y quien
+    /// instalara contra un motor abierto tenía que inventar uno para pasar de
+    /// la primera pantalla.
+    pub exige_token: bool,
+    /// Si hay un destino de entrega configurado.
+    ///
+    /// **Es un booleano y el motor no manda la URL por acá**: `GET /` es una
+    /// ruta abierta. Sirve para no marcar síntesis como "sin entregar" cuando
+    /// no hay a dónde entregarlas — sin él, 119 de 507 mentían.
+    pub entrega_configurada: bool,
 }
 
 // --- GET /clusters ---------------------------------------------------------
@@ -575,7 +588,9 @@ mod pruebas {
         // La otra mitad de la decisión: el motor puede agregar campos sin que
         // la app se caiga. Solo renombrar o borrar tiene que doler.
         let con_extra = r#"{"status":"ok","database":"ok","environment":"development",
-                            "hora_local":"2026-09-06T20:48:32-03:00","campo_nuevo":42}"#;
+                            "hora_local":"2026-09-06T20:48:32-03:00",
+                            "exige_token":true,"entrega_configurada":false,
+                            "campo_nuevo":42}"#;
         let s: Salud = serde_json::from_str(con_extra).unwrap();
         assert_eq!(s.environment, "development");
     }

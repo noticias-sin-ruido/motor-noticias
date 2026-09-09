@@ -48,7 +48,13 @@ BINDINGS = RAIZ / "app" / "src" / "bindings"
 CONTRATO: dict[str, dict] = {
     "GET /": {
         "tipo": "Salud",
-        "campos": {"status", "database", "environment", "hora_local"},
+        "campos": {
+            "status", "database", "environment", "hora_local",
+            # La cabina no tiene otra forma de saber estas dos cosas, y sin
+            # ellas hace dos cosas mal: pide un token que el motor quizás no
+            # exige, y marca como "sin entregar" lo que no tiene destino.
+            "exige_token", "entrega_configurada",
+        },
     },
     "GET /clusters": {
         "tipo": "RespuestaClusters",
@@ -105,6 +111,11 @@ NO_CONSUMIDAS = {
     "POST /cluster", "POST /vectorize", "POST /ingest", "POST /synthesize",
     "POST /deliver", "POST /purge", "POST /medios", "POST /modelos",
     "POST /clusters/{cluster_id}/synthesize",
+    # **Todavía** no: la pantalla de Ajustes que los va a consumir es el bloque
+    # siguiente. Están acá y no en `CONTRATO` a propósito — meterlos antes de que
+    # exista el struct de Rust haría fallar el guardián de deriva contra los
+    # bindings, y sobre todo diría que la app exige algo que hoy no mira.
+    "GET /entrega", "PATCH /entrega",
 }
 
 

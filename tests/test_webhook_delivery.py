@@ -21,6 +21,7 @@ from sqlmodel import Session
 from src.config import settings
 from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
 from src.services import webhook_delivery
+from src.services.entrega import guardar_url
 from src.services.webhook_delivery import (
     EntregaRechazada,
     construir_payload,
@@ -37,11 +38,18 @@ URL = "https://backend.sinruido.test/webhooks/sintesis"
 
 
 @pytest.fixture(autouse=True)
-def webhook_configurado():
-    """Deja el webhook configurado y sin cooldown de alertas entre tests."""
-    with patch.object(settings, "WEBHOOK_URL", URL), patch.object(
-        settings, "WEBHOOK_SECRET", SECRETO
-    ):
+def webhook_configurado(session: Session):
+    """
+    Deja el webhook configurado y sin cooldown de alertas entre tests.
+
+    **El destino se escribe con `guardar_url` y el secreto se parchea**, y esa
+    asimetría es el punto 11 entero: desde esta versión el destino vive en la
+    base y lo cambia el operador, mientras que `WEBHOOK_SECRET` se queda en el
+    entorno porque una credencial compartida con otro equipo no va en una fila
+    que se respalda y se dumpea. Ver `models/entrega.py`.
+    """
+    guardar_url(session, URL)
+    with patch.object(settings, "WEBHOOK_SECRET", SECRETO):
         webhook_delivery.enviar_alerta = MagicMock(return_value=True)
         yield
 
@@ -456,9 +464,9 @@ class TestBarrido:
         En desarrollo el webhook todavía no existe. Hacer fallar el paso
         convertiría en ruido la alerta del pipeline.
         """
-        with patch.object(settings, "WEBHOOK_URL", None):
-            with patch("httpx.post") as post:
-                stats = entregar_pendientes(session)
+        guardar_url(session, None)
+        with patch("httpx.post") as post:
+            stats = entregar_pendientes(session)
 
         assert stats["estado"] == "sin configurar"
         assert post.call_count == 0

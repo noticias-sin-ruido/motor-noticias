@@ -271,9 +271,17 @@ class Settings(BaseSettings):
 
     # --- Entrega al back-end por webhook (Fase 4) ---
     # Ver specs/webhook_contract.md para el payload y specs/change_logs.md para
-    # el razonamiento. Sin URL ni secreto la entrega no corre: las síntesis
+    # el razonamiento. Sin destino ni secreto la entrega no corre: las síntesis
     # quedan en la base con `enviado_backend=False` y salen cuando se configura.
-    WEBHOOK_URL: Optional[str] = None
+    #
+    # **`WEBHOOK_URL` ya no es un campo de `Settings`, y eso es el punto 11.** El
+    # destino vive en la tabla `configuracion_entrega` y lo cambia el operador
+    # por la API; el `.env` sólo lo sembró, una vez, en la migración
+    # `a1f27c93b8e0`. Se saca de acá en vez de dejarlo documentado como muerto
+    # para que no queden dos fuentes de verdad: mientras el campo existiera,
+    # cualquier código nuevo podía leerlo y quedarse con un destino viejo sin que
+    # nada fallara. Mismo criterio que las `GEMINI_*` cuando el modelo pasó a ser
+    # una fila. Ver `services/entrega.py`.
 
     # Secreto compartido con el back-end para la firma HMAC-SHA256. Nunca viaja
     # por la red: lo que se manda es una firma derivada de él.

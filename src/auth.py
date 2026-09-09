@@ -35,8 +35,23 @@ logger = logging.getLogger(__name__)
 # `/` es el healthcheck y **lo llama Docker desde adentro del contenedor**
 # (`curl -f http://localhost:8000/` en el `HEALTHCHECK` del Dockerfile). Pedirle
 # token lo rompería, o forzaría a meter la credencial en el `Dockerfile`. Lo que
-# devuelve es si el servicio vive y si la base responde: útil para un
-# orquestador, inútil para un atacante.
+# devuelve es si el servicio vive y si la base responde.
+#
+# **Qué revela, dicho con precisión.** Hasta el punto 14 acá decía "inútil para
+# un atacante", y era exacto. Ahora `GET /` devuelve además `exige_token`, que le
+# dice a cualquiera **sin credencial** si esta instancia tiene el candado puesto
+# — justo lo que busca quien escanea por instancias abiertas.
+#
+# Se aceptó igual, y el motivo es que el dato ya era obtenible: alcanzaba con
+# pegarle a cualquier endpoint protegido y ver si contesta 401. Lo que cambia es
+# el costo de averiguarlo, de un intento de escritura —con su rastro en el log— a
+# un GET sin efectos. Es una degradación de higiene de reconocimiento, no una
+# fuga; a cambio, quien instala la cabina contra un motor con la API abierta deja
+# de tener que inventar un token para pasar de la primera pantalla.
+#
+# **Lo que sí sería una fuga y no pasa**: la URL del destino de entrega no sale
+# de acá, ni recortada. Sólo el booleano `entrega_configurada`. Lo fija
+# `tests/test_api.py::test_la_salud_no_filtra_la_url_del_destino`.
 #
 # Las de documentación se dejan abiertas a propósito: exponen la **forma** de la
 # API, no sus datos, y este repo existe también para ser leído.
@@ -92,3 +107,39 @@ def exigir_token(authorization: Optional[str] = Header(default=None)) -> None:
                    "`Authorization: Bearer <API_TOKEN>`.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def exigir_token_estricto(authorization: Optional[str] = Header(default=None)) -> None:
+    """
+    Como `exigir_token`, pero **sin la salida de emergencia**: acá el token no
+    es opcional aunque el despliegue haya elegido dejar la API abierta.
+
+    La regla general de este módulo —`API_TOKEN` sin definir, API abierta— es
+    razonable para endpoints que leen o que disparan trabajo propio. Deja de
+    serlo para los que **redirigen la salida del motor**: quien cambie la URL de
+    entrega hace que las síntesis firmadas lleguen a donde él diga, y una firma
+    válida es justamente lo que hace que el receptor las trate como legítimas.
+    No hay despliegue tan chico como para que eso pueda quedar sin credencial.
+
+    Es la misma clase de excepción que el punto 9 del backlog dejó anotada, y por
+    eso se resuelve con una dependencia declarada ruta por ruta en vez de con una
+    lista: una lista de rutas estrictas al lado de `RUTAS_ABIERTAS` obligaría a
+    leer dos listas para saber qué protege qué, y el modo de fallo sería que una
+    ruta nueva nazca laxa. Declararla en el decorador la hace evidente donde se
+    define el endpoint.
+
+    **503 y no 403.** No es que falte permiso: falta configuración *del servidor*,
+    y quien la puede arreglar es quien lo despliega, no quien llama. El mensaje
+    dice exactamente qué hacer.
+    """
+    if not hay_token():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Este endpoint cambia a dónde el motor entrega las síntesis "
+                "firmadas, así que exige token aunque el resto de la API esté "
+                "abierta. Definí API_TOKEN en el entorno del motor y reiniciá el "
+                "contenedor."
+            ),
+        )
+    exigir_token(authorization)

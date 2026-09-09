@@ -3472,3 +3472,114 @@ Una CI no se verifica leyéndola. Se hicieron tres pushes a la rama de trabajo, 
 El tercero es el que justifica todo el diseño: un cambio confinado a `app/**` que igual tiene que despertar al motor. Con `paths-ignore` habría corrido sólo la CI de la app.
 
 **El caché de Rust funciona**: `Cabina` pasó de 445 s en frío a 148 s. Y quedó verificado de casualidad el bloque `concurrency`: una corrida aparece `cancelled` porque el push siguiente la reemplazó, que es exactamente lo que se buscaba mientras se trabaja.
+
+### Antes de la fase 9, bloque A: el motor deja de esconder su configuración (08/09/2026)
+
+La auditoría de la app contra el checklist del operador dejó cuatro huecos. Tres son de interfaz; el primero no, y por eso va antes: **la cabina no tenía forma de saber dos cosas que sólo el motor sabe**, y sin ellas hacía dos cosas mal.
+
+#### A1. `GET /` dice si exige token y si hay destino
+
+`API_TOKEN` es opcional del lado del motor, así que la app pedía un token aunque la API estuviera abierta: quien instalara la cabina contra un motor sin token tenía que inventar uno para pasar de la primera pantalla. Y sin saber si hay back-end configurado, marcaba como "sin entregar" síntesis que no tienen a dónde ir — 119 de 507 al momento de medirlo.
+
+Los dos son **booleanos, y la URL no sale de ahí**. `GET /` está en `RUTAS_ABIERTAS`: contesta sin credencial, y un webhook suele llevar un identificador que no es público. Es la misma clase de fuga que se cerró cuando `GET /modelos` nombraba la variable de entorno de la credencial, y hay un test que la fija.
+
+`hay_destino_de_entrega` se puso en el servicio de entrega y no en `main` **para que el punto 11 cambiara una sola función**. Se cumplió: cambió esa función y su firma.
+
+Tres mutaciones, las tres cazadas: `exige_token` cableado en `True`, el destino mintiendo, y la URL agregada al payload de salud.
+
+#### Un hallazgo que no venía a cuento: los tests de `secretos.rs` eran intermitentes
+
+Aparecieron al correr la verificación de A1. **Medido: 2 fallos de 12 corridas con hilos paralelos, 0 de 12 con `--test-threads=1`.** El síntoma era siempre el mismo — `guardar_en` devolvía `Ok` y el `leer_de` inmediato devolvía `None`. Cada test usa un usuario distinto, así que no se pisan por nombre: lo que no tolera la concurrencia es el almacén de Windows.
+
+Se serializan con un candado propio del módulo de tests, y no con un `--test-threads=1` global, para no pagar en toda la suite un problema de cinco tests. Verificado: 0 fallos de 20 corridas.
+
+Importa porque **la CI habría fallado una de cada seis veces**. Pasó la primera corrida por suerte, y una CI que falla al azar deja de significar algo en dos semanas.
+
+#### A2. El destino de entrega sale del `.env` (punto 11 del backlog)
+
+Cierra el punto 11 entero, que es el detalle completo. Lo que corresponde anotar acá es **cómo se llegó a apartarse del plan**, porque es el segundo caso de la misma clase en dos días.
+
+**El plan decía**: validar el destino reusando `medios.REDES_PROHIBIDAS`, que bloquea toda la red privada, «porque acá no hay caso legítimo». **Se midió antes de escribir y es falso**: el destino real de este despliegue es `http://localhost:3011`. La regla habría rechazado la única configuración que el motor tuvo alguna vez, y —peor— la migración habría sembrado desde el `.env` una fila que el endpoint nunca aceptaría volver a guardar. Un estado alcanzable y no reingresable, que es de las pocas formas de romper algo sin poder deshacerlo desde la interfaz que lo rompió.
+
+La forma correcta ya estaba escrita en el repo, en `proveedores/base._exigir_host_declarado`, incluyendo la explicación de por qué la regla se invierte según qué se proteja: *«allá lo interno es lo sospechoso… acá, que la credencial no se vaya lejos»*. El plan no la miró.
+
+Es el mismo patrón que `default-src 'self'`, que "tres renglones alcanzan para los 537 títulos" y que la deuda falsa de `secretos.rs`: **una afirmación escrita con seguridad y nunca medida**. Las cuatro veces el costo fue nulo porque se comprobó antes de actuar; la que no se comprobó —la paleta verde-gris "documentada"— es la que llegó a la pantalla.
+
+Lo que la decisión deja abierto queda dicho: quien tenga el token puede apuntar la entrega a la red interna y usar `POST /deliver` como sonda ciega, porque el conteo de `rechazadas` contra `fallidas` distingue "hay algo escuchando" de "no hay nada". Se asume a cambio de que el operador pueda entregarle a su propio back-end, y lo que sostiene la defensa es que **los dos endpoints exigen token siempre**, incluso en un despliegue que dejó la API abierta.
+
+Dos decisiones chicas que valen la línea:
+
+- **`url` es obligatorio y nullable, no opcional.** Con default, un cuerpo `{}` sería indistinguible de "borrá el destino": el error de tipeo más barato del mundo apagaría la entrega sin decir una palabra. Así `{}` es un 422 y `{"url": null}` es un borrado explícito.
+- **El barrido revalida el destino guardado**, aunque `guardar_url` ya lo validó al escribirlo. La fila también puede llegar sembrada por la migración o editada a mano en la base, y un control de seguridad tiene que custodiar la salida real y no sólo el camino de escritura.
+
+`WEBHOOK_URL` **se sacó de `Settings`** en vez de dejarlo documentado como muerto. Mientras el campo existiera, cualquier código nuevo podía leerlo y quedarse con un destino viejo sin que nada fallara. Mismo criterio que las `GEMINI_*` cuando el modelo pasó a ser una fila.
+
+#### Verificación
+
+- **844 tests** del lado del motor: 821 al cerrar A1, más los 23 de `test_entrega.py`, `ruff` limpio, `alembic check` sin operaciones pendientes.
+- **Siete mutaciones sobre las guardas nuevas, las siete cazadas**: la puerta estricta dejando pasar sin token, `REDES_PROHIBIDAS` vacía, no desenvolver la IPv4 escondida en una IPv6, cambiar la URL reenviando todo, `url` con default, el barrido sin revalidar, y el secreto saliendo en la vista. La cuarta hubo que repetirla: la comprobación de "¿se aplicó la mutación?" estaba mal escrita y decía que no, aunque el test hubiera fallado. **Un test que falla con una mutación que no se aplicó no prueba nada**, así que se rehízo con la verificación correcta.
+- **Contra la base real**: la migración corrió sobre las 519 síntesis, sembró `localhost:3011` desde el `.env`, y el `downgrade`/`upgrade` de ida y vuelta dejó todo igual. Tres cambios de URL por la API: **388 entregadas y 131 pendientes antes y después**.
+- **Punta a punta contra el motor reconstruido**: `GET /entrega` sin token da 401, con token devuelve la URL y `secreto_configurado: true` sin el secreto; el destino link-local, el cuerpo vacío y el campo de más dan los tres 422; y `GET /` sigue sin nombrar el host del destino.
+
+#### La revisión con subagentes, y los dos defectos reales que trajo
+
+Antes de commitear A1 y A2 se corrió `/revisar` con tres agentes aislados: los dos ejes —convenciones y spec— y el tercer par de ojos, que entró porque los tres disparadores se cumplían (migración contra datos cargados, superficie con incidente previo, y nadie más que mire).
+
+**Nueve hallazgos, ninguno falso.** Contra los 2 de 10 que no resistieron en la revisión de referencia. La diferencia atribuible: el encargo fue masticado —diff capturado, lista explícita de archivos fuera del diff, y los tres bloques de exclusiones, cortes y aristas entrantes— y ninguno de los tres corrió código.
+
+Dos decisiones al armarlo que valen para la próxima:
+
+- **El archivo del encargo se sacó del diff.** Estaba en el índice y contenía las sospechas de quien escribió el código. Pasárselas a los revisores los anclaba justo en los puntos ciegos que el tercer par de ojos existe para no heredar.
+- **El eje spec no puede juzgarse contra un spec que el propio diff reescribe.** `roadmap.md` y `change_logs.md` estaban adentro del cambio, así que se extrajo el punto 11 **como estaba en `463e277`** con `git show`. Sin eso, el revisor habría comparado el trabajo contra una descripción del trabajo — medir el propio mock, a nivel spec.
+
+##### El hallazgo que no podía llegar a un commit: 500 en vez de 503
+
+`GET /` devolvía **500 con la base caída**, no 503. Reproducido contra el motor real parando `sin_ruido_db`: 500 las tres veces.
+
+La causa son dos cosas que se suman. `verificar_conexion` atrapaba la excepción y devolvía `False` **sin hacer rollback**, dejando la sesión marcada para rollback — a partir de ahí cualquier consulta sobre ella levanta en vez de intentar nada. Y `root()` consultaba la fila de entrega **antes** de mirar ese booleano.
+
+**Lo introdujo A2 y no A1**: en A1 `hay_destino_de_entrega` leía el `.env` y no tocaba la base. El punto 11 la convirtió en una consulta, y con eso `GET /` pasó a hacer trabajo de base después de haber comprobado que la base no estaba.
+
+Importa porque **el 503 es contrato**: la cabina lo usa para distinguir "la base no está" —503, y muestra *migrando*— de "el motor no está" —conexión rechazada, y muestra *arrancando*—. Un 500 no es ninguno de los dos.
+
+Y el test que lo cubría **mockeaba el síntoma**: parcheaba `src.main.verificar_conexion` para que devolviera `False`, con lo cual la sesión quedaba sana y la segunda consulta funcionaba. Es el modo de fallo que este proyecto tiene fichado desde el principio, esta vez adentro de un test escrito para vigilar justamente eso. El test nuevo no mockea nada nuestro: le da al endpoint una sesión apuntada a un Postgres que no existe.
+
+##### El segundo: `{"url": ""}` apagaba la entrega con un 200
+
+`CambioEntrega.url` se había hecho obligatorio y nullable con un motivo escrito: que un cuerpo `{}` no pudiera apagar la entrega en silencio. La guarda funcionaba para `{}` —422— y **se colaba con `{"url": ""}`**, que daba 200 y borraba el destino. O sea que la puerta que se cerró con cuidado quedó abierta al lado, y en la forma más probable de las dos: la cadena vacía es lo que manda un formulario con el campo vaciado.
+
+Ahora sólo `null` borra. Cualquier otra cosa pasa por el validador.
+
+**Las dos correcciones se mutaron.** La primera la cazó el test nuevo del 503. La segunda **se escapó en la primera pasada**: el arreglo estaba y el test no, así que el defecto podía volver sin que nada avisara. Se agregó el test y recién ahí la mutación quedó cazada. Es el argumento entero de por qué mutar no es opcional: un arreglo sin test es un arreglo que se pierde en el commit siguiente.
+
+##### Las tres listas de redes prohibidas, atadas
+
+**Hay tres listas escritas a mano** —`medios`, `proveedores.base` y ahora `entrega`— y **ninguna ataba a la tercera**. El único test que fijaba esa relación (`test_medios.py:164`) cubre las dos originales, y su propio docstring dice que existe para que nadie las "unifique" sin darse cuenta. Con la tercera suelta, sumar un rango de metadata a `proveedores.base.REDES_PROHIBIDAS` habría dejado el destino de entrega sin heredarlo, en silencio.
+
+**No se unificaron, y es a propósito**: son listas *auditables* —se leen y se entiende qué bloquea cada una y por qué—, y componer una de otra las acopla y pierde eso. Lo que se agregó son dos tests que fijan el orden `proveedores ⊆ entrega ⊆ medios`: el piso (lo que no tiene uso legítimo en ningún lado, la entrega lo hereda) y el techo (medios sigue siendo el más estricto de los tres). Si alguna se mueve sin las otras, la suite lo dice y el mensaje nombra el rango que falta.
+
+Mutado en las dos direcciones: sumar un rango a `proveedores.base` y sumarlo a `entrega`. Las dos cazadas.
+
+##### Una corrección de documentación que el revisor destapó
+
+El comentario de `entrega.py` y el punto 11 decían que *"la forma correcta ya estaba escrita en `proveedores/base._exigir_host_declarado`"*. **El código no llama a esa función ni replica su mecanismo**, que es una lista blanca de hosts públicos: lo que se tomó fue su razonamiento sobre hacia dónde apunta la regla. La redacción confundía las dos cosas.
+
+Peor: **ese mecanismo se evaluó explícitamente y se descartó**, y esa decisión no había quedado escrita en ninguna parte — contra la regla de oro del repo, que es que acá se registre lo descartado. Se descartó porque exigir que un destino público figure en una lista del entorno obliga a editar el `.env` y reiniciar el contenedor para cambiar la URL, que es la fricción que el punto 11 existe para sacar. Protege más, y es la primera pieza a reconsiderar el día que este motor se despliegue para terceros.
+
+##### Y una cifra que estaba vieja
+
+Dos docstrings decían "507 síntesis" cuando la medición contra la base dio **519**. El 507 venía del plan, escrito antes de medir. Es exactamente el defecto que la disciplina de auditar contra la fuente existe para atajar, y apareció igual.
+
+##### Los tres hallazgos menores, cerrados
+
+- **`GET /entrega` no decía si el destino guardado servía.** `configurado` era `bool(fila.url)`, así que una URL sembrada por la migración desde un `.env` viejo —o editada a mano en la base— se veía como configurada mientras el barrido la descartaba **y sólo lo decía en el log del scheduler**, que corre cada 15 minutos y no expone su resultado por ninguna ruta. Ahora la respuesta trae `valido` y `problema` además de `configurado`, y los dos primeros salen de correr el validador de verdad. **`GET /` no hace esa comprobación, a propósito**: es el healthcheck, lo golpea Docker cada pocos segundos, y validar implica resolver DNS. Ahí `entrega_configurada` sigue significando "hay una URL guardada", que es lo que la cabina necesita.
+
+- **La promesa de `.env.example` era más fuerte que lo que el código sostiene.** Decía que `WEBHOOK_URL` "la lee únicamente la migración, la primera vez" y que "cambiarla después no hace nada". Es cierto **mientras esa migración no se vuelva a ejecutar**, y ese camino no requiere que nadie decida deshacer el punto 11: alcanza con bajar varias revisiones por un problema en *otra* migración y volver a subir. Corregida la redacción, y además **el `downgrade` ahora avisa por consola** antes de borrar la tabla, en vez de dejarlo dicho sólo en un docstring que nadie lee cuando está apurado. Verificado contra la base real: el aviso sale.
+
+- **El comentario de `auth.py` sobre `GET /` decía "inútil para un atacante"**, y desde que la ruta devuelve `exige_token` eso dejó de ser exacto: cualquiera sin credencial confirma con un GET si la instancia tiene el candado puesto. Se aceptó igual —el dato ya era obtenible pegándole a un endpoint protegido y mirando el 401—, pero lo que cambia es el costo: de un intento de escritura con rastro en el log, a una lectura sin efectos. El comentario ahora lo dice así, y aclara qué sí sería una fuga y no pasa: la URL del destino no sale de esa ruta ni recortada.
+
+##### Un número que se movió dos veces mientras se lo corregía
+
+El revisor de spec marcó que dos docstrings decían "507 síntesis" cuando la medición contra la base había dado **519**. Se corrigieron a 519 y, al verificar el downgrade veinte minutos después, la base ya iba por **532**: el scheduler había seguido corriendo.
+
+La conclusión no es "corregirlo mejor". Es que **un contador que se mueve cada quince minutos no va en un comentario de código**: el docstring quería transmitir escala —"son cientos de síntesis firmadas saliendo de golpe"— y para eso el número exacto no aporta nada y encima envejece solo. Los conteos con fecha viven acá, en el registro de decisiones, donde ser una foto de un momento es la función y no el defecto.

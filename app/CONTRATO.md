@@ -40,7 +40,15 @@ structs de Rust. Así el contrato no puede derivar de lo que la app realmente
 exige: si alguien agrega un campo obligatorio en `tipos.rs` y no lo trae acá, la
 suite del motor falla.
 
-Tres notas sobre casos que no son obvios:
+Cuatro notas sobre casos que no son obvios:
+
+- **`GET /` informa dos booleanos que la cabina no puede deducir**:
+  `exige_token`, porque `API_TOKEN` es opcional del lado del motor y sin este
+  campo la app pedía un token aunque la API estuviera abierta; y
+  `entrega_configurada`, para no marcar como "sin entregar" lo que no tiene a
+  dónde ir. **Son booleanos y nunca la URL**: esta ruta contesta sin credencial,
+  y un webhook suele llevar un identificador que no es público. Hay un test que
+  lo fija (`test_la_salud_no_filtra_la_url_del_destino`).
 
 - **`GET /sintesis/{id}` viene aplanado.** `DetalleSintesis` usa
   `#[serde(flatten)]` sobre `ResumenSintesis`, así que los campos del resumen y
@@ -58,6 +66,17 @@ Tres notas sobre casos que no son obvios:
 `GET /modelos` **no debe** devolver `api_key_env` ni `base_url`. Eso es una
 prohibición, no un requisito, y un contrato de subconjunto no puede expresarla:
 `tests/test_modelos.py` la vigila del lado del motor, que es donde corresponde.
+
+### La excepción al token opcional
+
+`GET /entrega` y `PATCH /entrega` **exigen token siempre**, aunque el motor no
+tenga `API_TOKEN` definido y el resto de la API esté abierta. Es la única
+excepción a la regla de `auth.py`, y la cabina la va a ver como un `503` con un
+mensaje que dice qué configurar — no como un `401`.
+
+El motivo: esos endpoints cambian a dónde salen las síntesis, y salen
+**firmadas**. Quien reciba una entrega desviada obtiene contenido que parece
+legítimo porque lo es.
 
 ## Lo que la app no consume
 
@@ -82,6 +101,8 @@ El test, que lee `openapi.json`, las encontró en la primera corrida.
 | `POST` | `/modelos` | alta de modelos: ídem, y recibe credenciales |
 | `PATCH` | `/medios/{medio_id}` | baja y modificación de medios: consola completa |
 | `PATCH` | `/modelos/{modelo_id}` | ídem para modelos |
+| `GET` | `/entrega` | **todavía no**: la pantalla de Ajustes que lo consume es el bloque siguiente |
+| `PATCH` | `/entrega` | ídem |
 
 ## Cómo se rompe a propósito
 

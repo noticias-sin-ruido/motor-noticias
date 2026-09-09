@@ -8,9 +8,11 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 from src.config import settings
 from src.models import Adaptador, Cluster, ModeloIA
+from src.services.entrega import guardar_url
 
 
 class TestRoot:
@@ -39,6 +41,97 @@ class TestRoot:
         data = response.json()
         assert data["status"] == "degradado"
         assert data["database"] == "error"
+
+    def test_el_503_sobrevive_a_una_base_que_de_verdad_no_esta(self):
+        """
+        **El test de arriba parchea `verificar_conexion`, o sea que mockea el
+        síntoma y le deja la sesión sana al endpoint.** Este no mockea nada
+        nuestro: le da a `GET /` una sesión apuntada a un Postgres que no existe,
+        que es lo que pasa cuando el contenedor de la base se cae.
+
+        La diferencia no es teórica. Cuando el destino de entrega pasó a vivir en
+        una fila (punto 11), `GET /` sumó una consulta a la base **antes** de
+        mirar si la base había contestado, y con Postgres apagado empezó a
+        devolver **500 en vez de 503**. El test de arriba seguía en verde.
+
+        El 503 es contrato: la cabina lo usa para distinguir "la base no está"
+        (503 → migrando) de "el motor no está" (conexión rechazada → arrancando).
+        Ver `app/src-tauri/src/motor.rs`.
+
+        `raise_server_exceptions=False` para que un 500 llegue como respuesta y
+        no como excepción: lo que se afirma es el código HTTP que ve la cabina.
+        """
+        from sqlmodel import create_engine
+
+        from src.database import get_session
+        from src.main import app
+
+        # Puerto 1 en loopback: nadie escucha, así que la conexión se rechaza al
+        # instante en vez de colgarse.
+        motor_muerto = create_engine(
+            "postgresql+psycopg://nadie:nadie@127.0.0.1:1/ninguna",
+            connect_args={"connect_timeout": 2},
+        )
+        with Session(motor_muerto) as sesion_muerta:
+            app.dependency_overrides[get_session] = lambda: sesion_muerta
+            try:
+                respuesta = TestClient(app, raise_server_exceptions=False).get("/")
+            finally:
+                app.dependency_overrides.clear()
+
+        assert respuesta.status_code == 503, (
+            f"con la base caída `GET /` tiene que dar 503 y dio "
+            f"{respuesta.status_code}: la cabina lo lee como que el motor murió"
+        )
+        assert respuesta.json()["database"] == "error"
+
+    def test_dice_si_exige_token(self, client: TestClient, monkeypatch):
+        """
+        `API_TOKEN` es opcional, y la cabina no tiene otra forma de saberlo.
+
+        Sin este campo pedía un token siempre: quien instalara la app contra un
+        motor con la API abierta tenía que inventar uno para pasar de la primera
+        pantalla.
+        """
+        # La fixture `api_sin_token` deja la API abierta por defecto.
+        assert client.get("/").json()["exige_token"] is False
+
+        monkeypatch.setattr(settings, "API_TOKEN", "un-token")
+        assert client.get("/").json()["exige_token"] is True
+
+    def test_dice_si_hay_destino_de_entrega(self, client: TestClient, session):
+        """La cabina lo usa para no marcar como "sin entregar" lo que no tiene
+        a dónde ir. Sin esto marcaba como pendiente una entrega que nunca iba a
+        ocurrir — 119 de 507 al medirlo, aunque el total se mueve cada corrida.
+
+        Se escribe por `guardar_url` y no tocando la fila a mano: desde el punto
+        11 el destino vive en la base, y lo que este test tiene que ejercitar es
+        el camino real de escritura y lectura, no una fila puesta a dedo.
+        """
+        guardar_url(session, None)
+        assert client.get("/").json()["entrega_configurada"] is False
+
+        guardar_url(session, "https://back.test/hook")
+        assert client.get("/").json()["entrega_configurada"] is True
+
+    def test_la_salud_no_filtra_la_url_del_destino(self, client: TestClient, session):
+        """
+        **`GET /` está en `RUTAS_ABIERTAS`: contesta sin credencial.**
+
+        Decir *si* hay destino no expone nada; decir *cuál* sí. Un webhook suele
+        ser una URL con un identificador que no es público, y acá saldría a
+        cualquiera que le pegue a la raíz. Es la misma clase de fuga que se cerró
+        cuando `GET /modelos` nombraba la variable de entorno de la credencial.
+        """
+        secreta = "https://back.test/hook/z4Kq9mNP"
+        guardar_url(session, secreta)
+
+        respuesta = client.get("/")
+
+        assert respuesta.json()["entrega_configurada"] is True
+        assert secreta not in respuesta.text
+        assert "back.test" not in respuesta.text
+        assert "z4Kq9mNP" not in respuesta.text
 
 
 class TestIngestEndpoint:
