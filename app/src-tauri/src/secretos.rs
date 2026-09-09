@@ -78,6 +78,8 @@ pub fn borrar() -> Resultado<()> {
 
 #[cfg(test)]
 mod pruebas {
+    use std::sync::Mutex;
+
     use super::*;
 
     /// Estos tests hablan con el **Credential Manager de verdad**, que es el
@@ -93,8 +95,32 @@ mod pruebas {
         format!("prueba-{nombre}")
     }
 
+    /// **Estos tests no pueden correr en paralelo entre sí.**
+    ///
+    /// Medido: 2 fallos de 12 corridas con los hilos por defecto, 0 de 12 con
+    /// `--test-threads=1`. El síntoma era siempre el mismo — `guardar_en`
+    /// devolvía `Ok` y el `leer_de` inmediato devolvía `None`, o sea que la
+    /// escritura no estaba visible todavía.
+    ///
+    /// Cada test usa un usuario distinto, así que no se pisan por nombre: lo
+    /// que no tolera la concurrencia es el almacén de Windows en sí.
+    ///
+    /// El candado va acá y no en un `--test-threads=1` global: serializar la
+    /// suite entera por estos cinco tests sería pagar en todos lados un
+    /// problema que es de uno solo.
+    ///
+    /// Se recupera del envenenamiento a propósito: si un test entra en pánico
+    /// con el candado tomado, los demás tienen que poder seguir corriendo y
+    /// fallar por su propio motivo, no por el de otro.
+    static CANDADO: Mutex<()> = Mutex::new(());
+
+    fn en_serie() -> std::sync::MutexGuard<'static, ()> {
+        CANDADO.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn guarda_lee_y_borra_contra_el_almacen_real() {
+        let _serie = en_serie();
         let usuario = usuario_unico("ciclo");
         let _ = borrar_de(SERVICIO_DE_PRUEBA, &usuario);
 
@@ -110,6 +136,7 @@ mod pruebas {
 
     #[test]
     fn sin_entrada_devuelve_none_y_no_error() {
+        let _serie = en_serie();
         let usuario = usuario_unico("inexistente");
         let _ = borrar_de(SERVICIO_DE_PRUEBA, &usuario);
 
@@ -118,6 +145,7 @@ mod pruebas {
 
     #[test]
     fn borrar_lo_que_no_existe_no_es_error() {
+        let _serie = en_serie();
         let usuario = usuario_unico("borrar-dos-veces");
         let _ = borrar_de(SERVICIO_DE_PRUEBA, &usuario);
 
@@ -126,6 +154,7 @@ mod pruebas {
 
     #[test]
     fn un_token_vacio_se_rechaza() {
+        let _serie = en_serie();
         let usuario = usuario_unico("vacio");
         // **Limpiar ANTES no es ceremonia.** Una mutación que sacaba esta misma
         // validación dejó un token vacío guardado, y esa credencial sobrevivió
@@ -143,6 +172,7 @@ mod pruebas {
 
     #[test]
     fn se_le_recortan_los_espacios() {
+        let _serie = en_serie();
         let usuario = usuario_unico("recorte");
         let _ = borrar_de(SERVICIO_DE_PRUEBA, &usuario);
 
