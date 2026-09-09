@@ -426,13 +426,21 @@ Auditada contra siete puntos, la app cubría tres (leer clusters sin sintetizar,
 > ✅ **A1 y A2 pasaron por `/revisar`** (08/09/2026): dos ejes más el tercer par
 > de ojos, **nueve hallazgos y ninguno falso**. Los dos defectos reales —`GET /`
 > devolviendo 500 en vez de 503 con la base caída, y `{"url": ""}` apagando la
-> entrega con un 200— están arreglados, con test y mutación. El detalle y lo que
-> se aprendió del método están en `change_logs.md`.
+> entrega con un 200— están arreglados, con test y mutación.
+>
+> ✅ **B, C, D y E cerrados el 09/09/2026**, con el checklist manual corrido
+> entero contra la app real. **Encontró cinco defectos que ninguna suite veía**,
+> entre ellos que la ventana no se podía cerrar en las pantallas tempranas y que
+> contra un motor con la API abierta no funcionaba una sola pantalla. Y la
+> entrega al back-end quedó probada punta a punta: **569 síntesis, cero
+> pendientes**. Todo el detalle en `change_logs.md`.
+>
+> **Queda sólo la fase 9**: el empaquetado, con la decisión del updater.
 
-- [ ] **Bloque B · configuración y credenciales** (puntos 1 y 7 del checklist) — `token_borrar` cableado a "Olvidar token", que hoy sólo hace `setHayToken(false)` y deja la credencial viva; una pantalla de Ajustes que hoy no existe; revalidar la ruta del repo **al usarla** y no sólo al guardarla, para que mover la carpeta no deje la app con un error de Docker crudo; no pedir token cuando `exige_token` es `false`; y los dos `String(e)` de `App.tsx` convertidos en mensajes con categoría.
-- [ ] **Bloque C · modelos** (punto 5) — activar/desactivar con `PATCH /modelos/{id}` y alta con `POST /modelos`, con la limitación dicha en pantalla: la credencial va al `.env` del motor y hay que reiniciar el contenedor. **No puede decir cuál variable falta** —`GET /modelos` no la nombra, y esa regla se cerró después de una fuga—, sólo que falta, vía `credencial_configurada`.
-- [ ] **Bloque D · la entrega** (punto 6, mitad app) — `TarjetaAngulo` deja de mostrar "sin entregar" cuando `entrega_configurada` es `false`, y Ajustes edita la URL consumiendo `GET`/`PATCH /entrega`. Recién ahí esas dos rutas pasan de "no consumidas" a parte del contrato en `app/CONTRATO.md`.
-- [ ] **Bloque E · limpieza** — borrar el andamio entero (componente, pestaña, estilos y su entrada en la lista de permitidos del puente); la sonda de la CSP, que es lo único que se pierde, pasa a ser un paso de la lista de verificación de release en `app/README.md`. Y resucitar `motor_salud`, que no llama nadie desde la fase 4, como el contenido de la pantalla de Ajustes.
+- [x] **Bloque B · configuración y credenciales** ✅ (09/09/2026) (puntos 1 y 7 del checklist) — "Olvidar token" pasó a llamar a `token_borrar`, que estaba en Rust desde la fase 1 sin que lo llamara nadie: antes sólo ponía en `false` un estado de React y la credencial se quedaba viva. Pantalla de Ajustes nueva, que **funciona con el motor apagado** porque es donde se arregla que el motor no arranque. La ruta del repo se revalida al usarla y no sólo al guardarla, con categoría propia (`RutaInvalida`). Y el orden del arranque se invirtió: primero la carpeta, después el token y sólo si el motor lo exige.
+- [x] **Bloque C · modelos** ✅ (09/09/2026) (punto 5) — pestaña propia con lista, activar/apagar (`PATCH`) y alta (`POST`). Relee la lista entera al activar, porque prender uno apaga a los demás del lado del motor. El aviso dice que la credencial va al `.env` y hay que reiniciar el contenedor, y **no dice cuál variable**: esa regla se cerró después de una fuga.
+- [x] **Bloque D · la entrega** ✅ (09/09/2026) (punto 6, mitad app) — Ajustes edita la URL, con un modal previo que deja asentado que el secreto tiene que coincidir con ese back-end. `TarjetaAngulo` dejó de mostrar "sin entregar" sin destino, pero **sigue mostrando "entregado"**: lo segundo es un hecho del pasado y sigue siendo cierto. Las dos rutas pasaron a `CONTRATO` con la marca `solo_forma`.
+- [x] **Bloque E · limpieza** ✅ (09/09/2026) — el andamio se borró entero, y eso apretó la guarda del puente: `PERMITIDOS` pasó de cuatro archivos a **dos**. `App.tsx` también salió, y mientras estuvo en la lista un `invoke` suelto en la pantalla principal pasaba sin que nada dijera. La sonda de la CSP quedó como lista de verificación de release en `app/README.md`; `motor_salud` se resucitó en Ajustes.
 
 **Una decisión que la fase 9 tiene que tomar ANTES de empaquetar (08/09/2026).**
 

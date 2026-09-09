@@ -101,21 +101,64 @@ CONTRATO: dict[str, dict] = {
             "credencial_configurada",
         }),
     },
+    # --- Las que la app consume pero esta suite no puede llamar ---------------
+    #
+    # `solo_forma` significa: el guardián de deriva SÍ las cubre —que es lo que
+    # evita que el contrato se separe de lo que la app exige— pero
+    # `TestLosCamposLlegan` no las invoca. Cada una tiene su motivo:
+    #
+    # - Las dos de `/entrega` **exigen token siempre**, y la fixture `api_sin_token`
+    #   deja la API abierta a propósito, así que acá contestarían 503.
+    # - Las dos de `/modelos` **sondean al proveedor** antes de guardar o prender.
+    #   Llamarlas desde esta suite sería salir a la red —o mockear el proveedor,
+    #   que es lo que `tests/test_modelos.py` ya hace en su lugar.
+    #
+    # Lo que NO significa es "no las mira nadie": están acá justamente para que
+    # renombrar un campo de estas respuestas rompa la suite.
+    "GET /entrega": {
+        "tipo": "RespuestaEntrega",
+        "campos": {"status", "entrega"},
+        "solo_forma": True,
+        "en_uno": ("entrega", "Entrega", {
+            "url", "configurado", "valido", "problema",
+            "secreto_configurado", "actualizado_en",
+        }),
+    },
+    "PATCH /entrega": {
+        "tipo": "RespuestaEntrega",
+        "campos": {"status", "entrega"},
+        "solo_forma": True,
+        "en_uno": ("entrega", "Entrega", {
+            "url", "configurado", "valido", "problema",
+            "secreto_configurado", "actualizado_en",
+        }),
+    },
+    "PATCH /modelos/{modelo_id}": {
+        "tipo": "RespuestaActivarModelo",
+        # `modelo` acá es el NOMBRE, no un objeto: este endpoint contesta con qué
+        # quedó trabajando el motor, no con la fila que tocó.
+        "campos": {"status", "modelo", "activo", "en_uso"},
+        "solo_forma": True,
+    },
+    "POST /modelos": {
+        "tipo": "RespuestaAltaModelo",
+        "campos": {"status", "modelo", "en_uso"},
+        "solo_forma": True,
+        "en_uno": ("modelo", "ModeloPublico", {
+            "id", "nombre", "modelo", "adaptador", "activo", "prioridad",
+            "credencial_configurada",
+        }),
+    },
 }
 
 #: Rutas que el motor expone y la app **no** consume. Figuran para que agregar
 #: un endpoint obligue a decidir si la cabina lo necesita.
 NO_CONSUMIDAS = {
     "GET /medios", "GET /search",
-    "PATCH /medios/{medio_id}", "PATCH /modelos/{modelo_id}",
+    "PATCH /medios/{medio_id}",
     "POST /cluster", "POST /vectorize", "POST /ingest", "POST /synthesize",
-    "POST /deliver", "POST /purge", "POST /medios", "POST /modelos",
+    "POST /deliver", "POST /purge", "POST /medios",
     "POST /clusters/{cluster_id}/synthesize",
-    # **Todavía** no: la pantalla de Ajustes que los va a consumir es el bloque
-    # siguiente. Están acá y no en `CONTRATO` a propósito — meterlos antes de que
-    # exista el struct de Rust haría fallar el guardián de deriva contra los
-    # bindings, y sobre todo diría que la app exige algo que hoy no mira.
-    "GET /entrega", "PATCH /entrega",
 }
 
 
@@ -210,8 +253,12 @@ def _ruta_real(plantilla: str, poblado) -> str:
 # --- Los campos llegan ------------------------------------------------------
 
 
+#: Las que esta suite puede invocar de verdad. Ver `solo_forma` en `CONTRATO`.
+AUTOMATIZABLES = [e for e, p in CONTRATO.items() if not p.get("solo_forma")]
+
+
 class TestLosCamposLlegan:
-    @pytest.mark.parametrize("endpoint", list(CONTRATO))
+    @pytest.mark.parametrize("endpoint", AUTOMATIZABLES)
     def test_la_respuesta_trae_al_menos_lo_pactado(
         self, client: TestClient, poblado, endpoint: str
     ):

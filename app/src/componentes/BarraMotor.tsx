@@ -15,11 +15,9 @@ import type { Estado } from "../motor";
 export default function BarraMotor({
   estado,
   alCambiar,
-  alOlvidarToken,
 }: {
   estado: Estado;
   alCambiar: (estado: Estado) => void;
-  alOlvidarToken: () => void;
 }) {
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,9 +103,6 @@ export default function BarraMotor({
             title="Volver a consultar el estado del motor"
           >
             <span aria-hidden="true">↻</span>
-          </button>
-          <button className="secundario chico" onClick={alOlvidarToken}>
-            Olvidar token
           </button>
         </div>
       </div>

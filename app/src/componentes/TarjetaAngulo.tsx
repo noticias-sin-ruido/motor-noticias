@@ -25,9 +25,16 @@ function cuando(iso: string): string {
 
 export default function TarjetaAngulo({
   sintesis,
+  entregaConfigurada,
   alAbrir,
 }: {
   sintesis: ResumenSintesis;
+  /**
+   * Si el motor tiene a donde entregar. Sale de `GET /` y **no se deduce**: sin
+   * este dato la tarjeta marcaba como pendiente una entrega que nunca iba a
+   * ocurrir. Medido: 119 de 507 sintesis lo hacian.
+   */
+  entregaConfigurada: boolean;
   alAbrir: (sintesis: ResumenSintesis) => void;
 }) {
   return (
@@ -41,9 +48,18 @@ export default function TarjetaAngulo({
         </h3>
         {/* Entregado o no va en texto y no sólo en color: es la diferencia
             entre "el back-end ya lo tiene" y "todavía no salió". */}
-        <span className={`chip ${sintesis.enviado_backend ? "chip-entregado" : "chip-pendiente"}`}>
-          {sintesis.enviado_backend ? "entregado" : "sin entregar"}
-        </span>
+        {/* **"entregado" se muestra siempre; "sin entregar" solo si hay a
+            donde.** No es simetrico a proposito: "entregado" es un hecho del
+            pasado y sigue siendo cierto aunque hoy no haya destino, mientras que
+            "sin entregar" sin destino configurado no describe una demora sino
+            una entrega que nadie pidio. */}
+        {(sintesis.enviado_backend || entregaConfigurada) && (
+          <span
+            className={`chip ${sintesis.enviado_backend ? "chip-entregado" : "chip-pendiente"}`}
+          >
+            {sintesis.enviado_backend ? "entregado" : "sin entregar"}
+          </span>
+        )}
       </div>
 
       <div className="ta-cuerpo">

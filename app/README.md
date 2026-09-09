@@ -175,8 +175,8 @@ Una política escrita pero no aplicada **se ve idéntica a una que funciona**: e
 los dos casos un `fetch` a un host externo falla. Sin CSP falla por CORS.
 
 Lo que distingue los dos casos es el evento **`securitypolicyviolation`**, que
-sólo existe si la política se está aplicando. La sonda del andamio lo escucha, y
-por eso sirvió: en la ventana de desarrollo reportó *"SIN VIOLACIÓN"* —
+sólo existe si la política se está aplicando. La sonda del andamio lo escuchaba,
+y por eso sirvió: en la ventana de desarrollo reportó *"SIN VIOLACIÓN"* —
 destapando que `devCsp` era letra muerta— y en el ejecutable de release reportó
 *bloqueado por la CSP, directiva `connect-src`*.
 
@@ -184,6 +184,43 @@ La otra mitad de la prueba es que **la app siga funcionando**: una política que
 bloquea todo, incluido el IPC, se vería igual de exitosa en esa línea. Se
 verificó del otro lado, en el log del motor: la app de release le mandó 26
 pedidos, incluidos los de la pantalla real.
+
+### La sonda ya no está en la app: es un paso de la lista de release
+
+El andamio se borró al cerrar el punto 14 —las pantallas reales ejercitan los
+comandos que cubría— y con él se fue la única sonda automática de la CSP. **No
+se reemplazó por un test**, y no por descuido: esta comprobación sólo dictamina
+en un ejecutable compilado, porque en desarrollo el HTML lo sirve Vite y Tauri
+no inyecta nada. Un test que corriera en CI diría siempre lo mismo y no
+significaría nada.
+
+Así que pasa a ser **un paso manual antes de publicar un instalador**, y queda
+escrito entero acá abajo para no tener que reconstruirlo de memoria.
+
+## Lista de verificación antes de publicar un instalador
+
+1. **Compilar en release**: `npm run tauri build`. La CSP no existe en `dev`.
+2. Abrir el ejecutable y, en la consola del webview, pegar esto:
+
+   ```js
+   let v = null;
+   document.addEventListener("securitypolicyviolation", (e) => { v = e; });
+   fetch("https://example.com/csp-probe").catch(() => {});
+   setTimeout(() => console.log(v
+     ? `BLOQUEADO por «${v.violatedDirective}» → la CSP se está aplicando`
+     : "SIN VIOLACIÓN → la política está escrita pero NO se aplica"), 300);
+   ```
+
+   **Que el `fetch` falle no prueba nada**: falla igual sin CSP, por CORS. Lo
+   único que distingue una política aplicada de una inerte es el evento.
+
+3. **Y que la app siga andando**: una política que bloquea todo —incluido el
+   IPC— daría "BLOQUEADO" y se vería igual de exitosa. Abrir la lista de trabajo
+   y confirmar que trae datos, o mirar el log del motor y ver los pedidos
+   llegando. Sin este paso, el anterior puede estar celebrando una app rota.
+4. **Ninguna pantalla usa `style=` en línea.** La CSP de producción los bloquea
+   y en desarrollo se ven bien: es la clase de rotura que sólo aparece en el
+   ejecutable. Los anchos y estados van por clase.
 
 ## Docker Desktop tiene que estar corriendo
 
@@ -244,8 +281,11 @@ query, red, deserialización—; las demás deserializan fixtures. **Ninguna man
 un POST**, para que correrlas nunca pueda terminar en una llamada paga.
 
 **Fase 4 — el puente, cruzado (07/09/2026).** Los seis comandos que la fase 3
-dejó sin invocar desde la ventana ya se ejercitaron con un andamio descartable
-(`src/Andamio.tsx`): diez pruebas, cero fallidas.
+dejó sin invocar desde la ventana se ejercitaron con un andamio descartable
+(`src/Andamio.tsx`): diez pruebas, cero fallidas. **Ese andamio ya no existe**:
+se borró al cerrar el punto 14, cuando las pantallas reales pasaron a ejercitar
+todos los comandos. Lo único que cubría y ninguna pantalla cubre —la sonda de la
+CSP— quedó como paso de la lista de verificación de release, más arriba.
 
 Hacía falta porque entre Rust y el webview hay una capa que **ningún compilador
 ve**: `cargo test` llama las funciones directo, y `tsc` tipa el retorno de
@@ -265,11 +305,15 @@ Escribirlo en snake_case compila, pasa `tsc` y falla en ejecución.
 `ArgumentCase::Camel` es el default en `tauri-macros 2.6.3` (`wrapper.rs:51`,
 la conversión en `:506`).
 
-**El andamio acompaña todo el desarrollo y se borra en la fase 9**, antes de
-empaquetar. Nació descartable, y se quedó por dos razones: cubre comandos que
-ninguna pantalla ejercita todavía —`listar_sintesis` y `detalle_de_sintesis`
-esperan al feed de la fase 5— y mide cosas que sólo se miden con la ventana
-abierta, como que la CSP esté aplicándose de verdad.
+**El andamio acompañó todo el desarrollo y se borró al cerrar el punto 14.**
+Nació descartable y se quedó mientras cubría comandos que ninguna pantalla
+ejercitaba —`listar_sintesis` y `detalle_de_sintesis` esperaban al feed— y
+mientras medía cosas que sólo se miden con la ventana abierta.
+
+Borrarlo apretó de paso la guarda del puente: `PERMITIDOS` pasó de cuatro
+archivos a **dos**, los dos envoltorios. `App.tsx` también salió, porque sus
+llamadas del token se mudaron a `motor.ts` — y mientras estuvo en la lista, un
+`invoke` suelto en la pantalla principal pasaba sin que la guarda dijera nada.
 
 Corre solo al montar y es todo de lectura; el único POST está detrás de un botón
 aparte, apuntando a un cluster que ya tiene síntesis para que `forzar: false`
@@ -287,5 +331,5 @@ una fila, creciendo con el histórico. Ahora `GET /clusters` trae
 `cantidad_sintesis`: **14 ms en un pedido**, y constante. Ver el punto 14 de
 `specs/roadmap.md`.
 
-Lo que **todavía no hace**: las dos pantallas (fases 4 y 5), el ícono en la
-bandeja (fase 6) y el instalador (fase 9).
+Lo que **todavía no hace**: el instalador (fase 9). Las dos pantallas, el ícono
+de la bandeja, los ajustes, los modelos y la entrega ya están.

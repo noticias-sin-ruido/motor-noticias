@@ -22,8 +22,9 @@ use api::ErrorDeApi;
 use docker::ErrorDocker;
 use motor::Estado;
 use tipos::{
-    Id, RespuestaClusters, RespuestaDetalle, RespuestaModelos, RespuestaPipeline,
-    RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
+    Id, RespuestaActivarModelo, RespuestaAltaModelo, RespuestaClusters, RespuestaDetalle,
+    RespuestaEntrega, RespuestaModelos, RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar,
+    Salud, Sintetizado,
 };
 
 /// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
@@ -83,13 +84,38 @@ fn repo_guardar(app: AppHandle, ruta: PathBuf) -> Result<(), String> {
 
 // --- El motor -------------------------------------------------------------
 
+/// La carpeta del repo, **comprobada ahora y no cuando se guardó**.
+///
+/// Antes esto sólo miraba que hubiera *alguna* ruta guardada. `tiene_compose`
+/// existía y corría únicamente en `repo_guardar`, así que mover la carpeta a
+/// otro disco —o renombrarla— dejaba la app pidiéndole a Docker un archivo que
+/// no está, y el error que salía era el de Docker: cierto, inútil, y sin
+/// ninguna pista de que lo que había que cambiar era un ajuste de la app.
+///
+/// Cuesta un `exists()` por arranque o parada del motor, que son acciones que
+/// ya tardan segundos.
 fn ruta_configurada(app: &AppHandle) -> Result<PathBuf, ErrorDocker> {
-    ajustes::leer(app)
+    let ruta = ajustes::leer(app)
         .map_err(ErrorDocker::Fallo)?
         .ruta_del_repo
         .ok_or_else(|| {
             ErrorDocker::Fallo("Todavía no se configuró dónde está el repo del motor.".into())
-        })
+        })?;
+
+    validar_ruta(ruta)
+}
+
+/// La comprobación sola, separada **para poder probarla**.
+///
+/// `ruta_configurada` necesita un `AppHandle`, que en un test no existe; si la
+/// decisión quedara adentro sólo se podría verificar reescribiéndola en el test,
+/// y una copia deja de avisar justo cuando el original cambia. Mismo criterio
+/// que `bandeja::pedido_de`.
+fn validar_ruta(ruta: PathBuf) -> Result<PathBuf, ErrorDocker> {
+    if !ajustes::tiene_compose(&ruta) {
+        return Err(ErrorDocker::RutaInvalida(ruta.display().to_string()));
+    }
+    Ok(ruta)
 }
 
 fn avisar(app: &AppHandle, estado: Estado) {
@@ -177,7 +203,11 @@ async fn motor_detener(app: AppHandle) -> Result<Estado, ErrorDocker> {
 /// El `GET /` del motor, ya autenticado.
 #[tauri::command]
 async fn motor_salud() -> Result<Salud, ErrorDeApi> {
-    api::get("/", &[]).await
+    // Corre **antes** de que haya token, para averiguar si hace falta pedirlo:
+    // `GET /` es una ruta abierta del motor. Ya no necesita un verbo propio --
+    // ningun pedido exige credencial del lado del cliente, porque quien decide
+    // si hace falta es el motor. Ver `api::falta_o_no_sirve`.
+    api::get_salud("/").await
 }
 
 #[tauri::command]
@@ -260,6 +290,73 @@ async fn sintetizar_cluster(
 /// Cierra la aplicación. **No para el motor**: quien la llama ya decidió qué
 /// hacer con los contenedores, y mezclar las dos cosas acá volvería a hacer que
 /// el destino del motor dependa de por dónde se salió.
+/// Prende o apaga un modelo. **Prender uno apaga a los demas** (lo hace el
+/// motor, no la app).
+///
+/// Tarda: el motor sondea el proveedor antes de prender, para que un error de
+/// credencial salga cuando se aprieta el boton y no quince minutos despues en el
+/// paso mas caro del pipeline.
+#[tauri::command]
+async fn activar_modelo(modelo_id: Id, activo: bool) -> Result<RespuestaActivarModelo, ErrorDeApi> {
+    api::patch(
+        &format!("/modelos/{modelo_id}"),
+        &[("activo", activo.to_string())],
+    )
+    .await
+}
+
+/// Da de alta un modelo. El motor lo **sondea contra el proveedor** antes de
+/// guardarlo, asi que un 422 aca significa "esa configuracion no sirve" y trae
+/// el motivo.
+///
+/// **No se manda `api_key_env`**, y el motor tampoco lo acepta: el nombre de la
+/// variable con la credencial no lo elige quien da de alta. Esa puerta se cerro
+/// despues de encontrar que con un `base_url` propio se podia hacer que el motor
+/// entregara la credencial del operador a un tercero.
+#[tauri::command]
+async fn alta_modelo(
+    nombre: String,
+    adaptador: String,
+    modelo: String,
+    base_url: Option<String>,
+    activar: bool,
+) -> Result<RespuestaAltaModelo, ErrorDeApi> {
+    let mut cuerpo = serde_json::json!({
+        "nombre": nombre,
+        "adaptador": adaptador,
+        "modelo": modelo,
+        "activar": activar,
+    });
+    // Se **omite** si no vino, en vez de mandar `null`. El alta del motor
+    // rechaza los campos de mas y valida los que llegan; mandar una clave vacia
+    // es pedirle que decida sobre algo que nadie configuro.
+    if let Some(base) = base_url.filter(|b| !b.trim().is_empty()) {
+        cuerpo["base_url"] = serde_json::Value::String(base);
+    }
+    api::post_json("/modelos", cuerpo).await
+}
+
+/// El destino de entrega configurado. Exige token **siempre**, aun contra un
+/// motor con la API abierta: lo decide el motor, no la app.
+#[tauri::command]
+async fn entrega_ver() -> Result<RespuestaEntrega, ErrorDeApi> {
+    api::get("/entrega", &[]).await
+}
+
+/// Cambia el destino. `None` lo desconfigura y la entrega deja de correr.
+///
+/// **No reenvia nada**: cambiar la URL no toca `enviado_backend`, asi que el
+/// destino nuevo recibe desde la proxima sintesis y no el historico entero de
+/// golpe. Reenviar es una accion aparte y tiene su propio nombre.
+#[tauri::command]
+async fn entrega_cambiar(url: Option<String>) -> Result<RespuestaEntrega, ErrorDeApi> {
+    // `null` explicito y no una clave ausente: el motor distingue los dos casos
+    // a proposito -- un cuerpo vacio es un 422 y `{"url": null}` es un borrado
+    // pedido. Ver `CambioEntrega` en `src/main.py`.
+    let url = url.filter(|u| !u.trim().is_empty());
+    api::patch_json("/entrega", serde_json::json!({ "url": url })).await
+}
+
 #[tauri::command]
 fn salir(app: AppHandle) {
     app.exit(0);
@@ -293,6 +390,10 @@ pub fn run() {
             motor_arrancar,
             motor_detener,
             motor_salud,
+            activar_modelo,
+            alta_modelo,
+            entrega_ver,
+            entrega_cambiar,
             listar_clusters,
             listar_sintesis,
             detalle_de_sintesis,
@@ -306,17 +407,76 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod la_ruta_se_revalida {
+    use super::*;
+
+    /// **La ruta se comprueba al usarla, no sólo al guardarla.**
+    ///
+    /// `tiene_compose` existía desde la fase 2 y corría únicamente en
+    /// `repo_guardar`. Con eso, mover la carpeta del repo a otro disco —o
+    /// renombrarla— dejaba la app pidiéndole a Docker un archivo que no está, y
+    /// el error que salía era el de Docker: cierto, y sin ninguna pista de que
+    /// lo que había que cambiar era un ajuste de la app.
+    #[test]
+    fn una_carpeta_que_ya_no_tiene_compose_es_ruta_invalida() {
+        let dir = std::env::temp_dir().join("cabina-prueba-ruta-movida");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Con el compose: pasa.
+        let _ = std::fs::write(
+            dir.join("docker-compose.yml"),
+            "services: {}
+",
+        );
+        assert_eq!(validar_ruta(dir.clone()), Ok(dir.clone()));
+
+        // Se lo llevaron: no pasa, y el error dice CUÁL carpeta.
+        let _ = std::fs::remove_file(dir.join("docker-compose.yml"));
+        match validar_ruta(dir.clone()) {
+            Err(ErrorDocker::RutaInvalida(donde)) => {
+                assert!(donde.contains("cabina-prueba-ruta-movida"), "{donde}");
+            }
+            otro => panic!("tenía que ser RutaInvalida y fue {otro:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// La categoría es propia y no `Fallo`, **porque el arreglo es propio**: es
+    /// el único de los cuatro que se resuelve desde la ventana. Si alguien la
+    /// colapsa en `Fallo`, la interfaz pierde la forma de ofrecer el arreglo.
+    #[test]
+    fn no_se_confunde_con_el_cajon_de_sastre() {
+        let dir = std::env::temp_dir().join("cabina-prueba-categoria");
+        let _ = std::fs::create_dir_all(&dir);
+
+        assert!(matches!(
+            validar_ruta(dir.clone()),
+            Err(ErrorDocker::RutaInvalida(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod guardas {
     use std::fs;
     use std::path::Path;
 
     /// Los únicos archivos del front que pueden llamar a `invoke` directo.
     ///
-    /// `datos.ts` y `motor.ts` son los envoltorios; `App.tsx` conserva las dos
-    /// llamadas del token y la ruta del repo; `Andamio.tsx` es el instrumento
-    /// de desarrollo, que llama crudo a propósito —incluso con nombres mal
-    /// escritos— porque de eso se trata.
-    const PERMITIDOS: [&str; 4] = ["datos.ts", "motor.ts", "App.tsx", "Andamio.tsx"];
+    /// **Quedaron dos, y esa es la regla que se buscaba desde el principio**:
+    /// todo el puente pasa por los dos envoltorios, que son los únicos lugares
+    /// donde se escriben los nombres de los comandos y de sus argumentos.
+    ///
+    /// Eran cuatro. `Andamio.tsx` era el instrumento de desarrollo, que llamaba
+    /// crudo a propósito —incluso con nombres mal escritos— y se borró al
+    /// cerrar el punto 14. `App.tsx` conservaba las llamadas del token y la
+    /// ruta del repo, y salió cuando esas se mudaron a `motor.ts`: mientras
+    /// estuvo en la lista, cualquier `invoke` nuevo en la pantalla principal
+    /// pasaba sin que la guarda dijera nada.
+    const PERMITIDOS: [&str; 2] = ["datos.ts", "motor.ts"];
 
     fn recorrer(dir: &Path, encontrados: &mut Vec<String>) {
         let Ok(entradas) = fs::read_dir(dir) else {

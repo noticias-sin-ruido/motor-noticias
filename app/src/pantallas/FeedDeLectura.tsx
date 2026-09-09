@@ -21,10 +21,13 @@ const POR_PAGINA = 20;
 
 export default function FeedDeLectura({
   clusterId,
+  entregaConfigurada,
   alQuitarFiltro,
 }: {
   /** Si viene, el feed arranca filtrado por ese cluster. */
   clusterId: number | null;
+  /** Viaja hasta `TarjetaAngulo`, que decide si el chip de entrega tiene sentido. */
+  entregaConfigurada: boolean;
   alQuitarFiltro: () => void;
 }) {
   const [angulos, setAngulos] = useState<ResumenSintesis[]>([]);
@@ -118,7 +121,12 @@ export default function FeedDeLectura({
       ) : (
         <ul className="lista-angulos">
           {angulos.map((s) => (
-            <TarjetaAngulo key={s.id} sintesis={s} alAbrir={setAbierto} />
+            <TarjetaAngulo
+              key={s.id}
+              sintesis={s}
+              entregaConfigurada={entregaConfigurada}
+              alAbrir={setAbierto}
+            />
           ))}
         </ul>
       )}

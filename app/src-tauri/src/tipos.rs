@@ -296,6 +296,73 @@ pub struct ModeloPublico {
     pub credencial_configurada: bool,
 }
 
+// --- PATCH /modelos/{id} y POST /modelos -----------------------------------
+
+/// Lo que devuelve prender o apagar un modelo.
+///
+/// **`modelo` es el nombre y no un objeto**, a diferencia del alta. No es un
+/// descuido del motor: los dos endpoints contestan cosas distintas porque
+/// responden preguntas distintas -- el alta devuelve la fila que acaba de
+/// crear, y el PATCH devuelve con que quedo trabajando el motor.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaActivarModelo {
+    pub status: String,
+    /// El nombre del modelo que se toco.
+    pub modelo: String,
+    pub activo: bool,
+    /// Con cual esta sintetizando el motor **ahora**, que no siempre es el que
+    /// se acaba de tocar: prender uno apaga a los demas, y apagar el ultimo deja
+    /// al motor sin sintetizar.
+    pub en_uso: String,
+}
+
+/// Lo que devuelve dar de alta un modelo.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaAltaModelo {
+    pub status: String,
+    pub modelo: ModeloPublico,
+    pub en_uso: String,
+}
+
+// --- GET /entrega y PATCH /entrega -----------------------------------------
+
+/// A donde el motor entrega las sintesis.
+///
+/// **Aca si viaja la URL**, a diferencia de `Salud`: estas dos rutas exigen
+/// token siempre -- incluso en un despliegue con la API abierta -- y el operador
+/// no puede corregir un destino que no ve. Lo que no viaja nunca es el secreto
+/// compartido; de el solo se informa si existe.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Entrega {
+    /// `null` cuando no hay destino: la entrega no corre y las sintesis se
+    /// acumulan entregables.
+    pub url: Option<String>,
+    /// Hay una URL guardada.
+    pub configurado: bool,
+    /// El motor la va a aceptar cuando entregue. **No es lo mismo que
+    /// `configurado`**: la fila puede venir sembrada por la migracion desde un
+    /// `.env` viejo, o editada a mano en la base. Sin este campo el operador
+    /// veia "configurado" mientras el barrido la descartaba en silencio.
+    pub valido: bool,
+    /// Por que no sirve, con el mensaje del validador. `null` si sirve.
+    pub problema: Option<String>,
+    /// Si `WEBHOOK_SECRET` esta seteado en el entorno del motor. Sin el la
+    /// entrega no corre aunque haya destino, asi que es lo que explica un
+    /// "configurado pero no entrega".
+    pub secreto_configurado: bool,
+    pub actualizado_en: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaEntrega {
+    pub status: String,
+    pub entrega: Entrega,
+}
+
 // --- POST /clusters/{id}/synthesize ----------------------------------------
 
 /// Lo que llega por el cable, tal cual.

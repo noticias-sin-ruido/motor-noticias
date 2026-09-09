@@ -31,6 +31,10 @@ sin avisar.
 | `GET` | `/pipeline` | `RespuestaPipeline` |
 | `GET` | `/modelos` | `RespuestaModelos` |
 | `POST` | `/clusters/{cluster_id}/synthesize` | `RespuestaSintetizar` |
+| `GET` | `/entrega` | `RespuestaEntrega` |
+| `PATCH` | `/entrega` | `RespuestaEntrega` |
+| `PATCH` | `/modelos/{modelo_id}` | `RespuestaActivarModelo` |
+| `POST` | `/modelos` | `RespuestaAltaModelo` |
 
 ### Los campos exigidos
 
@@ -60,6 +64,19 @@ Cuatro notas sobre casos que no son obvios:
   los campos que la ventana usa, porque `_vista_publica` devuelve la tabla menos
   dos columnas y exigirlos todos ataría la app a que nadie agregue una columna
   nunca.
+
+### Cuatro rutas que el contrato vigila pero no invoca
+
+`GET`/`PATCH /entrega` y `PATCH`/`POST /modelos` llevan `solo_forma` en el
+diccionario. El guardián de deriva **sí** las cubre —renombrar un campo de esas
+respuestas rompe la suite— pero `TestLosCamposLlegan` no las llama, y cada una
+tiene su motivo:
+
+- las de `/entrega` **exigen token siempre**, y la fixture de tests deja la API
+  abierta a propósito, así que ahí contestarían `503`;
+- las de `/modelos` **sondean al proveedor** antes de prender o guardar, y esta
+  suite no sale a la red ni mockea proveedores: eso es trabajo de
+  `tests/test_modelos.py`.
 
 ### Lo que el contrato NO cubre, y no puede
 
@@ -98,11 +115,7 @@ El test, que lee `openapi.json`, las encontró en la primera corrida.
 | `POST` | `/deliver` | la entrega al back-end la maneja el ciclo |
 | `POST` | `/purge` | **irreversible**: borra cuerpos de noticias. Fuera de la v1 a propósito |
 | `POST` | `/medios` | alta de medios: consola completa, fuera de la v1 |
-| `POST` | `/modelos` | alta de modelos: ídem, y recibe credenciales |
 | `PATCH` | `/medios/{medio_id}` | baja y modificación de medios: consola completa |
-| `PATCH` | `/modelos/{modelo_id}` | ídem para modelos |
-| `GET` | `/entrega` | **todavía no**: la pantalla de Ajustes que lo consume es el bloque siguiente |
-| `PATCH` | `/entrega` | ídem |
 
 ## Cómo se rompe a propósito
 

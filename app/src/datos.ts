@@ -17,9 +17,13 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ErrorDeApi } from "./bindings/ErrorDeApi";
 import type { RespuestaClusters } from "./bindings/RespuestaClusters";
 import type { RespuestaDetalle } from "./bindings/RespuestaDetalle";
+import type { RespuestaActivarModelo } from "./bindings/RespuestaActivarModelo";
+import type { RespuestaAltaModelo } from "./bindings/RespuestaAltaModelo";
+import type { RespuestaEntrega } from "./bindings/RespuestaEntrega";
 import type { RespuestaModelos } from "./bindings/RespuestaModelos";
 import type { RespuestaPipeline } from "./bindings/RespuestaPipeline";
 import type { RespuestaSintesis } from "./bindings/RespuestaSintesis";
+import type { Salud } from "./bindings/Salud";
 import type { Sintetizado } from "./bindings/Sintetizado";
 
 export type { ErrorDeApi };
@@ -43,6 +47,17 @@ function conOpcionales(base: Record<string, unknown>, opcionales: Record<string,
     if (valor !== null && valor !== undefined) args[clave] = valor;
   }
   return args;
+}
+
+/**
+ * El `GET /` del motor. **Es la única ruta abierta**, así que contesta aunque no
+ * haya token — y eso es justamente para qué se la usa acá: `exige_token` es la
+ * forma de saber si hace falta pedirlo, antes de pedirlo.
+ *
+ * `entrega_configurada` dice si hay a dónde entregar, sin decir a dónde.
+ */
+export function salud(): Promise<Salud> {
+  return invoke<Salud>("motor_salud");
 }
 
 export function listarClusters(
@@ -77,6 +92,60 @@ export function listarSintesis(opciones: {
       },
     ),
   );
+}
+
+/**
+ * Prende o apaga un modelo. **Prender uno apaga a los demas**, y lo decide el
+ * motor: la app no manda apagar nada.
+ *
+ * Tarda, porque el motor sondea al proveedor antes de prender. Es a proposito:
+ * asi un error de credencial sale cuando se aprieta el boton y no quince minutos
+ * despues, adentro del paso mas caro del pipeline.
+ */
+export function activarModelo(
+  modeloId: number,
+  activo: boolean,
+): Promise<RespuestaActivarModelo> {
+  return invoke<RespuestaActivarModelo>("activar_modelo", { modeloId, activo });
+}
+
+/**
+ * Da de alta un modelo. El motor lo sondea contra el proveedor antes de
+ * guardarlo, asi que un rechazo aca dice que esa configuracion no sirve **y por
+ * que**, en vez de aceptarla y fallar despues en cada sintesis.
+ *
+ * No se manda la credencial ni el nombre de su variable: eso vive en el `.env`
+ * del motor y el alta no lo acepta.
+ */
+export function altaModelo(datos: {
+  nombre: string;
+  adaptador: string;
+  modelo: string;
+  baseUrl: string | null;
+  activar: boolean;
+}): Promise<RespuestaAltaModelo> {
+  return invoke<RespuestaAltaModelo>("alta_modelo", {
+    nombre: datos.nombre,
+    adaptador: datos.adaptador,
+    modelo: datos.modelo,
+    baseUrl: datos.baseUrl,
+    activar: datos.activar,
+  });
+}
+
+/** El destino de entrega. Exige token siempre, aun con la API abierta. */
+export function entregaVer(): Promise<RespuestaEntrega> {
+  return invoke<RespuestaEntrega>("entrega_ver");
+}
+
+/**
+ * Cambia el destino. `null` lo desconfigura.
+ *
+ * **No reenvia nada**: el destino nuevo recibe desde la proxima sintesis. El
+ * historico se manda aparte, con una accion que tiene ese nombre.
+ */
+export function entregaCambiar(url: string | null): Promise<RespuestaEntrega> {
+  return invoke<RespuestaEntrega>("entrega_cambiar", { url });
 }
 
 export function detalleDeSintesis(id: number): Promise<RespuestaDetalle> {
@@ -121,6 +190,12 @@ export function mensajeDeApi(error: ErrorDeApi): string {
       return "El motor no responde. Fijate el semáforo de arriba.";
     case "no_autorizado":
       return "El motor rechazó el token. Puede haber cambiado en el .env.";
+    // El motor vive pero no puede atender **esto**, y ya explicó por qué. Su
+    // texto va tal cual: viene saneado y dice qué configurar, que es más de lo
+    // que podríamos agregarle desde acá. Hoy el caso real es `/entrega` contra
+    // un motor sin `API_TOKEN`.
+    case "no_disponible":
+      return error.detalle;
     case "no_encontrado":
       return "El motor no encontró eso. Puede haberse borrado; probá refrescar.";
     case "invalida":

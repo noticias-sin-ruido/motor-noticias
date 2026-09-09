@@ -8,4 +8,4 @@
  * y sin separarlas la app solo puede mostrar el texto crudo de Docker, que
  * dice qué pasó pero no qué hacer.
  */
-export type ErrorDocker = { "tipo": "no_instalado" } | { "tipo": "demonio_caido" } | { "tipo": "fallo", "detalle": string };
+export type ErrorDocker = { "tipo": "no_instalado" } | { "tipo": "demonio_caido" } | { "tipo": "ruta_invalida", "detalle": string } | { "tipo": "fallo", "detalle": string };

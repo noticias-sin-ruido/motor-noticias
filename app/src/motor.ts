@@ -52,9 +52,50 @@ export function mensajeDeError(error: ErrorDocker): string {
       return "No se encontró Docker. Hace falta Docker Desktop para levantar el motor.";
     case "demonio_caido":
       return "Docker Desktop no está corriendo. Abrilo, esperá a que diga «Engine running» y volvé a intentar.";
+    case "ruta_invalida":
+      return `La carpeta del motor ya no sirve: en ${error.detalle} no hay un docker-compose.yml. Si la moviste o la renombraste, volvé a elegirla en Ajustes.`;
     case "fallo":
       return error.detalle;
   }
+}
+
+/**
+ * Si el error es que la carpeta configurada dejó de servir.
+ *
+ * Lo pregunta la interfaz para ofrecer **el arreglo** —volver a elegirla— en vez
+ * de sólo contar lo que pasó. Es el único de los cuatro que se resuelve desde la
+ * ventana: instalar Docker o prenderlo se hace afuera.
+ */
+export function esRutaInvalida(e: unknown): boolean {
+  return typeof e === "object" && e !== null && "tipo" in e
+    && (e as ErrorDocker).tipo === "ruta_invalida";
+}
+
+// --- El token del operador ------------------------------------------------
+//
+// Viven acá y no sueltos en las pantallas por lo mismo que `datos.ts` concentra
+// los nombres de argumentos: que haya **un solo lugar** donde se escribe el
+// nombre del comando. El token nunca vuelve del otro lado — `token_existe`
+// devuelve un booleano, no el valor.
+
+/** Si ya hay un token en el Administrador de credenciales de Windows. */
+export function tokenExiste(): Promise<boolean> {
+  return invoke<boolean>("token_existe");
+}
+
+export function tokenGuardar(token: string): Promise<void> {
+  return invoke<void>("token_guardar", { token });
+}
+
+/**
+ * Borra el token del almacén de Windows, de verdad.
+ *
+ * **Antes esto no lo llamaba nadie**: "Olvidar token" sólo ponía en `false` un
+ * estado de React, así que la app volvía a pedirlo y la credencial seguía
+ * guardada en la máquina. El comando existía en Rust desde la fase 1.
+ */
+export function tokenBorrar(): Promise<void> {
+  return invoke<void>("token_borrar");
 }
 
 /**

@@ -55,6 +55,15 @@ pub enum ErrorDeApi {
     /// cuando el proveedor de IA rechaza el contenido o falla — el motor
     /// devuelve 422 en los dos casos, con el mensaje ya saneado.
     Invalida(String),
+    /// El motor vive pero no puede atender **este** pedido, y dice por qué.
+    ///
+    /// Hoy pasa en un solo caso y es el que la motiva: `GET`/`PATCH /entrega`
+    /// exigen token siempre, así que contra un despliegue sin `API_TOKEN`
+    /// contestan 503 con el texto de qué configurar. Sin esta categoría ese
+    /// cuerpo se intentaba deserializar como si fuera una respuesta buena --el
+    /// 503 se dejaba pasar-- y la ventana mostraba "error decoding response
+    /// body", escondiendo justamente el mensaje que servía.
+    NoDisponible(String),
     /// El motor contestó con otro código de error. Se informa el número.
     Respuesta(u16),
     /// Cualquier otra cosa de red.
@@ -65,6 +74,7 @@ impl std::fmt::Display for ErrorDeApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SinToken => write!(f, "Falta configurar el token del motor."),
+            Self::NoDisponible(detalle) => write!(f, "{detalle}"),
             Self::MotorCaido => write!(
                 f,
                 "El motor no responde. ¿Están levantados los contenedores?"
@@ -80,8 +90,19 @@ impl std::fmt::Display for ErrorDeApi {
 
 /// Lo que el motor manda en los cuerpos de error. Solo se le saca el
 /// `detalle`; si viniera con otra forma se ignora y queda el código pelado.
+///
+/// **El motor manda dos formas distintas, y hay que aceptar las dos.** Sus
+/// errores propios viajan como `{"detalle": ...}` —los arma él, en español— y
+/// los que levanta `HTTPException` de FastAPI viajan como `{"detail": ...}`,
+/// que es el nombre que pone la librería. Aceptar sólo uno no rompe nada
+/// visible: el parseo falla, se cae al texto de reemplazo, y la ventana muestra
+/// "el motor no explicó por qué" **encima de un mensaje que sí explicaba**.
+///
+/// Pasó con el 503 de `/entrega` contra un motor sin `API_TOKEN`, cuyo cuerpo
+/// decía exactamente qué configurar y no llegaba a verse.
 #[derive(serde::Deserialize)]
 struct CuerpoDeError {
+    #[serde(alias = "detail")]
     detalle: String,
 }
 
@@ -90,44 +111,83 @@ struct CuerpoDeError {
 /// **Los parámetros van por `query` y no concatenados a mano**: el cursor de
 /// `/sintesis` viene en base64, que trae `+`, `/` y `=`. Pegado crudo a la URL
 /// se rompe, y el motor devolvería un 422 por culpa nuestra.
+/// Qué significa un 401 según si mandamos credencial o no.
+///
+/// **Existe separada para poder probarla**, y reemplaza a un corte local que
+/// estaba mal pensado. Antes el cliente exigía token para todo y devolvía
+/// `SinToken` *antes de salir a la red*, salvo en `GET /`. Eso codificaba una
+/// suposición falsa: que el token siempre hace falta.
+///
+/// **Quién decide eso es el motor.** `API_TOKEN` es opcional del lado del
+/// motor, así que contra un despliegue con la API abierta la app tiene que
+/// funcionar sin credencial — y con el corte local no funcionaba ninguna
+/// pantalla: todas fallaban sin intentar. Lo encontró la prueba manual de un
+/// motor sin token, no la suite.
+///
+/// Ahora se manda lo que haya y el motor contesta. Un 401 sigue distinguiendo
+/// los dos casos, que piden cosas distintas de quien mira: **falta** la
+/// credencial (pegala) contra **no sirve** la que hay (cambiala).
+fn falta_o_no_sirve(habia_token: bool) -> ErrorDeApi {
+    if habia_token {
+        ErrorDeApi::NoAutorizado
+    } else {
+        ErrorDeApi::SinToken
+    }
+}
+
 async fn enviar<T: DeserializeOwned>(
     metodo: reqwest::Method,
     ruta: &str,
     parametros: &[(&str, String)],
+    cuerpo: Option<serde_json::Value>,
     timeout: Duration,
+    tolera_503: bool,
 ) -> Result<T, ErrorDeApi> {
-    let token = secretos::leer()
-        .map_err(ErrorDeApi::Red)?
-        .ok_or(ErrorDeApi::SinToken)?;
+    // Se manda lo que haya. Si el motor no pide credencial, contesta igual; si
+    // la pide y no la tenemos, contesta 401 y ahí se distingue. Ver
+    // `falta_o_no_sirve`.
+    let token = secretos::leer().map_err(ErrorDeApi::Red)?;
+    let habia_token = token.is_some();
 
     let cliente = reqwest::Client::builder()
         .timeout(timeout)
         .build()
         .map_err(|e| ErrorDeApi::Red(e.to_string()))?;
 
-    let respuesta = cliente
+    let mut pedido = cliente
         .request(metodo, format!("{BASE}{ruta}"))
-        .query(parametros)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| {
-            // Una conexión rechazada es el motor apagado, no un problema de red
-            // genérico. Distinguirlo es lo que deja mostrar "arrancá el motor"
-            // en vez de un mensaje que no dice qué hacer.
-            if e.is_connect() || e.is_timeout() {
-                ErrorDeApi::MotorCaido
-            } else {
-                ErrorDeApi::Red(e.to_string())
-            }
-        })?;
+        .query(parametros);
+    if let Some(token) = token {
+        pedido = pedido.bearer_auth(token);
+    }
+    if let Some(cuerpo) = cuerpo {
+        pedido = pedido.json(&cuerpo);
+    }
+
+    let respuesta = pedido.send().await.map_err(|e| {
+        // Una conexión rechazada es el motor apagado, no un problema de red
+        // genérico. Distinguirlo es lo que deja mostrar "arrancá el motor"
+        // en vez de un mensaje que no dice qué hacer.
+        if e.is_connect() || e.is_timeout() {
+            ErrorDeApi::MotorCaido
+        } else {
+            ErrorDeApi::Red(e.to_string())
+        }
+    })?;
 
     let estado = respuesta.status();
-    // El 503 de `GET /` NO es un error para nosotros: significa que la API está
-    // viva y la base todavía no. Es la señal que la fase 2 usa para mostrar
-    // "migrando", así que se deja pasar y la decide quien llama.
-    if !estado.is_success() && estado != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        return Err(traducir_error(estado, respuesta).await);
+    // **El 503 se tolera sólo donde significa otra cosa, y eso es `GET /`.**
+    // Ahí quiere decir "la API está viva y la base todavía no", que es la señal
+    // que la fase 2 usa para mostrar "migrando"; el cuerpo llega igual y lo
+    // decide quien llama.
+    //
+    // Antes esta excepción era global, y ese fue el bug: `GET /entrega` contra
+    // un motor sin `API_TOKEN` contesta 503 con el texto de qué configurar, se
+    // colaba como respuesta buena, y al intentar deserializarlo la ventana
+    // mostraba "error decoding response body" en vez del mensaje. Una excepción
+    // escrita para una ruta no puede quedar aplicándose a todas.
+    if !estado.is_success() && !(tolera_503 && estado == reqwest::StatusCode::SERVICE_UNAVAILABLE) {
+        return Err(traducir_error(estado, respuesta, habia_token).await);
     }
 
     respuesta
@@ -142,23 +202,36 @@ async fn enviar<T: DeserializeOwned>(
 /// que no existe se arregla refrescando la lista, un cursor inválido se arregla
 /// volviendo a la primera página, y un 500 no se arregla solo. Antes los tres
 /// caían en `Respuesta(u16)` y la ventana solo podía mostrar un número.
-async fn traducir_error(estado: reqwest::StatusCode, respuesta: reqwest::Response) -> ErrorDeApi {
+async fn traducir_error(
+    estado: reqwest::StatusCode,
+    respuesta: reqwest::Response,
+    habia_token: bool,
+) -> ErrorDeApi {
     match estado {
-        reqwest::StatusCode::UNAUTHORIZED => ErrorDeApi::NoAutorizado,
+        reqwest::StatusCode::UNAUTHORIZED => falta_o_no_sirve(habia_token),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+            ErrorDeApi::NoDisponible(detalle_o(respuesta, "el motor no explicó por qué").await)
+        }
         reqwest::StatusCode::NOT_FOUND => ErrorDeApi::NoEncontrado,
         reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
             // El `detalle` del motor ya viene saneado —es lo que se muestra en
             // la ventana— pero si el cuerpo no tiene la forma esperada no se
             // inventa nada.
-            let detalle = respuesta
-                .json::<CuerpoDeError>()
-                .await
-                .map(|c| c.detalle)
-                .unwrap_or_else(|_| "el motor no explicó por qué".into());
-            ErrorDeApi::Invalida(detalle)
+            ErrorDeApi::Invalida(detalle_o(respuesta, "el motor no explicó por qué").await)
         }
         otro => ErrorDeApi::Respuesta(otro.as_u16()),
     }
+}
+
+/// El `detail` que manda el motor, o el reemplazo si el cuerpo no tiene esa
+/// forma. **No se inventa nada**: el texto del motor ya viene saneado y es lo
+/// que se muestra, pero si no está, se dice.
+async fn detalle_o(respuesta: reqwest::Response, si_no: &str) -> String {
+    respuesta
+        .json::<CuerpoDeError>()
+        .await
+        .map(|c| c.detalle)
+        .unwrap_or_else(|_| si_no.into())
 }
 
 /// Un GET al motor, ya autenticado y deserializado al tipo que se pida.
@@ -166,21 +239,120 @@ pub async fn get<T: DeserializeOwned>(
     ruta: &str,
     parametros: &[(&str, String)],
 ) -> Result<T, ErrorDeApi> {
-    enviar(reqwest::Method::GET, ruta, parametros, TIMEOUT).await
+    enviar(reqwest::Method::GET, ruta, parametros, None, TIMEOUT, false).await
 }
 
-/// Un POST al motor. Sin cuerpo: los endpoints que la app usa toman todo por
-/// query string.
+/// El `GET /` del motor, que es la **única** ruta donde un 503 no es un error:
+/// significa que la API vive y la base todavía no.
+///
+/// Tiene verbo propio porque esa tolerancia es de esta ruta y de ninguna otra.
+/// Cuando era una excepción global, un 503 de cualquier otro endpoint se colaba
+/// como respuesta buena y reventaba al deserializar.
+pub async fn get_salud<T: DeserializeOwned>(ruta: &str) -> Result<T, ErrorDeApi> {
+    enviar(reqwest::Method::GET, ruta, &[], None, TIMEOUT, true).await
+}
+
+/// Un POST al motor, con los parametros por query string.
 pub async fn post<T: DeserializeOwned>(
     ruta: &str,
     parametros: &[(&str, String)],
 ) -> Result<T, ErrorDeApi> {
-    enviar(reqwest::Method::POST, ruta, parametros, TIMEOUT_LARGO).await
+    enviar(
+        reqwest::Method::POST,
+        ruta,
+        parametros,
+        None,
+        TIMEOUT_LARGO,
+        false,
+    )
+    .await
+}
+
+/// Un POST con cuerpo JSON. Lo usa el alta de modelos, que manda un objeto.
+///
+/// **Va con el timeout largo**: `POST /modelos` sondea el modelo contra el
+/// proveedor antes de guardarlo, asi que tarda lo que tarde el proveedor.
+pub async fn post_json<T: DeserializeOwned>(
+    ruta: &str,
+    cuerpo: serde_json::Value,
+) -> Result<T, ErrorDeApi> {
+    enviar(
+        reqwest::Method::POST,
+        ruta,
+        &[],
+        Some(cuerpo),
+        TIMEOUT_LARGO,
+        false,
+    )
+    .await
+}
+
+/// Un PATCH con los parametros por query string. Lo usa activar un modelo.
+///
+/// **Timeout largo, y no es de mas**: `PATCH /modelos/{id}?activo=true` sondea
+/// el proveedor antes de prender, para que el error salga cuando se aprieta el
+/// boton y no quince minutos despues en la sintesis.
+pub async fn patch<T: DeserializeOwned>(
+    ruta: &str,
+    parametros: &[(&str, String)],
+) -> Result<T, ErrorDeApi> {
+    enviar(
+        reqwest::Method::PATCH,
+        ruta,
+        parametros,
+        None,
+        TIMEOUT_LARGO,
+        false,
+    )
+    .await
+}
+
+/// Un PATCH con cuerpo JSON. Lo usa cambiar el destino de entrega.
+pub async fn patch_json<T: DeserializeOwned>(
+    ruta: &str,
+    cuerpo: serde_json::Value,
+) -> Result<T, ErrorDeApi> {
+    enviar(
+        reqwest::Method::PATCH,
+        ruta,
+        &[],
+        Some(cuerpo),
+        TIMEOUT,
+        false,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    #[test]
+    fn sin_token_guardado_un_401_significa_que_falta() {
+        // **Este es el caso que estaba roto.** Contra un motor con la API
+        // abierta, la app sin credencial tiene que funcionar; y si el motor SI
+        // la pide, el 401 tiene que decir "falta" y no "la que tenes no sirve".
+        assert!(matches!(falta_o_no_sirve(false), ErrorDeApi::SinToken));
+    }
+
+    #[test]
+    fn con_token_guardado_un_401_significa_que_no_sirve() {
+        // Piden acciones distintas de quien mira: pegar una credencial contra
+        // cambiar la que hay porque el .env del motor se movio.
+        assert!(matches!(falta_o_no_sirve(true), ErrorDeApi::NoAutorizado));
+    }
+
+    #[test]
+    fn se_leen_las_dos_formas_de_cuerpo_de_error() {
+        // El motor arma unos errores y FastAPI otros, con nombres distintos
+        // para el mismo campo. Leer sólo uno no rompe nada visible: se cae al
+        // texto de reemplazo y tapa el mensaje que servía.
+        let propio: CuerpoDeError = serde_json::from_str(r#"{"detalle":"en español"}"#).unwrap();
+        assert_eq!(propio.detalle, "en español");
+
+        let de_fastapi: CuerpoDeError = serde_json::from_str(r#"{"detail":"in english"}"#).unwrap();
+        assert_eq!(de_fastapi.detalle, "in english");
+    }
 
     #[test]
     fn las_categorias_viajan_con_su_etiqueta() {

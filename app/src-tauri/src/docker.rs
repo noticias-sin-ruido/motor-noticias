@@ -32,6 +32,14 @@ pub enum ErrorDocker {
     NoInstalado,
     /// El binario está, pero el demonio no responde: Docker Desktop apagado.
     DemonioCaido,
+    /// La carpeta configurada ya no sirve: se movió, se renombró, o el disco
+    /// donde estaba no está montado.
+    ///
+    /// **Tiene categoría propia porque tiene arreglo propio**, y es el único de
+    /// los tres que la ventana puede resolver sola: alcanza con volver a elegir
+    /// la carpeta. Metido en `Fallo` salía como un texto más entre los errores
+    /// de Docker, y quien mira no tenía cómo saber que el problema no era Docker.
+    RutaInvalida(String),
     /// Cualquier otro fallo, con el texto que lo explique. Es el cajón de lo
     /// que no tiene una acción propia del otro lado.
     Fallo(String),

@@ -3603,3 +3603,71 @@ Con ese marco, arreglar el ruteo entre contenedores habría sido resolver un art
 **Una validación retroactiva que conviene anotar.** Los dos destinos que arreglarían la conexión local —`sin-ruido-backend:3001` y `host.docker.internal:3011`— **pasan el validador nuevo**. Con la regla que el plan del punto 11 pedía originalmente (bloquear toda la red privada), los dos habrían sido rechazados y el motor no habría podido entregarle a su propio back-end por ninguna vía. La desviación que se tomó midiendo, y que la revisión con subagentes confirmó bien fundada, resultó ser lo único que deja esa puerta abierta.
 
 **Y un error propio, del que quedó registro en los números.** Buscando confirmar que el barrido cortaba, se disparó un `POST /deliver` **con el destino todavía apuntando al lugar muerto**. Corrió el barrido entero: las quemadas pasaron de 120 a 124. Parte de esos 4 los produjo esa llamada. Era exactamente lo que se estaba yendo a frenar, y el orden correcto era borrar el destino primero y recién después comprobar. Una sonda no es gratis cuando el sistema bajo prueba tiene efectos.
+
+### Bloques B, C, D y E: la interfaz completa, y los cinco defectos que sólo vio la prueba manual (09/09/2026)
+
+Cierran los cuatro huecos del checklist del operador y sacan el andamio. Con esto el punto 14 queda con una sola fase pendiente, la 9.
+
+**B — configuración y credenciales.** Pantalla de Ajustes nueva, que **funciona con el motor apagado** porque es donde se arregla que el motor no arranque. "Olvidar token" pasó a llamar a `token_borrar`, que estaba en Rust desde la fase 1 **sin que lo llamara nadie**: antes sólo ponía en `false` un estado de React y la credencial se quedaba viva. La ruta del repo se revalida **al usarla** y no sólo al guardarla, con categoría propia de error (`RutaInvalida`) porque es la única de las cuatro que se arregla desde la ventana.
+
+**Y el orden del arranque se invirtió**: primero la carpeta, después el token, y sólo si el motor dice que lo exige. Antes se pedía el token primero, y con eso la app no podía enterarse nunca de que no le hacía falta — para saberlo hay que preguntarle al motor, para preguntarle tiene que estar corriendo, y para arrancarlo hace falta la carpeta.
+
+**C — modelos.** Pestaña propia: lista, activar/apagar y alta. Relee la lista entera al activar en vez de tocar la fila local, porque prender uno apaga a los demás **del lado del motor**. El aviso dice que la credencial va al `.env` y hay que reiniciar el contenedor, y **no dice cuál variable**: esa regla se cerró después de una fuga.
+
+**D — la entrega.** Ajustes edita la URL, y `TarjetaAngulo` deja de mostrar "sin entregar" cuando no hay destino — pero **sigue mostrando "entregado"**. La asimetría es deliberada: lo segundo es un hecho del pasado y sigue siendo cierto; lo primero, sin destino, no describe una demora sino una entrega que nadie pidió.
+
+**E — limpieza.** El andamio se borró entero. Eso **apretó la guarda del puente**: `PERMITIDOS` pasó de cuatro archivos a **dos**, los envoltorios. `App.tsx` también salió, porque sus llamadas del token se mudaron a `motor.ts` — y mientras estuvo en la lista, un `invoke` suelto en la pantalla principal pasaba sin que la guarda dijera nada. Mutado en las dos direcciones y cazado en las dos.
+
+Lo único que se perdía al borrarlo era la sonda de la CSP, que **no se reemplazó por un test a propósito**: sólo dictamina en un ejecutable compilado, así que un test en CI diría siempre lo mismo y no significaría nada. Quedó como lista de verificación de release en `app/README.md`, con el fragmento entero.
+
+#### Los cinco defectos, y por qué ninguno lo agarró un test
+
+Todos aparecieron corriendo la app a mano contra el motor real. Vale enumerarlos porque comparten forma.
+
+**1. La ventana no se podía cerrar en las pantallas tempranas.** «Cargando», la carpeta y el token hacían cada una su propio `return`, y el `DialogoSalida` vivía sólo en el último. Rust hacía `prevent_close`, emitía el pedido, React lo guardaba, y no había nadie que lo dibujara. Como la bandeja tampoco ejecuta nada por su cuenta —le avisa a la ventana y la ventana hace el trabajo— su menú tampoco servía: **sólo se salía por el Administrador de tareas**.
+
+El comentario del propio archivo ya decía que el diálogo tenía que llegar «hasta antes de que haya token». El código lo desmentía. Se arregló con **un solo `return`**: las pantallas arman una variable y el diálogo se dibuja siempre al lado, así no queda ningún camino que lo saltee. Es de fase 6; lo que hizo el cambio de orden fue volverlo lo primero que ve una instalación nueva.
+
+**2. `SinToken` cortaba antes de salir a la red.** `api::enviar` exigía credencial para todos los comandos, así que contra un motor con la API abierta **ninguna pantalla funcionaba**: fallaban sin intentar. El error de fondo no fue el olvido sino la suposición — el cliente decidía que el token siempre hace falta, y **eso lo decide el motor**: `API_TOKEN` es opcional por diseño. Ahora se manda lo que haya y un 401 distingue "falta la credencial" de "la que hay no sirve", que piden acciones distintas.
+
+**3. El 503 se dejaba pasar globalmente.** La excepción estaba escrita para `GET /`, donde 503 significa "la API vive y la base todavía no". Aplicada a todas las rutas, el `{"detail": …}` de `GET /entrega` contra un motor sin `API_TOKEN` se colaba como respuesta buena y reventaba al deserializar: la ventana mostraba **"error decoding response body"** en vez del mensaje. Ahora la tolerancia es de esa ruta y de ninguna otra, con verbo propio, y el 503 es una categoría (`NoDisponible`) que lleva el texto del motor.
+
+**4. `detail` contra `detalle`.** El motor manda dos formas del mismo campo: sus errores propios en español, y los de `HTTPException` con el nombre que pone FastAPI. Leer sólo uno no rompía nada visible — el parseo fallaba en silencio y caía a "el motor no explicó por qué", **tapando el mensaje que sí explicaba**. Un `#[serde(alias)]` y un test con las dos formas.
+
+**5. `var(--marca)` no existe.** La variable de la marca es `--acento`. Un borde con una variable inexistente no se dibuja y **nadie se entera**. Atajado antes de que llegara a la pantalla.
+
+Los tres del medio son del mismo cliente HTTP, y ninguno se ve con tests: los de Rust corren contra un almacén que siempre tiene token, los del motor corren sin app del otro lado, y **el escenario "motor abierto + app sin credencial" —el de cualquiera que instale esto por primera vez— no existe en ninguna suite**. Es exactamente para eso que la lista manual valía la pena.
+
+Los dos primeros del cliente comparten además una forma más específica: **una excepción escrita para una ruta que quedó aplicándose a todas**. La segunda vez se arregló atándola a la ruta, con verbo propio, en vez de a una condición suelta.
+
+#### La entrega funcionó punta a punta, y de paso explicó lo del 8
+
+Con un destino alcanzable —`http://26.115.76.43:3011/webhook/sintesis`, una IP de VPN que **sí** se alcanza desde adentro del contenedor— se entregó todo el backlog:
+
+| | antes | después |
+|---|---|---|
+| entregadas | 388 | **569** |
+| pendientes | 37 | 0 |
+| agotadas | 144 | 0 |
+
+37 en el barrido normal y 144 con `forzar=true`, **cero rechazadas, cero fallidas**, en 2,1 y 7,8 segundos. Reenviar no duplicó nada, que confirma en la práctica el *upsert* por `sintesis.id` que promete el contrato. Y el scheduler siguió entregando las nuevas solo.
+
+Antes de configurar nada se comprobaron tres cosas, en este orden: que la URL pasa el validador, **que el contenedor la alcanza** —la pregunta que el 8 no se hizo— y que el secreto coincide. Lo tercero se probó **sin que el secreto saliera del contenedor**: se firmó un cuerpo cualquiera con la función del propio motor, y la respuesta pasó de `401 Invalid signature` a `400 Unsupported payload`. Que cambie de 401 a otra cosa es la prueba de que la firma se aceptó.
+
+**Y apareció una segunda causa de lo del 8 que no habíamos visto**: la ruta era `/webhooks/` en plural contra `/webhook/` singular. Un 404 es un 4xx, o sea `EntregaRechazada`, que **no se reintenta** y cuenta el intento. Parte de las 144 quemadas fue eso, no sólo el back-end apagado.
+
+#### Un modal antes de guardar el destino
+
+`secreto_configurado: true` **no significa que el secreto sirva para ese back-end**: sólo dice que la variable existe. Si no coinciden, cada síntesis vuelve rechazada, y un 4xx no espera — cuenta el intento y a los cinco barridos la síntesis se abandona.
+
+Así que guardar una URL pasa por un modal que lo dice, con el texto adaptado a si hay secreto o no. Va **antes** de guardar porque después no serviría: la entrega corre de fondo cada quince minutos, así que un destino mal apareado no se nota hasta que alguien lee un log. Y "Dejar de entregar" **no** pide confirmación: vaciar el destino no quema nada y ya tiene un nombre que dice lo que hace; un modal ahí sería el ruido que hace que se dejen de leer los que importan.
+
+Se evaluó y se descartó por ahora un **botón "probar destino"** que mandara una sonda firmada, que es lo que se hizo a mano. Es mejor de verdad —convierte un aviso en una comprobación— pero se apoya en **interpretar los códigos de error del otro equipo**: hoy funciona porque su 401 dice `Invalid signature`, y si eso cambia la comprobación miente en vez de fallar. Un *ping* de verdad hay que acordarlo en `webhook_contract.md`, que es documento compartido.
+
+#### Y un error propio con los secretos, que dejó una regla
+
+Para la prueba del motor sin `API_TOKEN` hice `cp .env .env.respaldo-prueba5` antes de comentar la variable. **El `.gitignore` sólo cubría `.env` exacto**, así que ese respaldo —con todas las credenciales reales— quedó como archivo sin rastrear en un repo **público**, mientras la sesión venía corriendo `git add -A` para preparar commits. No llegó a commitearse; que no pasara fue suerte, no diseño.
+
+Lo levantó el usuario, no yo. Quedó una regla —**los `.env` y los archivos con secretos los maneja él**; yo puedo leer la forma de un valor, nunca editarlos ni copiarlos— y el arreglo estructural para que no dependa de la disciplina: `.gitignore` pasó a `.env.*` con `!.env.example`, comprobado contra los cinco casos.
+
+De paso quedó una forma de trabajo mejor para lo que sí puedo hacer: cuando hizo falta el token para llamar a `/deliver`, el pedido salió **desde adentro del contenedor**, donde el entorno ya está cargado. El secreto nunca pasó por mi lado.
