@@ -3583,3 +3583,23 @@ Dos docstrings decían "507 síntesis" cuando la medición contra la base dio **
 El revisor de spec marcó que dos docstrings decían "507 síntesis" cuando la medición contra la base había dado **519**. Se corrigieron a 519 y, al verificar el downgrade veinte minutos después, la base ya iba por **532**: el scheduler había seguido corriendo.
 
 La conclusión no es "corregirlo mejor". Es que **un contador que se mueve cada quince minutos no va en un comentario de código**: el docstring quería transmitir escala —"son cientos de síntesis firmadas saliendo de golpe"— y para eso el número exacto no aporta nada y encima envejece solo. Los conteos con fecha viven acá, en el registro de decisiones, donde ser una foto de un momento es la función y no el defecto.
+
+### El motor es independiente del back-end, y el diagnóstico que lo destapó (08/09/2026)
+
+Cerrado el punto 11, se fue a diagnosticar por qué la entrega estaba fallando desde el 05/09. La respuesta cambió de forma dos veces, y las dos veces por medir en vez de suponer.
+
+**Primera hipótesis, y era la fácil**: el back-end está apagado. Cierto —`sin-ruido-backend` salió el 06/09 y la última entrega buena fue el 05/09 a las 23:53—, pero incompleta.
+
+**Lo que apareció al mirar la red**: el motor vive en `motor-noticias_default` (172.18.0.3) y el back-end vivía en `deployment_default`. Son dos redes bridge distintas. Adentro del contenedor del motor, `localhost` **es el contenedor**, así que `http://localhost:3011` —el destino que el `.env` traía y que la migración sembró— no puede alcanzar al back-end nunca. `host.docker.internal` tampoco: resuelve a una IPv6 (`fdc4:f303:9324::254`) sin ruta desde el contenedor. Y el back-end escucha en **3001** adentro; el 3011 sólo existe visto desde el host.
+
+De eso se deduce —y va marcado como deducción— que **las 388 entregas que sí funcionaron ocurrieron con el motor corriendo fuera de Docker**, desde el venv. Es la única explicación consistente.
+
+**Y entonces el usuario corrigió la pregunta entera**, que es lo que hizo que no se arreglara la cosa equivocada: el objetivo no es que el motor alcance a un back-end en la misma máquina. Es lo contrario. **El sistema va a vivir en un sitio y el motor en otro, y el motor tiene que servir sin back-end.** La entrega es un extra que ocurre sólo si hay webhook configurado.
+
+Con ese marco, arreglar el ruteo entre contenedores habría sido resolver un artefacto de desarrollo. Lo que quedó como trabajo real es otra cosa, y es el **punto 16** del backlog: hoy el motor tira material a los 75 minutos de back-end caído (5 barridos de 15), y eso contradice de frente "el motor es independiente". Medido: 0 entregadas en las últimas 10 corridas, 40 síntesis quemadas en esas 10, 124 acumuladas.
+
+**Mitigación aplicada**: se borró el destino con `PATCH /entrega` — el primer uso real de lo que el punto 11 vino a habilitar, y sin editar un `.env` ni reconstruir un contenedor. Sin destino el barrido corta antes de contar intentos: el mismo `POST /deliver` que se colgaba 60 segundos pasó a contestar en 0,3.
+
+**Una validación retroactiva que conviene anotar.** Los dos destinos que arreglarían la conexión local —`sin-ruido-backend:3001` y `host.docker.internal:3011`— **pasan el validador nuevo**. Con la regla que el plan del punto 11 pedía originalmente (bloquear toda la red privada), los dos habrían sido rechazados y el motor no habría podido entregarle a su propio back-end por ninguna vía. La desviación que se tomó midiendo, y que la revisión con subagentes confirmó bien fundada, resultó ser lo único que deja esa puerta abierta.
+
+**Y un error propio, del que quedó registro en los números.** Buscando confirmar que el barrido cortaba, se disparó un `POST /deliver` **con el destino todavía apuntando al lugar muerto**. Corrió el barrido entero: las quemadas pasaron de 120 a 124. Parte de esos 4 los produjo esa llamada. Era exactamente lo que se estaba yendo a frenar, y el orden correcto era borrar el destino primero y recién después comprobar. Una sonda no es gratis cuando el sistema bajo prueba tiene efectos.

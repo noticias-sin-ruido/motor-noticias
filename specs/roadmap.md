@@ -516,3 +516,34 @@ Escuchar es el modo natural de consumir noticias mientras se hace otra cosa —m
 - **Qué se lee y qué no.** `resumen_neutro` sí. La comparativa por medio es una tabla y leída en voz corrida se vuelve incomprensible; si se incluye, hay que redactarla distinta para el oído.
 - **Esto no reemplaza un lector de pantalla.** Es una función de consumo, no de accesibilidad: quien usa NVDA o Narrador ya tiene el texto, y agregar una segunda voz encima estorba. Los dos usos conviven pero no son el mismo.
 - **Empezar y cortar tienen que ser evidentes.** Una voz que arranca sola, o que no se puede parar rápido, es peor que no tenerla.
+
+### 16. Un back-end caído no puede costar material — separar "no está" de "no le gusta"
+
+**El motor tiene que servir sin back-end**, y esa es la decisión de arquitectura que ordena este punto: el sistema va a vivir en un sitio y el motor en otro, así que la entrega es un extra que ocurre **sólo si hay webhook configurado**, no una dependencia. Un back-end apagado es un estado normal, no un incidente.
+
+Hoy el motor no se comporta así, y está medido.
+
+`WEBHOOK_MAX_INTENTOS` son **5 barridos de 15 minutos: 75 minutos**. Pasado ese punto la síntesis sale del barrido y **no se reintenta nunca más** salvo que alguien llame a mano a `POST /deliver?forzar=true`. O sea que un back-end en otro sitio, caído poco más de una hora —lo que dura un deploy con problemas—, cuesta material de forma permanente.
+
+Lo medido el 08/09/2026, con el back-end apagado desde el 06/09:
+
+| corridas | entregadas | fallidas por corrida | agotadas |
+|---|---|---|---|
+| últimas 10 | **0** | ~32 | **40 quemadas** |
+
+Y 124 acumuladas en total. Cada corrida sumaba más, y encima gastaba ~32 requests condenados de antemano.
+
+**Mitigación aplicada, que no es el arreglo**: se borró el destino con `PATCH /entrega`. Sin destino el barrido corta antes de contar intentos, así que lo nuevo se acumula entregable en vez de quemarse — el mismo `POST /deliver` que se colgaba 60 s pasó a contestar en 0,3 s. Es exactamente el modelo declarado ("se envía sólo si el webhook está establecido") y se revierte con otro `PATCH`.
+
+**El arreglo de fondo: distinguir las dos cosas que hoy cuentan igual.**
+
+- **"El back-end no está"** (falla de red, timeout, conexión rechazada). No es información sobre esta síntesis. Corresponde **cortar el barrido en la primera** —no tiene sentido intentar las otras 31 contra un servidor que no contesta— y **no contar el intento**. Se reintenta la corrida siguiente, indefinidamente, que es lo que "el motor es independiente" significa.
+- **"Esta síntesis no le gusta"** (un 4xx, que ya tiene su propia excepción, `EntregaRechazada`). Eso sí es información sobre la fila: cuenta el intento, agota y avisa, como hoy.
+
+Se descartó **subir `WEBHOOK_MAX_INTENTOS`**: es una línea, pero deja el mismo diseño contra el reloj —el contador sigue siendo por síntesis— así que un back-end caído tres días quema todo igual, sólo que más tarde.
+
+**Cuidados:**
+
+- **El aviso tiene que seguir sirviendo.** Si nada agota nunca por caída, el mail de "síntesis sin entregar" deja de dispararse; hace falta que alguien avise que hace N corridas que no se entrega nada, sin mandar un mail por hora. `alerts.enviar_alerta` ya tiene cooldown por clave.
+- **Las 124 quemadas se recuperan con `POST /deliver?forzar=true`** cuando haya back-end real. Es seguro: el contrato con el otro equipo dice que el receptor hace *upsert* por `sintesis.id`, así que reenviar no duplica.
+- **`specs/webhook_contract.md` no se toca**: esto no cambia el payload ni la firma, sólo cuándo se reintenta.
