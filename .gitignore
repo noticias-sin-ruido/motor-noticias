@@ -8,6 +8,16 @@ __pycache__/
 
 # Variables de entorno locales
 .env
+# **Cualquier variante, no solo `.env` exacto.** El patron de arriba matchea el
+# nombre justo y nada mas, asi que un `.env.respaldo`, un `.env.bak` o un
+# `.env.local` quedaban SIN ignorar -- y este repo es publico. Paso: una prueba
+# manual necesito sacar `API_TOKEN` un rato, se hizo una copia de seguridad al
+# lado, y ese archivo con todos los secretos reales aparecio como no rastreado
+# mientras la sesion venia corriendo `git add -A`. No llego a commitearse.
+.env.*
+# El ejemplo si va: son placeholders y es lo que documenta que variables hacen
+# falta. La negacion tiene que ir DESPUES del patron que la incluye.
+!.env.example
 
 # Reportes de coverage (mission.md pide 80% mínimo, pero el reporte no se versiona)
 .coverage
