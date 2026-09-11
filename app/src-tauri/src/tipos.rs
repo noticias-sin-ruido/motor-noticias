@@ -64,6 +64,14 @@ pub struct Salud {
     pub database: String,
     pub environment: String,
     pub hora_local: String,
+    /// La version del motor que esta corriendo.
+    ///
+    /// **Motor y ventana se numeran juntos desde la 1.2.0.** No son dos
+    /// productos: la cabina no aplica sobre ninguna otra cosa que el motor, asi
+    /// que una version nueva incluye a los dos. Este campo es con lo que la
+    /// ventana comprueba que el par no derivo -- un par desparejo no se rompe,
+    /// se comporta raro, y eso es peor que un error.
+    pub version: String,
     /// Si el motor exige `Authorization` en el resto de sus endpoints.
     ///
     /// `API_TOKEN` es opcional del lado del motor: sin definir, la API queda
@@ -324,6 +332,147 @@ pub struct RespuestaAltaModelo {
     pub status: String,
     pub modelo: ModeloPublico,
     pub en_uso: String,
+}
+
+// --- GET /medios, POST /medios, PUT /medios/{id}, PATCH /medios/{id} -------
+
+/// Un medio del roster.
+///
+/// **Acá no hay nada que filtrar**, a diferencia de `ModeloPublico`: un medio no
+/// guarda credenciales, sólo datos que el propio medio publica de sí mismo.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct MedioPublico {
+    pub id: Id,
+    pub nombre: String,
+    pub url_base: String,
+    pub feeds_rss: Vec<String>,
+    pub activo: bool,
+    pub idioma: String,
+    pub pais: Option<String>,
+    pub logo_url: Option<String>,
+    /// Si el motor va a buscar a la página el cuerpo que el medio **eligió no
+    /// publicar** en su feed. Se muestra pero no se edita desde acá: es una
+    /// decisión aparte del operador, no un dato del medio.
+    pub extraer_por_url: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaMedios {
+    pub status: String,
+    pub activos: u32,
+    pub total: u32,
+    pub medios: Vec<MedioPublico>,
+}
+
+/// Qué encontró el motor del otro lado de **un** feed.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct FeedSondeado {
+    pub url: String,
+    pub items: u32,
+    /// Cuántos de esos items traen el cuerpo en el feed. Si es cero, el medio
+    /// publica titulares y el cuerpo hay que ir a buscarlo a la página.
+    pub con_cuerpo: u32,
+    /// Qué ventana de tiempo cubre lo que trajo. Muy grande huele a archivo y
+    /// no a feed vivo.
+    pub ventana_horas: Option<f64>,
+}
+
+/// Qué dice el `robots.txt` del medio.
+///
+/// **Es criterio del operador y no un bloqueo**, y por eso viaja: el motor deja
+/// dar de alta un medio con robots restrictivo, pero quien decide tiene que
+/// poder verlo antes de decidir.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RobotsSondeado {
+    pub legible: bool,
+    pub permite_extraer: bool,
+    pub detalle: String,
+}
+
+/// El informe del sondeo: lo que hay del otro lado, antes de guardar nada.
+///
+/// **Es lo que convierte el alta en una decisión.** Sin esto, dar de alta un
+/// medio es "registrá esto"; con esto es "esto es lo que encontramos, decidí".
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Sondeo {
+    pub items_totales: u32,
+    pub items_con_cuerpo: u32,
+    pub feeds: Vec<FeedSondeado>,
+    pub robots: RobotsSondeado,
+}
+
+/// Lo que devuelven el alta y la edición de un medio.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaMedio {
+    pub status: String,
+    pub medio: MedioPublico,
+    /// `None` cuando no hubo sondeo. Pasa al editar sólo el nombre: corregir un
+    /// tipeo no puede fallar porque el servidor del medio esté caído.
+    pub sondeo: Option<Sondeo>,
+    /// Lo que el operador debería mirar y **no** impide guardar: un feed sin
+    /// cuerpo, un robots restrictivo, una ventana que parece archivo.
+    pub avisos: Vec<String>,
+}
+
+// --- GET /medios/panel -----------------------------------------------------
+
+/// De qué tema son los clusters donde un medio quedó solo.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TopicoDeSolos {
+    pub topico: String,
+    pub clusters: u32,
+}
+
+/// Con quién se junta un medio, y cuándo no.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct FilaDelPanel {
+    pub medio_id: Id,
+    pub nombre: String,
+    pub activo: bool,
+    pub clusters: u32,
+    /// En cuántos clusters es el **único** medio. Eso no se sintetiza nunca:
+    /// material que se produce y no se publica.
+    pub solo: u32,
+    pub con_el_minimo: u32,
+    pub sobre_el_minimo: u32,
+    /// Ordenado de mayor a menor. Es para leer de arriba hacia abajo.
+    pub topicos_cuando_esta_solo: Vec<TopicoDeSolos>,
+    /// Los que no tienen sección derivable de la URL. Van aparte y **no** en un
+    /// "otros", que los escondería adentro de un número.
+    pub sin_topico_cuando_esta_solo: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TotalesDeClusters {
+    pub total: u32,
+    pub solo: u32,
+    pub con_el_minimo: u32,
+    pub sobre_el_minimo: u32,
+}
+
+/// El panel de composición: qué medio conviene sumar.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaPanel {
+    pub status: String,
+    /// Cuántos medios distintos necesita un cluster para sintetizarse.
+    ///
+    /// **Viaja en vez de estar escrito en la ventana.** La pantalla dice "esto
+    /// no se puede sintetizar" sobre la columna `solo`, y esa frase sólo es
+    /// cierta si el balde se calculó contra este número. Si el motor lo cambia,
+    /// la etiqueta sigue siendo verdad sin tocar la interfaz.
+    pub minimo_para_sintetizar: u32,
+    pub clusters: TotalesDeClusters,
+    pub medios: Vec<FilaDelPanel>,
 }
 
 // --- GET /entrega y PATCH /entrega -----------------------------------------
@@ -656,6 +805,7 @@ mod pruebas {
         // la app se caiga. Solo renombrar o borrar tiene que doler.
         let con_extra = r#"{"status":"ok","database":"ok","environment":"development",
                             "hora_local":"2026-09-06T20:48:32-03:00",
+                            "version":"1.1.0",
                             "exige_token":true,"entrega_configurada":false,
                             "campo_nuevo":42}"#;
         let s: Salud = serde_json::from_str(con_extra).unwrap();

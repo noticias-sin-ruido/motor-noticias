@@ -273,6 +273,50 @@ def validar_url_de_feed(url: str) -> str:
 # `gente.com.ar` manda a `revistagente.com`). Un feed que necesite más de
 # cinco está mal configurado, y el tope es además lo que corta un bucle que
 # no repita URLs exactas.
+def host_normalizado(url: str) -> str:
+    """
+    El host de una URL, en minúsculas y sin el `www.` de adelante.
+
+    `www.gente.com.ar` y `gente.com.ar` son el mismo lugar y tratarlos como
+    distintos sólo produciría una advertencia que nadie merece.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def hosts_ajenos(urls_nuevas: Sequence[str], urls_conocidas: Sequence[str]) -> List[str]:
+    """
+    De `urls_nuevas`, los hosts que no aparecen en `urls_conocidas`.
+
+    **Es la guarda contra apuntar un medio a contenido que no es suyo**, y el
+    daño que evita no es técnico sino de atribución: si a "La Nación" se le
+    cambia el feed por el de otra redacción, las síntesis dicen que La Nación
+    publicó algo que publicó otro, **firmado**, y el back-end lo recibe como
+    legítimo. Es la misma familia que el destino de entrega — redirigir el
+    producto, no filtrar una credencial.
+
+    **Compara hosts y no dominios registrables, y es una decisión medida.** La
+    regla natural sería "el feed tiene que vivir en el dominio del medio", pero
+    de los ocho medios cargados el 11/09/2026 **uno no la cumple**: Revista
+    Gente declara `revistagente.com` y sirve su RSS desde `gente.com.ar`. Una
+    regla dura habría rechazado un medio que funciona. Además, sin librería de
+    sufijos públicos, `lanacion.com.ar` no se puede reducir a su dominio
+    registrable sin adivinar.
+
+    Por eso esto **no bloquea**: devuelve los hosts nuevos para que quien llama
+    pida una confirmación explícita que los nombre. Un cambio de ruta en el
+    mismo host pasa sin ruido; un host distinto —incluido un subdominio, que
+    también puede ser de otro— se pregunta.
+    """
+    conocidos = {host_normalizado(u) for u in urls_conocidas}
+    ajenos: List[str] = []
+    for url in urls_nuevas:
+        host = host_normalizado(url)
+        if host and host not in conocidos and host not in ajenos:
+            ajenos.append(host)
+    return ajenos
+
+
 MAX_SALTOS_REDIRECT = 5
 
 

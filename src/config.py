@@ -2,6 +2,17 @@ from typing import Dict, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# La version del producto, y su unica fuente. La declara `FastAPI(version=...)`,
+# la devuelve `GET /` y con ella la cabina comprueba que la ventana y el motor
+# sean el mismo par -- desde la 1.2.0 viajan juntos y un par desparejo es un
+# estado invalido, no una molestia.
+#
+# **Es una constante de modulo y NO un campo de Settings, a proposito.** Un
+# `Settings` se lee del entorno, asi que la version seria algo que el despliegue
+# puede sobrescribir: un motor podria decir que es otro del que es, y lo unico
+# que este numero tiene que hacer es no mentir. No se configura, se compila.
+VERSION = "1.1.0"
+
 
 class Settings(BaseSettings):
     """Configuración de la aplicación, cargada desde variables de entorno o desde el archivo .env."""

@@ -2,6 +2,16 @@
 
 export type Salud = { status: string, database: string, environment: string, hora_local: string, 
 /**
+ * La version del motor que esta corriendo.
+ *
+ * **Motor y ventana se numeran juntos desde la 1.2.0.** No son dos
+ * productos: la cabina no aplica sobre ninguna otra cosa que el motor, asi
+ * que una version nueva incluye a los dos. Este campo es con lo que la
+ * ventana comprueba que el par no derivo -- un par desparejo no se rompe,
+ * se comporta raro, y eso es peor que un error.
+ */
+version: string, 
+/**
  * Si el motor exige `Authorization` en el resto de sus endpoints.
  *
  * `API_TOKEN` es opcional del lado del motor: sin definir, la API queda

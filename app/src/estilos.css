@@ -168,7 +168,24 @@ select {
 
 label { display: block; font-size: 0.85rem; color: var(--tinta-suave); margin-bottom: 0.4rem; }
 
-input[type="password"], input[type="text"] {
+/* **`input:not([type])` es la mitad que faltaba.** Antes esto decía
+   `input[type="text"]`, y un selector de atributo no matchea un `<input>` sin
+   `type` -- que es como quedaron escritos casi todos los campos de Medios,
+   Modelos y Ajustes. Esos se quedaban con el estilo del navegador: en tema
+   oscuro, blanco puro sobre la tarjeta azul. Una cinta blanca que nadie
+   eligió.
+
+   Se listan los tipos **por inclusión** en vez de excluir checkbox y radio con
+   `:not()`: aquella forma sube la especificidad a 0,3,1 y pisaba las reglas del
+   buscador de Medios (0,2,1), que le sacan el mono y le fijan la altura. Así
+   queda en 0,1,1, igual que antes.
+
+   `textarea` entra acá y no aparte: es el mismo campo con más renglones, y
+   tenerlo en otra regla es pedir que se desincronicen. */
+input:not([type]),
+input[type="text"], input[type="password"], input[type="search"],
+input[type="url"], input[type="email"],
+textarea {
   width: 100%;
   font-family: var(--mono);
   font-size: 0.9rem;
@@ -179,7 +196,11 @@ input[type="password"], input[type="text"] {
   color: var(--tinta);
   user-select: text;
 }
-input:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--acento); outline-offset: 1px;
+}
+/* El textarea hereda todo lo de arriba; sólo le hace falta poder respirar. */
+textarea { min-height: 4.5rem; resize: vertical; line-height: 1.5; }
 
 button {
   font-family: var(--sans);
@@ -526,3 +547,100 @@ button.chico {
 .salidas { display: flex; flex-direction: column; gap: 0.3rem; }
 .salidas button { align-self: flex-start; }
 .salidas .ayuda { margin-bottom: 0.9rem; }
+
+/* --- La pantalla de medios (bloque F) ---------------------------------- */
+
+/* El informe del sondeo: lo que el motor encontró antes de guardar. Va hundido
+   para que se lea como una respuesta del motor y no como parte del formulario. */
+.sondeo {
+  margin-top: 0.9rem; padding: 0.7rem 0.8rem;
+  background: var(--hundido); border: 1px solid var(--filete); border-radius: 3px;
+}
+.lista-feeds { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.4rem; }
+.lista-feeds code { font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; }
+.lista-feeds li { display: flex; flex-direction: column; gap: 0.15rem; }
+
+/* Los avisos del sondeo **no** son errores: no impiden guardar, son criterio de
+   quien decide. Por eso llevan el color de alerta y no el de error. */
+.avisos { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+.avisos li {
+  font-size: 0.82rem; color: var(--alerta);
+  border-left: 2px solid var(--alerta); padding-left: 0.5rem;
+}
+
+/* --- La pantalla de medios (bloque F) ---------------------------------- */
+
+.medios-cabecera h2 { margin-bottom: 0.2rem; }
+
+/* Los dos controles comparten una altura declarada en vez de depender de que
+   sus paddings coincidan: `select` e `input` los calculan distinto, y el
+   `margin-bottom` que `select` trae del formulario los desalineaba. */
+.medios-controles {
+  display: flex; gap: 0.6rem; align-items: center;
+  margin: 0.9rem 0 0.2rem; flex-wrap: wrap;
+}
+.medios-controles input[type="search"],
+.medios-controles select {
+  height: 2.4rem; margin: 0; font-size: 0.9rem;
+}
+/* Buscar es escribir prosa, no un dato: el mono que heredan los otros campos
+   acá estorba. */
+.medios-controles input[type="search"] {
+  flex: 1 1 16rem; min-width: 0; font-family: var(--sans);
+}
+.medios-controles select { width: auto; flex: 0 0 auto; }
+
+.lista-medios { list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: 0.15rem; }
+.lista-medios .medio {
+  padding: 0.85rem 0; border-top: 1px solid var(--filete);
+  display: grid; gap: 0.45rem;
+}
+/* Un medio apagado no se esconde: sigue contando su historia, y se apaga
+   justamente después de mirar estos números. Se atenúa, no se oculta. */
+.lista-medios .medio.apagado h3,
+.lista-medios .medio.apagado .medio-numeros { color: var(--tinta-tenue); }
+
+.medio-titulo { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.medio-titulo h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+.medio-titulo .acciones { margin: 0 0 0 auto; }
+.medio-estado { font-size: 0.78rem; color: var(--tinta-tenue); }
+
+.medio-feeds { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+.medio-feeds code {
+  font-family: var(--mono); font-size: 0.78rem;
+  color: var(--tinta-tenue); overflow-wrap: anywhere;
+}
+
+.medio-nota, .medio-vacio { margin: 0; font-size: 0.8rem; color: var(--tinta-tenue); }
+
+.medio-rendimiento { display: grid; gap: 0.3rem; }
+.barra {
+  height: 4px; background: var(--hundido); border-radius: 2px; overflow: hidden;
+  max-width: 22rem;
+}
+.barra-relleno { display: block; height: 100%; background: var(--alerta); }
+.barra-relleno[data-proporcion="0"] { width: 0%; }
+.barra-relleno[data-proporcion="1"] { width: 5%; }
+.barra-relleno[data-proporcion="2"] { width: 10%; }
+.barra-relleno[data-proporcion="3"] { width: 15%; }
+.barra-relleno[data-proporcion="4"] { width: 20%; }
+.barra-relleno[data-proporcion="5"] { width: 25%; }
+.barra-relleno[data-proporcion="6"] { width: 30%; }
+.barra-relleno[data-proporcion="7"] { width: 35%; }
+.barra-relleno[data-proporcion="8"] { width: 40%; }
+.barra-relleno[data-proporcion="9"] { width: 45%; }
+.barra-relleno[data-proporcion="10"] { width: 50%; }
+.barra-relleno[data-proporcion="11"] { width: 55%; }
+.barra-relleno[data-proporcion="12"] { width: 60%; }
+.barra-relleno[data-proporcion="13"] { width: 65%; }
+.barra-relleno[data-proporcion="14"] { width: 70%; }
+.barra-relleno[data-proporcion="15"] { width: 75%; }
+.barra-relleno[data-proporcion="16"] { width: 80%; }
+.barra-relleno[data-proporcion="17"] { width: 85%; }
+.barra-relleno[data-proporcion="18"] { width: 90%; }
+.barra-relleno[data-proporcion="19"] { width: 95%; }
+.barra-relleno[data-proporcion="20"] { width: 100%; }
+
+.medio-numeros { margin: 0; font-size: 0.8rem; color: var(--tinta-suave); }
+.medio-numeros b { color: var(--alerta); font-weight: 600; }
+.medio-temas { color: var(--tinta-tenue); }

@@ -19,6 +19,9 @@ import type { RespuestaClusters } from "./bindings/RespuestaClusters";
 import type { RespuestaDetalle } from "./bindings/RespuestaDetalle";
 import type { RespuestaActivarModelo } from "./bindings/RespuestaActivarModelo";
 import type { RespuestaAltaModelo } from "./bindings/RespuestaAltaModelo";
+import type { RespuestaMedios } from "./bindings/RespuestaMedios";
+import type { RespuestaMedio } from "./bindings/RespuestaMedio";
+import type { RespuestaPanel } from "./bindings/RespuestaPanel";
 import type { RespuestaEntrega } from "./bindings/RespuestaEntrega";
 import type { RespuestaModelos } from "./bindings/RespuestaModelos";
 import type { RespuestaPipeline } from "./bindings/RespuestaPipeline";
@@ -178,6 +181,77 @@ export function sintetizarCluster(
   );
 }
 
+/** El roster de medios, activos y apagados. */
+export function listarMedios(): Promise<RespuestaMedios> {
+  return invoke<RespuestaMedios>("medios_listar");
+}
+
+/**
+ * Prende o apaga un medio. **Apagar no borra nada** — conserva noticias,
+ * clusters y sintesis ya entregadas.
+ *
+ * Prender tarda, porque el motor re-sondea los feeds antes: entre el alta y hoy
+ * el medio pudo mudar su RSS.
+ */
+export function activarMedio(
+  medioId: number,
+  activo: boolean,
+): Promise<unknown> {
+  return invoke<unknown>("medio_activar", { medioId, activo });
+}
+
+/**
+ * Da de alta un medio. El motor **sondea los feeds antes de guardar**, asi que
+ * lo que vuelve dice qué hay del otro lado y no sólo "listo".
+ */
+export function altaMedio(datos: {
+  nombre: string;
+  urlBase: string;
+  feedsRss: string[];
+}): Promise<RespuestaMedio> {
+  return invoke<RespuestaMedio>("medio_alta", {
+    nombre: datos.nombre,
+    urlBase: datos.urlBase,
+    feedsRss: datos.feedsRss,
+  });
+}
+
+/**
+ * Con quien se junta cada medio, y en cuantos clusters queda solo.
+ *
+ * Tarda mas que listar: del otro lado el motor recorre todas las noticias
+ * agrupadas. Por eso la pantalla lo pide aparte y no junto con la lista.
+ */
+export function panelDeMedios(): Promise<RespuestaPanel> {
+  return invoke<RespuestaPanel>("medios_panel");
+}
+
+/**
+ * Cambia los datos de un medio que ya existe, porque los medios mudan sus feeds.
+ *
+ * **`confirmarDominioNuevo` arranca en `false` siempre.** Si lo que se guarda
+ * apunta a un host que el medio no tenia, el motor frena con
+ * `requiere_confirmacion` y nombra los hosts; la pantalla los muestra y recien
+ * ahi se reintenta con la bandera. Que cueste un viaje mas es el punto: lo que
+ * esta guarda evita es una sintesis **firmada** atribuyendo a un medio algo que
+ * publico otro.
+ */
+export function editarMedio(datos: {
+  medioId: number;
+  nombre: string;
+  urlBase: string;
+  feedsRss: string[];
+  confirmarDominioNuevo: boolean;
+}): Promise<RespuestaMedio> {
+  return invoke<RespuestaMedio>("medio_editar", {
+    medioId: datos.medioId,
+    nombre: datos.nombre,
+    urlBase: datos.urlBase,
+    feedsRss: datos.feedsRss,
+    confirmarDominioNuevo: datos.confirmarDominioNuevo,
+  });
+}
+
 /**
  * El texto que se le muestra a quien mira. **Cada categoría dice qué hacer**,
  * que es para lo que el motor las devuelve cerradas en vez de mandar un string.
@@ -200,6 +274,16 @@ export function mensajeDeApi(error: ErrorDeApi): string {
       return "El motor no encontró eso. Puede haberse borrado; probá refrescar.";
     case "invalida":
       return `El motor rechazó el pedido: ${error.detalle}`;
+    // El pedido choca con algo que ya existe, y el motor dice con qué. Su texto
+    // va tal cual: "ya existe un medio 'X'" es más útil que cualquier
+    // reformulación nuestra.
+    case "conflicto":
+      return error.detalle;
+    // El motor **no hizo nada** y quiere que alguien mire antes. Acá el mensaje
+    // solo no alcanza —la pantalla tiene que ofrecer confirmar y reintentar—
+    // pero si este texto llega a verse suelto, tiene que decir qué pasa.
+    case "requiere_confirmacion":
+      return error.detalle.detalle;
     case "respuesta":
       return `El motor respondió ${error.detalle}.`;
     case "red":
@@ -218,4 +302,19 @@ export function mensajeDeRechazo(e: unknown): string {
     return mensajeDeApi(e as ErrorDeApi);
   }
   return String(e);
+}
+
+/**
+ * Los hosts que el motor quiere que alguien mire, o `null` si este rechazo no
+ * es ese.
+ *
+ * **Se pregunta por el campo y no por el texto.** El mensaje es para leer; la
+ * decisión de qué pantalla mostrar no puede depender de cómo está redactado.
+ */
+export function hostsPorConfirmar(e: unknown): string[] | null {
+  if (typeof e !== "object" || e === null || !("tipo" in e)) return null;
+  const error = e as ErrorDeApi;
+  return error.tipo === "requiere_confirmacion"
+    ? error.detalle.hosts_nuevos
+    : null;
 }

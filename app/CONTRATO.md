@@ -44,7 +44,7 @@ structs de Rust. Así el contrato no puede derivar de lo que la app realmente
 exige: si alguien agrega un campo obligatorio en `tipos.rs` y no lo trae acá, la
 suite del motor falla.
 
-Cuatro notas sobre casos que no son obvios:
+Seis notas sobre casos que no son obvios:
 
 - **`GET /` informa dos booleanos que la cabina no puede deducir**:
   `exige_token`, porque `API_TOKEN` es opcional del lado del motor y sin este
@@ -53,6 +53,23 @@ Cuatro notas sobre casos que no son obvios:
   dónde ir. **Son booleanos y nunca la URL**: esta ruta contesta sin credencial,
   y un webhook suele llevar un identificador que no es público. Hay un test que
   lo fija (`test_la_salud_no_filtra_la_url_del_destino`).
+
+- **`/medios/panel` es un informe y no la lista**, y por eso es una ruta aparte
+  en vez de campos de más en `GET /medios`: del otro lado el motor recorre todas
+  las noticias agrupadas para contar con quién se junta cada medio. Otro costo y
+  otra frecuencia de uso, así que la pantalla lo pide a pedido y no al abrir.
+  **`minimo_para_sintetizar` viaja** en vez de estar escrito en la ventana: la
+  app dice "esto no se puede sintetizar" sobre la columna `solo`, y esa frase
+  sólo es cierta si el balde se calculó contra ese número.
+
+- **`GET /` también informa `version`, y con eso la cabina se verifica a sí
+  misma.** Motor y ventana se numeran juntos desde la 1.2.0 — no son dos
+  productos, la cabina no aplica sobre ninguna otra cosa que el motor — así que
+  la app compara esta versión contra la suya y avisa si el par derivó. Sale en
+  ruta abierta y no agrega superficie: ya se publica en `/docs` y en el esquema
+  OpenAPI. Y **no es configurable por entorno** a propósito (es una constante en
+  `src/config.py`, no un campo de `Settings`): lo único que este número tiene
+  que hacer es no mentir.
 
 - **`GET /sintesis/{id}` viene aplanado.** `DetalleSintesis` usa
   `#[serde(flatten)]` sobre `ResumenSintesis`, así que los campos del resumen y
@@ -65,7 +82,7 @@ Cuatro notas sobre casos que no son obvios:
   dos columnas y exigirlos todos ataría la app a que nadie agregue una columna
   nunca.
 
-### Cuatro rutas que el contrato vigila pero no invoca
+### Seis rutas que el contrato vigila pero no invoca
 
 `GET`/`PATCH /entrega` y `PATCH`/`POST /modelos` llevan `solo_forma` en el
 diccionario. El guardián de deriva **sí** las cubre —renombrar un campo de esas
@@ -76,7 +93,9 @@ tiene su motivo:
   abierta a propósito, así que ahí contestarían `503`;
 - las de `/modelos` **sondean al proveedor** antes de prender o guardar, y esta
   suite no sale a la red ni mockea proveedores: eso es trabajo de
-  `tests/test_modelos.py`.
+  `tests/test_modelos.py`;
+- `POST`/`PUT /medios` **sondean los feeds** por el mismo motivo, y su red la
+  mockea `tests/test_medios.py`.
 
 ### Lo que el contrato NO cubre, y no puede
 
@@ -106,7 +125,6 @@ El test, que lee `openapi.json`, las encontró en la primera corrida.
 
 | método | ruta | por qué no |
 |---|---|---|
-| `GET` | `/medios` | la consola de medios quedó fuera de la v1 |
 | `GET` | `/search` | la búsqueda semántica no tiene lugar en las dos pantallas |
 | `POST` | `/cluster` | lo dispara el scheduler; a mano no tiene sentido |
 | `POST` | `/vectorize` | ídem |
@@ -114,8 +132,7 @@ El test, que lee `openapi.json`, las encontró en la primera corrida.
 | `POST` | `/synthesize` | la app sintetiza **por cluster**, no en barrido |
 | `POST` | `/deliver` | la entrega al back-end la maneja el ciclo |
 | `POST` | `/purge` | **irreversible**: borra cuerpos de noticias. Fuera de la v1 a propósito |
-| `POST` | `/medios` | alta de medios: consola completa, fuera de la v1 |
-| `PATCH` | `/medios/{medio_id}` | baja y modificación de medios: consola completa |
+| `PATCH` | `/medios/{medio_id}` | la pantalla **sí** lo llama, pero no lee lo que devuelve: el toggle relee la lista entera |
 
 ## Cómo se rompe a propósito
 

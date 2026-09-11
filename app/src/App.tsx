@@ -10,6 +10,7 @@ import DialogoSalida from "./componentes/DialogoSalida";
 import ListaDeTrabajo from "./pantallas/ListaDeTrabajo";
 import FeedDeLectura from "./pantallas/FeedDeLectura";
 import Ajustes from "./pantallas/Ajustes";
+import Medios from "./pantallas/Medios";
 import Modelos from "./pantallas/Modelos";
 
 function PedirToken({ alGuardar }: { alGuardar: () => void }) {
@@ -100,7 +101,7 @@ function PedirRepo({ alGuardar }: { alGuardar: () => void }) {
 }
 
 /** Las vistas del cuerpo. */
-type Vista = "trabajo" | "feed" | "modelos" | "ajustes";
+type Vista = "trabajo" | "feed" | "medios" | "modelos" | "ajustes";
 
 export default function App() {
   const [hayToken, setHayToken] = useState<boolean | null>(null);
@@ -243,6 +244,12 @@ export default function App() {
             Feed de lectura
           </button>
           <button
+            className={`pestana${vista === "medios" ? " elegida" : ""}`}
+            onClick={() => setVista("medios")}
+          >
+            Medios
+          </button>
+          <button
             className={`pestana${vista === "modelos" ? " elegida" : ""}`}
             onClick={() => setVista("modelos")}
           >
@@ -301,6 +308,8 @@ export default function App() {
             entregaConfigurada={entregaConfigurada}
             alQuitarFiltro={() => setClusterDelFeed(null)}
           />
+        ) : vista === "medios" ? (
+          <Medios />
         ) : (
           <Modelos />
         )}

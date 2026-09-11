@@ -23,8 +23,8 @@ use docker::ErrorDocker;
 use motor::Estado;
 use tipos::{
     Id, RespuestaActivarModelo, RespuestaAltaModelo, RespuestaClusters, RespuestaDetalle,
-    RespuestaEntrega, RespuestaModelos, RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar,
-    Salud, Sintetizado,
+    RespuestaEntrega, RespuestaMedio, RespuestaMedios, RespuestaModelos, RespuestaPanel,
+    RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
 };
 
 /// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
@@ -336,6 +336,96 @@ async fn alta_modelo(
     api::post_json("/modelos", cuerpo).await
 }
 
+/// El roster de medios, activos y apagados.
+#[tauri::command]
+async fn medios_listar() -> Result<RespuestaMedios, ErrorDeApi> {
+    api::get("/medios", &[]).await
+}
+
+/// Prende o apaga un medio. **Apagar no es borrar**: conserva sus noticias, sus
+/// clusters y sus sintesis ya entregadas, y se puede volver a prender.
+///
+/// Tarda al prender, porque el motor re-sondea los feeds: entre el alta y hoy el
+/// medio pudo mudar su RSS, y el error conviene verlo al apretar el boton y no
+/// quince minutos despues en un mail. **Apagar no consulta la red** y por eso no
+/// puede fallar por ella -- es la valvula de escape, tiene que andar con el
+/// servidor del medio muerto.
+#[tauri::command]
+async fn medio_activar(medio_id: Id, activo: bool) -> Result<serde_json::Value, ErrorDeApi> {
+    api::patch(
+        &format!("/medios/{medio_id}"),
+        &[("activo", activo.to_string())],
+    )
+    .await
+}
+
+/// Da de alta un medio. El motor **sondea los feeds antes de guardar**, asi que
+/// un 422 aca significa "ese feed no sirve" y trae cual y por que.
+///
+/// Nace activo, a diferencia del alta de modelos: los medios conviven y el
+/// clustering necesita varios. Darlo de alta para despues acordarse de prenderlo
+/// seria una ceremonia sin contenido.
+#[tauri::command]
+async fn medio_alta(
+    nombre: String,
+    url_base: String,
+    feeds_rss: Vec<String>,
+) -> Result<RespuestaMedio, ErrorDeApi> {
+    api::post_json(
+        "/medios",
+        serde_json::json!({
+            "nombre": nombre,
+            "url_base": url_base,
+            "feeds_rss": feeds_rss,
+        }),
+    )
+    .await
+}
+
+/// Con quien se junta cada medio, y en cuantos clusters queda solo.
+///
+/// **Es una pregunta de producto, no de operacion**: un cluster de un solo medio
+/// no llega al minimo y no se sintetiza nunca, asi que es material que se
+/// produce y no se publica. Saber cuanto de eso aporta cada medio, y de que tema
+/// es, convierte "sumemos medios" en "sumemos este medio".
+///
+/// Recorre todas las noticias agrupadas del lado del motor, asi que tarda mas
+/// que listar: por eso es una ruta aparte y no campos de mas en `GET /medios`.
+#[tauri::command]
+async fn medios_panel() -> Result<RespuestaPanel, ErrorDeApi> {
+    api::get("/medios/panel", &[]).await
+}
+
+/// Cambia los datos de un medio que ya existe, porque **los medios mudan sus
+/// feeds** y hasta ahora eso obligaba a darlo de baja y de alta perdiendo su
+/// historia.
+///
+/// **`confirmar_dominio_nuevo` no se manda solo.** Si lo que se guarda apunta a
+/// un host que ese medio no tenia, el motor frena con `RequiereConfirmacion` y
+/// nombra los hosts; recien despues de que alguien los mire se reintenta con la
+/// bandera puesta. Es deliberado que la confirmacion cueste un viaje mas: lo que
+/// esta guarda evita es que una sintesis salga **firmada** diciendo que un medio
+/// publico algo que publico otro.
+#[tauri::command]
+async fn medio_editar(
+    medio_id: Id,
+    nombre: String,
+    url_base: String,
+    feeds_rss: Vec<String>,
+    confirmar_dominio_nuevo: bool,
+) -> Result<RespuestaMedio, ErrorDeApi> {
+    api::put_json(
+        &format!("/medios/{medio_id}"),
+        serde_json::json!({
+            "nombre": nombre,
+            "url_base": url_base,
+            "feeds_rss": feeds_rss,
+            "confirmar_dominio_nuevo": confirmar_dominio_nuevo,
+        }),
+    )
+    .await
+}
+
 /// El destino de entrega configurado. Exige token **siempre**, aun contra un
 /// motor con la API abierta: lo decide el motor, no la app.
 #[tauri::command]
@@ -392,6 +482,11 @@ pub fn run() {
             motor_salud,
             activar_modelo,
             alta_modelo,
+            medios_listar,
+            medio_activar,
+            medio_alta,
+            medio_editar,
+            medios_panel,
             entrega_ver,
             entrega_cambiar,
             listar_clusters,

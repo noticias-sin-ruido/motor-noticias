@@ -54,6 +54,9 @@ CONTRATO: dict[str, dict] = {
             # ellas hace dos cosas mal: pide un token que el motor quizás no
             # exige, y marca como "sin entregar" lo que no tiene destino.
             "exige_token", "entrega_configurada",
+            # Motor y ventana se numeran juntos desde la 1.2.0, asi que la
+            # cabina necesita este campo para comprobar que el par no derivo.
+            "version",
         },
     },
     "GET /clusters": {
@@ -99,6 +102,46 @@ CONTRATO: dict[str, dict] = {
         "en_cada": ("modelos", "ModeloPublico", {
             "id", "nombre", "modelo", "adaptador", "activo", "prioridad",
             "credencial_configurada",
+        }),
+    },
+    # --- Los medios, que la pantalla del bloque F2 consume --------------------
+    "GET /medios": {
+        "tipo": "RespuestaMedios",
+        "campos": {"status", "activos", "total", "medios"},
+        "en_cada": ("medios", "MedioPublico", {
+            "id", "nombre", "url_base", "feeds_rss", "activo",
+            "idioma", "pais", "logo_url", "extraer_por_url",
+        }),
+    },
+    "GET /medios/panel": {
+        "tipo": "RespuestaPanel",
+        "campos": {"status", "minimo_para_sintetizar", "clusters", "medios"},
+        "en_cada": ("medios", "FilaDelPanel", {
+            "medio_id", "nombre", "activo", "clusters",
+            "solo", "con_el_minimo", "sobre_el_minimo",
+            "topicos_cuando_esta_solo", "sin_topico_cuando_esta_solo",
+        }),
+    },
+    # El alta y la edición **sondean los feeds**, o sea que salen a la red. Esta
+    # suite no sale a la red ni mockea feeds -- eso es trabajo de
+    # `tests/test_medios.py` -- así que van con `solo_forma`: el guardián de
+    # deriva las cubre, `TestLosCamposLlegan` no las llama.
+    "POST /medios": {
+        "tipo": "RespuestaMedio",
+        "campos": {"status", "medio", "sondeo", "avisos"},
+        "solo_forma": True,
+        "en_uno": ("medio", "MedioPublico", {
+            "id", "nombre", "url_base", "feeds_rss", "activo",
+            "idioma", "pais", "logo_url", "extraer_por_url",
+        }),
+    },
+    "PUT /medios/{medio_id}": {
+        "tipo": "RespuestaMedio",
+        "campos": {"status", "medio", "sondeo", "avisos"},
+        "solo_forma": True,
+        "en_uno": ("medio", "MedioPublico", {
+            "id", "nombre", "url_base", "feeds_rss", "activo",
+            "idioma", "pais", "logo_url", "extraer_por_url",
         }),
     },
     # --- Las que la app consume pero esta suite no puede llamar ---------------
@@ -154,10 +197,14 @@ CONTRATO: dict[str, dict] = {
 #: Rutas que el motor expone y la app **no** consume. Figuran para que agregar
 #: un endpoint obligue a decidir si la cabina lo necesita.
 NO_CONSUMIDAS = {
-    "GET /medios", "GET /search",
+    "GET /search",
+    # `PATCH /medios/{id}` sí la consume la pantalla, pero **devuelve la fila y
+    # la app no lee nada de lo que devuelve**: el toggle relee la lista entera
+    # después, igual que el de modelos. Fijarle campos acá sería atarse a una
+    # respuesta que nadie mira.
     "PATCH /medios/{medio_id}",
     "POST /cluster", "POST /vectorize", "POST /ingest", "POST /synthesize",
-    "POST /deliver", "POST /purge", "POST /medios",
+    "POST /deliver", "POST /purge",
     "POST /clusters/{cluster_id}/synthesize",
 }
 

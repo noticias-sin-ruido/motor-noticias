@@ -17,6 +17,8 @@ from src.services import medios
 from src.main import MAX_FEEDS_POR_MEDIO, MAX_LARGO_URL
 from src.services.medios import (
     FeedInservible,
+    host_normalizado,
+    hosts_ajenos,
     sondear,
     validar_url_de_feed,
     validar_url_de_logo,
@@ -1170,3 +1172,155 @@ class TestIdFueraDeRango:
         respuesta = client.patch("/medios/12345?activo=false")
 
         assert respuesta.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# La guarda de atribución, y la edición de un medio (bloque F1)
+# --------------------------------------------------------------------------
+
+
+class TestHostsAjenos:
+    """
+    La guarda que impide apuntar un medio a contenido que no es suyo.
+
+    No protege de un ataque de red sino de una mentira: si a un medio con
+    historia se le cambia el feed por el de otra redacción, las síntesis salen
+    firmadas diciendo que publicó algo que publicó otro.
+    """
+
+    def test_el_mismo_host_no_es_ajeno(self):
+        assert hosts_ajenos(
+            ["https://medio.test/otra-ruta"], ["https://medio.test/feed"]
+        ) == []
+
+    def test_www_y_pelado_son_el_mismo_lugar(self):
+        # Revista Gente declara `revistagente.com` y sirve desde `gente.com.ar`:
+        # tratar `www.` como un host distinto habría producido una advertencia
+        # que nadie merece.
+        assert hosts_ajenos(
+            ["https://www.medio.test/feed"], ["https://medio.test"]
+        ) == []
+        assert host_normalizado("https://WWW.Medio.Test/x") == "medio.test"
+
+    def test_un_host_distinto_es_ajeno(self):
+        assert hosts_ajenos(
+            ["https://otro.test/feed"], ["https://medio.test/feed"]
+        ) == ["otro.test"]
+
+    def test_un_subdominio_tambien_se_pregunta(self):
+        # Un subdominio puede ser de otro. Se pregunta, no se bloquea.
+        assert hosts_ajenos(
+            ["https://feeds.medio.test/rss"], ["https://medio.test"]
+        ) == ["feeds.medio.test"]
+
+    def test_no_repite_un_host_que_aparece_dos_veces(self):
+        assert hosts_ajenos(
+            ["https://otro.test/a", "https://otro.test/b"], ["https://medio.test"]
+        ) == ["otro.test"]
+
+
+class TestEditarMedio:
+    def _dar_de_alta(self, client) -> dict:
+        return client.post("/medios", json=ALTA).json()["medio"]
+
+    def test_cambia_la_url_del_feed_dentro_del_mismo_host(self, client, red):
+        medio = self._dar_de_alta(client)
+        respuesta = client.put(
+            f"/medios/{medio['id']}",
+            json={**ALTA, "feeds_rss": ["https://medio.test/feed-nuevo"]},
+        )
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["feeds_rss"] == [
+            "https://medio.test/feed-nuevo"
+        ]
+
+    def test_un_host_nuevo_sin_confirmar_no_se_guarda(self, client, red):
+        medio = self._dar_de_alta(client)
+        respuesta = client.put(
+            f"/medios/{medio['id']}",
+            json={**ALTA, "feeds_rss": ["https://otro.test/feed"]},
+        )
+        assert respuesta.status_code == 409
+        cuerpo = respuesta.json()
+        assert cuerpo["requiere_confirmacion"] is True
+        assert cuerpo["hosts_nuevos"] == ["otro.test"]
+        # Y sobre todo: no se guardó nada.
+        quedo = client.get("/medios").json()["medios"][0]
+        assert quedo["feeds_rss"] == ALTA["feeds_rss"]
+
+    def test_un_host_nuevo_confirmado_se_guarda(self, client, red):
+        medio = self._dar_de_alta(client)
+        respuesta = client.put(
+            f"/medios/{medio['id']}",
+            json={
+                **ALTA,
+                "feeds_rss": ["https://otro.test/feed"],
+                "confirmar_dominio_nuevo": True,
+            },
+        )
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["feeds_rss"] == ["https://otro.test/feed"]
+
+    def test_cambiar_solo_el_nombre_no_sale_a_la_red(self, client, red):
+        """
+        Corregir un nombre mal escrito no puede fallar porque el servidor del
+        medio esté caído. Mismo criterio que apagar un medio.
+        """
+        medio = self._dar_de_alta(client)
+        get, _ = red
+        llamadas_antes = get.call_count
+        respuesta = client.put(
+            f"/medios/{medio['id']}", json={**ALTA, "nombre": "Nombre Corregido"}
+        )
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["nombre"] == "Nombre Corregido"
+        assert get.call_count == llamadas_antes, "no tenía que sondear"
+        assert respuesta.json()["sondeo"] is None
+
+    def test_un_feed_que_no_sirve_no_se_guarda(self, client, red):
+        medio = self._dar_de_alta(client)
+        get, _ = red
+        get.side_effect = medios.httpx.HTTPError("sin respuesta")
+        respuesta = client.put(
+            f"/medios/{medio['id']}",
+            json={**ALTA, "feeds_rss": ["https://medio.test/roto"]},
+        )
+        assert respuesta.status_code == 422
+        get.side_effect = None
+        quedo = client.get("/medios").json()["medios"][0]
+        assert quedo["feeds_rss"] == ALTA["feeds_rss"]
+
+    def test_no_puede_robarle_el_nombre_a_otro_medio(self, client, red):
+        primero = self._dar_de_alta(client)
+        client.post(
+            "/medios",
+            json={
+                "nombre": "Otro Medio",
+                "url_base": "https://medio.test",
+                "feeds_rss": ["https://medio.test/feed"],
+            },
+        )
+        respuesta = client.put(
+            f"/medios/{primero['id']}", json={**ALTA, "nombre": "Otro Medio"}
+        )
+        assert respuesta.status_code == 409
+
+    def test_guardar_sin_cambiar_el_nombre_no_choca_consigo_mismo(self, client, red):
+        medio = self._dar_de_alta(client)
+        respuesta = client.put(f"/medios/{medio['id']}", json=ALTA)
+        assert respuesta.status_code == 200
+
+    def test_un_medio_que_no_existe_da_404(self, client, red):
+        assert client.put("/medios/9999", json=ALTA).status_code == 404
+
+    def test_no_deja_tocar_activo_por_esta_puerta(self, client, red):
+        """
+        `activo` tiene su propio PATCH, con la garantía de que apagar no
+        consulta la red. `extra="forbid"` hace que mandarlo acá sea un error en
+        vez de un campo ignorado en silencio.
+        """
+        medio = self._dar_de_alta(client)
+        respuesta = client.put(
+            f"/medios/{medio['id']}", json={**ALTA, "activo": False}
+        )
+        assert respuesta.status_code == 422

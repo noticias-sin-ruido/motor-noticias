@@ -3,6 +3,7 @@
   "database": "ok",
   "environment": "development",
   "hora_local": "2026-09-08T19:01:05-03:00",
+  "version": "1.1.0",
   "exige_token": true,
   "entrega_configurada": true
 }

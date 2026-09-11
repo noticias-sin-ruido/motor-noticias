@@ -9,7 +9,7 @@ from apscheduler.events import (
     EVENT_JOB_MISSED,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, Header, Path, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, Path, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from sqlalchemy.exc import IntegrityError
@@ -22,7 +22,7 @@ from .auth import (
     exigir_token_estricto,
     hay_token,
 )
-from .config import settings
+from .config import VERSION, settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
 from .models import Adaptador, Cluster, ConfiguracionEntrega, Medio, ModeloIA
@@ -32,8 +32,11 @@ from .services.corridas import (
     estado_del_pipeline,
     iniciar_corrida,
 )
+from .services.panel_medios import panel_de_medios
 from .services.medios import (
     FeedInservible,
+    host_normalizado,
+    hosts_ajenos,
     sondear as sondear_medio,
     validar_url_de_logo,
 )
@@ -433,7 +436,7 @@ app = FastAPI(
     # variables `GEMINI_*` ya no se leen, y la migración deja la fila de
     # `modelo_ia` apagada, así que la síntesis no corre hasta activarla. Eso va
     # avisado en grande en el README en vez de escondido en un número.
-    version="1.1.0",
+    version=VERSION,
     # La sección 13 de la AGPL pide que un programa accesible por red le ofrezca
     # a sus usuarios la forma de conseguir el código. Declararlo acá lo publica
     # en `/docs` y en el esquema OpenAPI, que es la interfaz que el servicio
@@ -470,6 +473,12 @@ def root(session: Session = Depends(get_session)):
     Los dos existen porque la cabina no tiene otra forma de saberlo, y sin ellos
     hace dos cosas mal: pide un token que el motor quizás no exige, y marca
     síntesis como "sin entregar" cuando no hay a dónde entregar.
+
+    **`version` también sale en ruta abierta, y no agrega superficie.** Ya se
+    publica en `/docs` y en el esquema OpenAPI, así que decirla acá no le cuenta
+    a nadie nada que no pudiera leer igual. Está para que la cabina compruebe
+    que la ventana y el motor son el mismo par: desde la 1.2.0 se numeran juntos
+    y un par desparejo no se rompe, se comporta raro, que es peor.
     """
     db_ok = verificar_conexion(session)
     payload = {
@@ -477,6 +486,10 @@ def root(session: Session = Depends(get_session)):
         "database": "ok" if db_ok else "error",
         "environment": settings.ENVIRONMENT,
         "hora_local": ahora_local().isoformat(timespec="seconds"),
+        # **La version no depende de la base**, asi que se informa igual en el 503
+        # de abajo: es una propiedad del codigo que esta corriendo, y es
+        # justamente cuando algo anda mal cuando sirve saber cual es.
+        "version": VERSION,
         "exige_token": hay_token(),
         # **`entrega_configurada` se consulta sólo si la base contestó**, y el
         # orden es lo único que hace que esta ruta cumpla su contrato. El destino
@@ -1412,6 +1425,22 @@ class AltaMedio(BaseModel):
     extraer_por_url: bool = False
 
 
+class CambioDeMedio(AltaMedio):
+    """
+    Lo editable de un medio ya cargado: **el mismo juego que el alta**, más la
+    confirmación de la guarda de atribución.
+
+    Hereda de `AltaMedio` a propósito y no repite los campos: si mañana el alta
+    suma uno, editar lo sigue solo. Lo que **no** entra es `activo` —tiene su
+    propio `PATCH`, con su propia semántica— ni `extraer_por_url`, que es una
+    decisión aparte del operador (punto 3 del backlog) y no un dato del medio.
+    """
+
+    # Default `False` y no `None`: no confirmar es el estado normal, y el que
+    # tiene que escribir algo es quien va a cambiar de dominio.
+    confirmar_dominio_nuevo: bool = False
+
+
 def _vista_medio(medio: Medio) -> dict:
     """
     Lo que se devuelve de un medio.
@@ -1435,6 +1464,29 @@ def listar_medios(session: Session = Depends(get_session)):
         "total": len(filas),
         "medios": [_vista_medio(f) for f in filas],
     }
+
+
+@app.get("/medios/panel")
+def panel_medios(session: Session = Depends(get_session)):
+    """
+    Con quién se junta cada medio, y en cuántos clusters queda solo.
+
+    **Responde qué medio conviene sumar, que es una pregunta de producto.** Un
+    cluster de un solo medio no llega a `MIN_MEDIOS_CLUSTER` y no se sintetiza
+    nunca, así que es material que se produce y no se publica. El panel dice
+    cuánto de eso aporta cada medio y de qué tema es, y con eso se decide qué
+    redacción falta en el roster.
+
+    **Va antes de `/medios/{medio_id}` en el archivo** aunque hoy no haya un GET
+    con ese path: el día que lo haya, `panel` sería un `medio_id` inválido y el
+    orden de declaración es lo único que decide cuál gana.
+
+    Es un informe y no la lista, y por eso es una ruta aparte en vez de campos
+    de más en `GET /medios`: recorre todas las noticias agrupadas, así que tiene
+    otro costo y otra frecuencia de uso. Medido contra la base real —5.390
+    noticias, 688 clusters— el recorrido es una sola consulta.
+    """
+    return {"status": "ok", **panel_de_medios(session)}
 
 
 @app.post("/medios")
@@ -1498,6 +1550,128 @@ def alta_medio(datos: AltaMedio, session: Session = Depends(get_session)):
         f"Alta de medio '{medio.nombre}' (id={medio.id}): "
         f"{informe['items_totales']} items, {informe['items_con_cuerpo']} con cuerpo, "
         f"extraer_por_url={medio.extraer_por_url}, {len(avisos)} avisos"
+    )
+    return {
+        "status": "ok",
+        "medio": _vista_medio(medio),
+        "sondeo": informe,
+        "avisos": avisos,
+    }
+
+
+@app.put("/medios/{medio_id}")
+def editar_medio(
+    medio_id: int = Path(..., ge=1, le=MAX_ID),
+    datos: CambioDeMedio = Body(...),
+    session: Session = Depends(get_session),
+):
+    """
+    Cambia los datos de un medio ya cargado. Existe porque **los medios mueven
+    sus feeds** y hasta hoy eso obligaba a darlo de baja y de alta de nuevo,
+    perdiendo su historia.
+
+    **Es `PUT` y no otro `PATCH`, y es una decisión.** El `PATCH` de abajo es un
+    interruptor con una propiedad que vale la pena no tocar: apagar un medio no
+    consulta la red, así que funciona con el servidor del medio muerto. Meterle
+    un cuerpo encima habría mezclado esa garantía con una operación que sí sale
+    a la red y que necesita una confirmación. Son dos cosas distintas sobre el
+    mismo recurso, y separarlas deja a cada una con su propia forma de fallar.
+
+    **La guarda que este endpoint tiene y el alta no.** Dar de alta un medio
+    nuevo no puede mentir sobre quién es: nace vacío. Cambiarle la URL a uno que
+    ya tiene historia, sí — si a "La Nación" se le apunta el feed a otra
+    redacción, las síntesis dicen que La Nación publicó algo que publicó otro,
+    **firmado**, y el back-end lo recibe como legítimo. Por eso un host que el
+    medio no tenía **exige `confirmar_dominio_nuevo`**, y la respuesta que lo
+    rechaza nombra los hosts para que la confirmación se dé mirando el dato y no
+    apretando el botón de siempre.
+
+    **Sondea sólo si cambiaron las URLs.** Corregir un nombre mal escrito no
+    tiene por qué fallar porque el servidor del medio esté caído — es el mismo
+    criterio que hace que apagar no consulte la red.
+    """
+    medio = session.get(Medio, medio_id)
+    if medio is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detalle": "No existe ese medio"},
+        )
+
+    # El nombre es único en la base. Se comprueba contra los OTROS medios, así
+    # que guardar sin cambiarlo no choca consigo mismo.
+    choca = session.exec(
+        select(Medio).where(Medio.nombre == datos.nombre, Medio.id != medio_id)
+    ).first()
+    if choca:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "error", "detalle": f"Ya existe un medio '{datos.nombre}'"},
+        )
+
+    # Lo que no toca la red, primero: un `javascript:` en el logo o un dominio
+    # ajeno se rechazan sin gastar los pedidos del sondeo.
+    try:
+        if datos.logo_url:
+            datos.logo_url = validar_url_de_logo(datos.logo_url)
+    except FeedInservible as error:
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+
+    conocidas = [medio.url_base, *medio.feeds_rss]
+    propuestas = [datos.url_base, *datos.feeds_rss]
+    ajenos = hosts_ajenos(propuestas, conocidas)
+    if ajenos and not datos.confirmar_dominio_nuevo:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "error",
+                "detalle": (
+                    f"'{medio.nombre}' hoy publica desde "
+                    f"{', '.join(sorted({host_normalizado(u) for u in conocidas}))}. "
+                    f"Lo que mandaste apunta además a {', '.join(ajenos)}. "
+                    "Si es el mismo medio que cambió de dominio, confirmalo; si no, "
+                    "es otro medio y va como alta nueva."
+                ),
+                # La app ramifica con esto y no parseando el texto de arriba.
+                "requiere_confirmacion": True,
+                "hosts_nuevos": ajenos,
+            },
+        )
+
+    urls_cambiaron = (
+        datos.url_base != medio.url_base or list(datos.feeds_rss) != list(medio.feeds_rss)
+    )
+    informe = None
+    avisos: List[str] = []
+    if urls_cambiaron:
+        try:
+            informe, avisos = sondear_medio(datos.url_base, datos.feeds_rss)
+        except FeedInservible as error:
+            return JSONResponse(
+                status_code=422, content={"status": "error", "detalle": str(error)}
+            )
+
+    cambios = datos.model_dump(exclude={"confirmar_dominio_nuevo"})
+    for campo, valor in cambios.items():
+        setattr(medio, campo, valor)
+    session.add(medio)
+    try:
+        session.commit()
+    except IntegrityError:
+        # Misma ventana que en el alta entre el SELECT y el UPDATE, y el mismo
+        # motivo para atajarla: el índice único protege el dato, esto protege la
+        # respuesta de salir como un 500 por una carrera normal.
+        session.rollback()
+        return JSONResponse(
+            status_code=409,
+            content={"status": "error", "detalle": f"Ya existe un medio '{datos.nombre}'"},
+        )
+    session.refresh(medio)
+
+    logger.info(
+        f"Medio '{medio.nombre}' (id={medio.id}) editado: "
+        f"urls_cambiaron={urls_cambiaron}, hosts_nuevos={ajenos}"
     )
     return {
         "status": "ok",

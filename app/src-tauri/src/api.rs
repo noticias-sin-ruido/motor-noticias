@@ -64,6 +64,28 @@ pub enum ErrorDeApi {
     /// 503 se dejaba pasar-- y la ventana mostraba "error decoding response
     /// body", escondiendo justamente el mensaje que servía.
     NoDisponible(String),
+    /// El pedido choca con el estado que el motor ya tiene, y dice cuál.
+    ///
+    /// Hoy es el nombre repetido de un medio. Antes caía en `Respuesta(409)`,
+    /// que sólo podía mostrar un número: quien veía "el motor respondió 409" no
+    /// se enteraba de que ya existía un medio con ese nombre.
+    Conflicto(String),
+    /// El motor no hizo nada porque **quiere que alguien confirme**, y nombra
+    /// qué.
+    ///
+    /// Existe para un solo caso y es el que la motiva: editar un medio
+    /// apuntándolo a un host que ese medio no tenía. El daño que se evita no es
+    /// técnico sino de atribución -- las síntesis saldrían **firmadas** diciendo
+    /// que un medio publicó algo que publicó otro -- así que no alcanza con
+    /// fallar: hay que poder repreguntar nombrando los hosts, y reintentar con
+    /// la confirmación puesta.
+    ///
+    /// **Los hosts viajan aparte del texto** para que la ventana no tenga que
+    /// parsear el mensaje para saber qué mostrar.
+    RequiereConfirmacion {
+        detalle: String,
+        hosts_nuevos: Vec<String>,
+    },
     /// El motor contestó con otro código de error. Se informa el número.
     Respuesta(u16),
     /// Cualquier otra cosa de red.
@@ -82,6 +104,8 @@ impl std::fmt::Display for ErrorDeApi {
             Self::NoAutorizado => write!(f, "El motor rechazó el token."),
             Self::NoEncontrado => write!(f, "El motor no encontró eso."),
             Self::Invalida(detalle) => write!(f, "El motor rechazó el pedido: {detalle}"),
+            Self::Conflicto(detalle) => write!(f, "{detalle}"),
+            Self::RequiereConfirmacion { detalle, .. } => write!(f, "{detalle}"),
             Self::Respuesta(codigo) => write!(f, "El motor respondió {codigo}."),
             Self::Red(detalle) => write!(f, "Error de red: {detalle}"),
         }
@@ -104,6 +128,23 @@ impl std::fmt::Display for ErrorDeApi {
 struct CuerpoDeError {
     #[serde(alias = "detail")]
     detalle: String,
+}
+
+/// El cuerpo de un 409, que trae una cosa más que el resto de los errores.
+///
+/// `requiere_confirmacion` y `hosts_nuevos` los manda `PUT /medios/{id}` cuando
+/// frena por la guarda de atribución. **Los dos llevan `default`**: el otro 409
+/// del motor -- el nombre repetido -- no los trae, y ausente tiene que
+/// significar "no hace falta confirmar nada", nunca un error de parseo que
+/// tape el mensaje. Es la misma lección que dejó `detail` contra `detalle`.
+#[derive(serde::Deserialize)]
+struct CuerpoDeConflicto {
+    #[serde(alias = "detail")]
+    detalle: String,
+    #[serde(default)]
+    requiere_confirmacion: bool,
+    #[serde(default)]
+    hosts_nuevos: Vec<String>,
 }
 
 /// Manda el pedido ya autenticado y traduce la respuesta al tipo que se pida.
@@ -213,6 +254,9 @@ async fn traducir_error(
             ErrorDeApi::NoDisponible(detalle_o(respuesta, "el motor no explicó por qué").await)
         }
         reqwest::StatusCode::NOT_FOUND => ErrorDeApi::NoEncontrado,
+        reqwest::StatusCode::CONFLICT => {
+            categoria_de_conflicto(respuesta.json::<CuerpoDeConflicto>().await.ok())
+        }
         reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
             // El `detalle` del motor ya viene saneado —es lo que se muestra en
             // la ventana— pero si el cuerpo no tiene la forma esperada no se
@@ -220,6 +264,26 @@ async fn traducir_error(
             ErrorDeApi::Invalida(detalle_o(respuesta, "el motor no explicó por qué").await)
         }
         otro => ErrorDeApi::Respuesta(otro.as_u16()),
+    }
+}
+
+/// En qué se convierte un 409 según lo que traiga el cuerpo.
+///
+/// **Existe separada para poder probarla**, igual que `falta_o_no_sirve`: armar
+/// una `reqwest::Response` falsa para ejercitar esto sería montar una sonda que
+/// mockea justo la cosa bajo prueba.
+///
+/// Los dos casos piden cosas distintas de quien mira: un nombre repetido se
+/// arregla cambiándolo, y un host ajeno **no se arregla**, se confirma o se
+/// cancela — y para poder confirmarlo hay que ver qué.
+fn categoria_de_conflicto(cuerpo: Option<CuerpoDeConflicto>) -> ErrorDeApi {
+    match cuerpo {
+        Some(c) if c.requiere_confirmacion => ErrorDeApi::RequiereConfirmacion {
+            detalle: c.detalle,
+            hosts_nuevos: c.hosts_nuevos,
+        },
+        Some(c) => ErrorDeApi::Conflicto(c.detalle),
+        None => ErrorDeApi::Conflicto("el motor no explicó por qué".into()),
     }
 }
 
@@ -323,6 +387,26 @@ pub async fn patch_json<T: DeserializeOwned>(
     .await
 }
 
+/// Un PUT con cuerpo. Lo usa la edición de un medio.
+///
+/// **`TIMEOUT_LARGO` como el POST del alta**, y por el mismo motivo: del otro lado
+/// el motor sale a sondear los feeds antes de guardar, así que esto tarda lo que
+/// tarde el servidor del medio.
+pub async fn put_json<T: DeserializeOwned>(
+    ruta: &str,
+    cuerpo: serde_json::Value,
+) -> Result<T, ErrorDeApi> {
+    enviar(
+        reqwest::Method::PUT,
+        ruta,
+        &[],
+        Some(cuerpo),
+        TIMEOUT_LARGO,
+        false,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod pruebas {
     use super::*;
@@ -340,6 +424,64 @@ mod pruebas {
         // Piden acciones distintas de quien mira: pegar una credencial contra
         // cambiar la que hay porque el .env del motor se movio.
         assert!(matches!(falta_o_no_sirve(true), ErrorDeApi::NoAutorizado));
+    }
+
+    #[test]
+    fn un_409_sin_bandera_es_un_conflicto_comun() {
+        // El otro 409 del motor -- el nombre de medio repetido -- no manda
+        // `requiere_confirmacion`. Ausente tiene que significar "no hace falta
+        // confirmar nada", nunca un error de parseo que tape el mensaje.
+        let c: CuerpoDeConflicto =
+            serde_json::from_str(r#"{"detalle":"Ya existe un medio 'TN'"}"#).unwrap();
+        assert!(!c.requiere_confirmacion);
+        assert!(c.hosts_nuevos.is_empty());
+        assert_eq!(c.detalle, "Ya existe un medio 'TN'");
+    }
+
+    #[test]
+    fn un_409_con_bandera_trae_los_hosts_aparte_del_texto() {
+        // Los hosts viajan como dato y no adentro del mensaje: la ventana tiene
+        // que poder listarlos sin parsear una frase.
+        let c: CuerpoDeConflicto = serde_json::from_str(
+            r#"{"detalle":"apunta a otro lado","requiere_confirmacion":true,
+                "hosts_nuevos":["otro.test","tercero.test"]}"#,
+        )
+        .unwrap();
+        assert!(c.requiere_confirmacion);
+        assert_eq!(c.hosts_nuevos, vec!["otro.test", "tercero.test"]);
+    }
+
+    #[test]
+    fn un_conflicto_con_bandera_pide_confirmar_y_no_se_confunde_con_el_otro() {
+        let pide = categoria_de_conflicto(Some(CuerpoDeConflicto {
+            detalle: "apunta a otro lado".into(),
+            requiere_confirmacion: true,
+            hosts_nuevos: vec!["otro.test".into()],
+        }));
+        match pide {
+            ErrorDeApi::RequiereConfirmacion {
+                ref hosts_nuevos, ..
+            } => assert_eq!(hosts_nuevos, &vec!["otro.test".to_string()]),
+            otro => panic!("tenía que pedir confirmación, dio {otro:?}"),
+        }
+
+        let comun = categoria_de_conflicto(Some(CuerpoDeConflicto {
+            detalle: "Ya existe un medio 'TN'".into(),
+            requiere_confirmacion: false,
+            hosts_nuevos: vec![],
+        }));
+        assert!(matches!(comun, ErrorDeApi::Conflicto(_)));
+    }
+
+    #[test]
+    fn un_409_ilegible_sigue_siendo_un_conflicto_y_no_un_numero() {
+        // Antes caía en `Respuesta(409)` y la ventana sólo podía mostrar un
+        // número. Sin cuerpo no se inventa un motivo, pero sí se conserva la
+        // categoría.
+        assert!(matches!(
+            categoria_de_conflicto(None),
+            ErrorDeApi::Conflicto(_)
+        ));
     }
 
     #[test]
