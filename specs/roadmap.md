@@ -411,7 +411,7 @@ Construidas las **fases 0 a 8** del plan de nueve. Verde en `cargo fmt`, `clippy
 - **Fase 1 · esqueleto** ✅ — la app abre, pide el token una vez y lo guarda en el Credential Manager, y muestra el `GET /` real.
 - **Fase 2 · control del motor** ✅ — levanta y para los contenedores (`up -d --build` y `stop`, nunca `down`), con la máquina de estados `reconstruyendo → arrancando → migrando → listo` sondeada contra el 503. Detecta que Docker Desktop no está corriendo y lo dice.
 - **Fase 3 · cliente tipado** ✅ — 16 structs derivados de fixtures capturados del motor real, los tipos de TypeScript generados desde Rust con `ts-rs`, y siete comandos, uno por endpoint. `404` y `422` dejaron de colapsar en un número.
-- **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio no se borró**: se decidió mantenerlo como banco de pruebas del puente hasta la fase 9, porque cubre comandos que ninguna pantalla ejercita todavía y mide lo que sólo se mide con la ventana abierta.
+- **Fase 4 · lista de trabajo** ✅ — la pantalla con sus cuatro componentes, el puente `invoke()` cruzado, el punto flojo del `Set<cluster_id>` medido y resuelto con un campo del motor, y la CSP prendida y comprobada en el ejecutable de release. **El andamio se mantuvo hasta el bloque E** como banco de pruebas del puente, porque cubría comandos que ninguna pantalla ejercitaba y medía lo que sólo se mide con la ventana abierta. Se borró el 09/09/2026, cuando las pantallas reales pasaron a cubrirlos.
 - **Fase 5 · feed de lectura** ✅ — la segunda pantalla: los ángulos paginados por cursor, el detalle con la comparativa como una columna por medio, y el 422 de un cursor caducado reseteando la lista en vez de trabarla. La cabecera pasó a ser pegajosa y la barra del pipeline dejó de mostrar `[object Object]`.
 - **Fase 6 · bandeja y ciclo de vida** ✅ — el ícono con las dos salidas nombradas, y la cruz que pregunta en vez de cerrar. Verificados los tres caminos con `docker ps`, incluido el que **deja el motor corriendo**. Minimizar va a la barra de tareas y no a la bandeja, al revés de lo que pedía el plan: esconderla dejaría una sola forma de volver. Los íconos pasaron a ser los de Sin Ruido el 08/09/2026, generados desde `app/public/isotipo.svg`.
 - **Fase 7 · test de contrato** ✅ — `app/CONTRATO.md` con las 19 rutas y `tests/test_contrato_api.py` con 22 tests, del lado del motor. Subconjunto y no igualdad, sin mocks, y un guardián que compara el contrato contra los bindings para que no derive de lo que la app exige. Encontró dos rutas `PATCH` que el inventario manual se había comido.
@@ -435,12 +435,85 @@ Auditada contra siete puntos, la app cubría tres (leer clusters sin sintetizar,
 > entrega al back-end quedó probada punta a punta: **569 síntesis, cero
 > pendientes**. Todo el detalle en `change_logs.md`.
 >
-> **Queda sólo la fase 9**: el empaquetado, con la decisión del updater.
+> **Quedan el bloque F —los medios— y la fase 9**, el empaquetado. Ver abajo.
 
 - [x] **Bloque B · configuración y credenciales** ✅ (09/09/2026) (puntos 1 y 7 del checklist) — "Olvidar token" pasó a llamar a `token_borrar`, que estaba en Rust desde la fase 1 sin que lo llamara nadie: antes sólo ponía en `false` un estado de React y la credencial se quedaba viva. Pantalla de Ajustes nueva, que **funciona con el motor apagado** porque es donde se arregla que el motor no arranque. La ruta del repo se revalida al usarla y no sólo al guardarla, con categoría propia (`RutaInvalida`). Y el orden del arranque se invirtió: primero la carpeta, después el token y sólo si el motor lo exige.
 - [x] **Bloque C · modelos** ✅ (09/09/2026) (punto 5) — pestaña propia con lista, activar/apagar (`PATCH`) y alta (`POST`). Relee la lista entera al activar, porque prender uno apaga a los demás del lado del motor. El aviso dice que la credencial va al `.env` y hay que reiniciar el contenedor, y **no dice cuál variable**: esa regla se cerró después de una fuga.
 - [x] **Bloque D · la entrega** ✅ (09/09/2026) (punto 6, mitad app) — Ajustes edita la URL, con un modal previo que deja asentado que el secreto tiene que coincidir con ese back-end. `TarjetaAngulo` dejó de mostrar "sin entregar" sin destino, pero **sigue mostrando "entregado"**: lo segundo es un hecho del pasado y sigue siendo cierto. Las dos rutas pasaron a `CONTRATO` con la marca `solo_forma`.
 - [x] **Bloque E · limpieza** ✅ (09/09/2026) — el andamio se borró entero, y eso apretó la guarda del puente: `PERMITIDOS` pasó de cuatro archivos a **dos**. `App.tsx` también salió, y mientras estuvo en la lista un `invoke` suelto en la pantalla principal pasaba sin que nada dijera. La sonda de la CSP quedó como lista de verificación de release en `app/README.md`; `motor_salud` se resucitó en Ajustes.
+
+#### Bloque F — los medios, y el cierre de la superficie que la cabina necesita (11/09/2026)
+
+**Va ANTES de la fase 9, y el motivo es la decisión del updater.** Sin updater, cada versión que se reparte hay que volver a repartirla a mano. `POST /medios` y `PATCH /medios/{id}` existen desde el punto 3 (03/09/2026) y **no los consume nadie**: sacar el instalador sin la pantalla es distribuir una cabina que sabemos incompleta, y la corrección sería una ronda entera de reinstalar. Entra antes.
+
+**Sobre «no tocar más el motor»:** no se puede cerrar para siempre —los puntos 4, 6, 13 y 16 son todos trabajo de motor—, pero sí se puede cerrar de una vez **la superficie del motor que la cabina necesita**, que es una lista corta y conocida. Es lo que hace este bloque.
+
+**F1 — motor, lo que falta de la superficie.** Tres cosas y ninguna más:
+
+1. **El agregado de composición de clusters** (ver F3). Endpoint propio, calculado en SQL, y no campos extra en `GET /medios`: aquella ruta es la lista y esto es un informe, con otro costo y otra frecuencia de uso. Queda además disponible para el back-end si alguna vez lo quiere.
+2. **Modificar un medio.** Hoy `PATCH /medios/{medio_id}` sólo acepta `activo`: cambiar el nombre o un feed no se puede. Cambiar un feed **tiene que re-sondear**, por el mismo camino que el alta — un feed que no responde guardado en silencio es un medio que deja de ingerir sin que nadie se entere.
+3. **`version` en `GET /`**, que es la etapa 1 del punto 17. Si esta tanda es la que cierra la superficie, va acá: después de la 1.2.0 la ventana y el motor viajan juntos y hace falta que alguien verifique que el par no derivó.
+
+**F2 — app, la pantalla de Medios.** Lista, alta con el sondeo a la vista, activar/desactivar y modificar. La baja **es el desactivar y no hay `DELETE`**, por el mismo motivo que en modelos: un medio deshabilitado conserva sus noticias, sus clusters y sus síntesis ya entregadas, y se puede volver a habilitar.
+
+**F3 — app, el panel de composición.** Por medio: en cuántos clusters está, en cuántos **solo**, en cuántos **con exactamente 2 medios** y en cuántos **con más de 2**; y de los clusters donde está solo, el tópico que predomina. Sirve para decidir qué medio sumar.
+
+**El obstáculo que parecía bloquearlo, y por qué no lo hace.** Los `topicos` viven en `Sintesis` y no en `Cluster`, así que un cluster de un solo medio **no tiene tópico**: nunca se sintetizó, porque `MIN_MEDIOS_CLUSTER = 2`. Justo los clusters que interesan son los que no tienen el dato. Pero `services/topicos.py` ya trae `topico_declarado(url)`, que lo deriva de la sección declarada en la URL contra una taxonomía cerrada. Ese módulo documenta que el método es flojo **porque los medios se contradicen entre sí**; en un cluster de un medio solo no hay con quién contradecirse, así que la debilidad conocida no aplica. Verificado corriendo la función contra la base real, no deducido.
+
+**Medido el 11/09/2026 contra la base real** — 688 clusters, 130 solos, 398 con 2 medios, 160 con más de 2, sobre 8 medios cargados:
+
+| medio | activo | clusters | solo | con 2 | >2 | % solo |
+|---|---|---|---|---|---|---|
+| La Nación | sí | 423 | **65** | 238 | 120 | 15% |
+| TN | sí | 475 | 29 | 296 | 150 | 6% |
+| Perfil | sí | 136 | 17 | 58 | 61 | 13% |
+| El Cronista | sí | 120 | 10 | 54 | 56 | 8% |
+| Ciudad Magazine | sí | 143 | 5 | 77 | 61 | 3,5% |
+| Revista Gente | sí | 84 | 2 | 34 | 48 | 2,4% |
+| Revista Paparazzi | sí | 89 | 2 | 39 | 48 | 2,2% |
+| Clarín | **no** | 0 | 0 | 0 | 0 | — |
+
+Tópico de los 130 clusters solos: **sociedad 28, economía 26, deportes 20, internacional 16**, espectáculos 10, lifestyle 5, política 3, policiales 2, ciencia 1, y 19 sin tópico derivable.
+
+**Y el dato refuta la hipótesis que motivó el panel**, que era que el material huérfano lo producen los medios de nicho. Es al revés: las tres revistas de espectáculos son las que **menos** generan (2-3,5%), porque se cubren entre ellas. Los huérfanos salen de los **generalistas por amplitud** —La Nación sola aporta 65 de 130, en sociedad, economía e internacional, que es lo que los otros siete no siguen—. Eso cambia la respuesta a «qué medio agregar»: otro generalista fuerte en sociedad y economía, no uno de nicho. Vale anotar que el panel ya se ganó el lugar antes de existir: su primera corrida dio vuelta la premisa con la que se lo pidió.
+
+**Decisiones, cerradas el 11/09/2026:**
+
+- **Los términos de uso del medio: un modal de advertencia, no una declaración.** Se descartó registrar que el operador «leyó y acepta» los términos, y el motivo es que sería mentira útil: **no podemos obligar a nadie a leerlos**, así que una marca en la base sólo fabricaría una constancia de algo que no ocurrió. Va un modal antes del alta que advierta los problemas que puede traer usar un canal RSS **para fines que no sean de uso personal**, que es el riesgo real. Misma forma y mismo motivo que el modal previo a guardar el destino de entrega (bloque D): deja la responsabilidad asentada en quien decide, explicando por qué, sin inventar un consentimiento.
+
+- **Modificar es cambiar la URL, por si el medio la cambió.** Y trae un riesgo propio que **no es el SSRF**: apuntar un medio existente a una URL que no es de ese medio. El daño no es técnico sino de atribución — las síntesis dirían que La Nación publicó algo que publicó otro, **firmado**, y el back-end lo recibiría como legítimo. Es la misma familia que el destino de entrega: redirigir el producto, no filtrar una credencial. La guarda se decide abajo; el re-sondeo del feed es obligatorio en cualquier caso, porque un feed que no responde guardado en silencio es un medio que deja de ingerir sin que nadie se entere.
+
+- **Clarín queda apagado: se desactivó por su política de RSS**, no por accidente. O sea que **no es el generalista que el panel pide**, aunque los números lo señalen: la restricción es de política y no de datos. Si hace falta un medio de prueba para ejercitar la pantalla, conviene uno sin ese problema —o un feed de prueba— antes que prender justo el que está apagado por ese motivo, porque prenderlo es ingerir bajo la política que lo apagó.
+
+#### Fase 9 — el empaquetado. DECIDIDA el 10/09/2026, sin updater y sin firma
+
+**Se retoma el viernes 11/09/2026.** El plan de tareas está abajo; la decisión que lo ordena, primero.
+
+**El updater no entra, y el motivo no es el costo.** Motor y app son **una unidad con un solo número de versión** (punto 17, decisión 3): la app no aplica sobre ninguna otra cosa que el motor, y enriquecerla hasta volverla un producto de lectura sería duplicar lo que el equipo de back-end ya construye. De ahí sale el argumento que cierra la discusión, en tres pasos:
+
+1. Un solo número quiere decir que **cualquier versión nueva incluye al motor**.
+2. El updater de Tauri entrega el `.exe` de la ventana; **no puede entregar el motor**, que Docker construye desde la carpeta del repo (`docker.rs:139`).
+3. Entonces **no puede entregar una versión nueva**. Lo único que lograría es dejar la ventana adelantada respecto del motor: fabricar el par desparejo que la decisión de la unidad declara estado inválido.
+
+Esto **revierte la recomendación del 09/09/2026**, que era meter el updater. Aquella se apoyaba en dos premisas que después se cayeron: que hubiera una población de instalaciones inalcanzable a mano —es el equipo—, y el argumento de irreversibilidad —que la clave pública se compila en el binario, así que agregarlo tarde obliga a reinstalar todo—. El segundo sigue siendo cierto y ya no importa: **no hay nada coherente que el updater pueda entregar** bajo el modelo de unidad.
+
+La única forma de que tenga sentido es que el instalador **lleve el motor adentro** en vez de construirlo desde una carpeta. Eso es un rediseño del empaquetado entero, no una fase 9, y queda anotado como la forma de largo plazo si alguna vez esto se reparte fuera del equipo.
+
+**La firma de código tampoco entra**, por lo de siempre: son cientos de dólares al año y el gasto es un límite duro. El costo de no firmarla es el aviso «Windows protegió su PC» en la primera instalación — un clic, explicado en el README, hasta que haya a quién repartirle.
+
+**Las tareas, en orden:**
+
+1. **Unificar el número en 1.2.0.** `app/package.json:4`, `app/src-tauri/tauri.conf.json:4` y `app/src-tauri/Cargo.toml:3` pasan de `0.1.0` a la versión del motor, que ya vive en `src/main.py:436`. Es 1.2.0 y no 2.0.0 por el mismo criterio que la 1.1.0: para quien consume el motor no cambió nada —el payload es idéntico y la API es retrocompatible— y esta vez **tampoco hay paso manual al actualizar**, porque la migración de la entrega se auto-siembra desde el `.env`. Lo que cambió es que ahora hay cabina.
+2. **`CHANGELOG.md` en la raíz, escrito para el operador.** Una línea por arreglo, en términos de lo que cambia para quien usa esto. No es `specs/change_logs.md`, que es el registro de decisiones de diseño y tiene otro lector. Las entradas que exijan tocar el `.env` van marcadas aparte.
+3. **El bundle NSIS.** Los íconos ya están (ver deudas, abajo).
+4. **`app/README.md`: cómo se actualiza.** Hoy no lo dice nadie. Traer el repo y reabrir la app, que reconstruye sola con `up -d --build`.
+5. **El job de CI que arma el instalador**, disparado por tag. `app.yml` ya lo tiene anotado como trabajo de esta fase, aparte del job de verificación.
+
+**El guardián de versión** —que `GET /` devuelva `version` y la ventana avise si no coincide con la suya— es la etapa 1 del punto 17 y es lo único que hace que «son una unidad» lo verifique alguien. Arrastra el contrato, el binding y el fixture, igual que `exige_token`: trabajo de forma conocida, hecho dos veces este mes. **Entra si hay tiempo; si no, es lo primero de la 1.2.1.**
+
+---
+
+*Lo que sigue es el planteo original de la decisión, del 08/09/2026, que quedó resuelto arriba.*
 
 **Una decisión que la fase 9 tiene que tomar ANTES de empaquetar (08/09/2026).**
 
@@ -555,3 +628,67 @@ Se descartó **subir `WEBHOOK_MAX_INTENTOS`**: es una línea, pero deja el mismo
 - **El aviso tiene que seguir sirviendo.** Si nada agota nunca por caída, el mail de "síntesis sin entregar" deja de dispararse; hace falta que alguien avise que hace N corridas que no se entrega nada, sin mandar un mail por hora. `alerts.enviar_alerta` ya tiene cooldown por clave.
 - **Las 124 quemadas se recuperan con `POST /deliver?forzar=true`** cuando haya back-end real. Es seguro: el contrato con el otro equipo dice que el receptor hace *upsert* por `sintesis.id`, así que reenviar no duplica.
 - **`specs/webhook_contract.md` no se toca**: esto no cambia el payload ni la firma, sólo cuándo se reintenta.
+
+
+### 17. Que el operador vea qué versión tiene y qué trae la nueva
+
+**Anotado el 09/09/2026**, decidiendo si la app lleva updater (fase 9 del punto 14). El updater resuelve la ventana; **el motor queda afuera**, porque no viaja en el instalador: la app lo construye con `docker compose up -d --build` desde la carpeta del repo que eligió el operador (`app/src-tauri/src/docker.rs:139`). Un arreglo del motor llega a esa máquina sólo si alguien actualiza esa carpeta, y hoy **nada en la app lo hace y nada en la documentación lo explica**.
+
+El problema de fondo no es que no se actualice solo: es que **nadie se entera de que está viejo**. Este punto ataca eso y nada más — mostrar y explicar, nunca actualizar. Que la app actualice el motor es el punto 18, y tiene su propia lista de dificultades.
+
+**Lo que ya existe, comprobado:**
+
+- **El motor ya sabe su versión.** `src/main.py:436`, `version="1.1.0"` en el constructor de `FastAPI`, publicada en `/docs` y en el esquema OpenAPI. Lo que no hace es decirla en `GET /`, que es lo único que la cabina lee sin token.
+- **La app está en `0.1.0`**, declarada tres veces: `app/package.json:4`, `app/src-tauri/tauri.conf.json:4`, `app/src-tauri/Cargo.toml:3`.
+- Hay tags `v1.0.0` y `v1.1.0`, los dos sobre el motor.
+- **No hay una lista de cambios escrita para el operador.** `specs/change_logs.md` existe, pero es el registro de decisiones de diseño: mide en párrafos por qué se descartó una alternativa. No es «se arregló que la ventana no se podía cerrar».
+
+#### Etapa 1 — decir qué tenés
+
+`GET /` suma `version`. Es aditivo y la regla del contrato es subconjunto, igual que `exige_token` y `entrega_configurada` del bloque A1. Arrastra lo mismo que aquel: `Salud` en `tipos.rs`, el binding, el fixture `capturados/salud.json` recapturado del motor real, y el diccionario de `tests/test_contrato_api.py`.
+
+**Y el campo tiene un uso mejor que mostrarlo: comparar.** Como motor y app son una unidad (ver abajo), la ventana puede contrastar su propia versión contra la que informa `GET /` y **avisar si no coinciden**, que es la única forma de que el par no derive en silencio. Ajustes muestra el número; el guardián es lo que hace que el número sirva para algo.
+
+Cuesta un campo y una comparación. **No sale a la red y no toca la base de nadie.**
+
+#### Etapa 2 — decir qué hay, y qué cambia
+
+Un manifiesto publicado con la última versión y la lista de arreglos, y el aviso en Ajustes cuando lo instalado quedó atrás. Acá están las decisiones abiertas.
+
+**1. De dónde sale la lista de arreglos.** Hace falta un `CHANGELOG.md` en la raíz **escrito para el operador**: una línea por arreglo, en términos de lo que cambia para quien usa esto. `change_logs.md` no sirve para eso y no hay que forzarlo — son dos documentos con dos lectores distintos. Los cinco defectos de la prueba manual son el ejemplo del tono: *«la ventana no se podía cerrar en la pantalla del token»* es lo que el operador necesita leer; por qué se arregló con un único `return` es asunto nuestro.
+
+**2. Dónde vive el manifiesto, y si la app sale a internet.** Hoy la app habla **sólo** con `127.0.0.1:8000`. Consultar si hay versión nueva sería su primer pedido a la red: un host más en el que confiar, la CSP a revisar, y un fallo de conexión que no puede romper la pantalla. Dos caminos:
+
+- **Reusar el manifiesto del updater**, si el updater entra en la fase 9. La superficie de red ya está pagada, el archivo ya existe y ya lleva notas de versión: el motor se suma como un campo más.
+- **Un JSON propio** (`versiones.json` leído del repo por HTTPS), si el updater no entra. Es infraestructura nueva sólo para un aviso.
+
+**Recomendación: que esta etapa dependa de la fase 9.** Con updater es un campo en algo que ya se publica; sin updater conviene quedarse en la etapa 1, que ya elimina el peor caso —no saber qué se está corriendo— por casi nada.
+
+**3. Cómo se numeran los dos artefactos. DECIDIDO el 10/09/2026: un solo número para los dos.**
+
+Se había anotado que separarlos era «más honesto» porque el motor puede quedarse quieto mientras la ventana se arregla tres veces. **Eso es falso en este proyecto**, y el motivo es de producto y no de versionado: la app no es un producto que se venda aparte, es el panel de control del motor y no aplica sobre ninguna otra cosa. Enriquecerla hasta volverla una app de lectura sería duplicar lo que el equipo de back-end ya está construyendo. Van juntas o no van.
+
+Consecuencias, todas simplificadoras: **un tag por versión** (los que ya hay, `v1.0.0` y `v1.1.0`, siguen sirviendo), **un `CHANGELOG.md`** en vez de dos, **una entrada por versión** en el manifiesto si alguna vez hay manifiesto, y `app/package.json`, `app/src-tauri/tauri.conf.json` y `app/src-tauri/Cargo.toml` pasan de `0.1.0` a la versión del motor en la primera release conjunta.
+
+Y una que no simplifica y hay que mirar de frente: **un par desparejo es un estado inválido**, no una molestia. Por eso la etapa 1 lo detecta.
+
+#### Cuidados
+
+- **El aviso no puede convertirse en un botón que actualice.** Ese es el punto 18. Acá se muestra y se explica; actualizar sigue siendo un paso manual del operador.
+- **Una versión nueva puede exigir un paso manual en el `.env`.** Ya pasó al 1.1.0 (ver arriba: `GEMINI_API_KEY` → `MODELO_API_KEY` y prender la fila de `modelo_ia`). Si el aviso no lo marca, el operador actualiza y el motor deja de sintetizar sin explicación. Esas entradas del `CHANGELOG.md` van señaladas aparte, no mezcladas con los arreglos.
+- **Sin red, Ajustes tiene que seguir sirviendo.** Es la pantalla donde se arregla que el motor no arranque: si la consulta de versión falla, se calla y muestra lo de la etapa 1.
+- **La versión no es información sensible** —ya sale por `/openapi.json`—, así que sumarla a `GET /`, que es ruta abierta, no cambia nada de lo que un atacante podía averiguar igual.
+
+### 18. Que la app actualice el motor sola — la continuación del 17
+
+**Anotado el 09/09/2026 y no se implementa todavía.** Se evaluó hacerlo directamente, en vez del punto 17, y se descartó por cinco dificultades que no son del mecanismo sino de lo que hay alrededor. El `git pull` es la parte fácil.
+
+**Redimensionado el 10/09/2026 por la decisión de la unidad** (punto 17, decisión 3): si motor y app son un solo artefacto con un solo número, entonces «actualizar» es una sola cosa —traer el repo y reabrir la app, que reconstruye sola— y no dos mecanismos que hay que mantener sincronizados. Este punto deja de ser una pieza de arquitectura y pasa a ser **una comodidad**: ahorrarle al operador un `git pull` en una terminal. Las cinco dificultades de abajo siguen intactas y siguen sin valer la pena por eso.
+
+1. **Actualizar el motor *es* correr Alembic contra la base del operador.** `docker-compose.yml:135` arranca con `alembic upgrade head && uvicorn ...`: traer código y reconstruir aplica las migraciones, automáticamente y sin nadie mirando. Y **no tiene vuelta atrás**: si una versión de la ventana sale mal se reinstala la anterior, pero una migración con datos cargados se deshace restaurando un backup que el operador puede no tener. El modo de falla ya está documentado en `app/src-tauri/src/docker.rs`: código y base desfasados dejan el contenedor en bucle de reinicio, y desde la app eso se ve como «el motor no responde», sin ninguna pista. Ya pasó una vez.
+2. **El `.env` no viaja en el repo.** Una versión puede pedir una variable nueva o renombrada, y hasta que el operador la edite el motor no sintetiza. O sea que esto **nunca puede ser «se actualiza solo»**: en el mejor caso es «se actualizó y ahora andá a editar un archivo». Choca además con la regla de que los `.env` los maneja el operador y nadie más.
+3. **No hay canal, ni forma definida de que el repo llegue a una máquina.** ¿Se trae la punta de una rama de desarrollo? ¿Un tag? Y si el operador bajó un ZIP no hay `.git`; si tocó un archivo rastreado, el `pull` se planta con un conflicto adentro de una ventana que no tiene dónde mostrarlo. El punto 17 resuelve la mitad de esto al obligar a que exista un manifiesto y una numeración.
+4. **Actualizar en el momento equivocado cuesta plata.** El scheduler corre cada 15 minutos y la síntesis es el 91% del costo del ciclo. Un `up -d --build` en el medio mata la corrida viva. Se resuelve —`GET /pipeline` ya dice si hay una— pero es una guarda más.
+5. **El build.** Con caché caliente son 2 segundos (medido, ver el docstring de `arrancar`); después de tocar `requirements.txt` son minutos. Es lo único de la lista que ya está resuelto: el estado `reconstruyendo` existe en la interfaz desde la fase 2.
+
+**Condición para retomarlo**: que el punto 17 esté cerrado —o sea, que exista numeración, manifiesto y una lista de cambios legible— y que se haya decidido qué hacer con el backup antes de una migración disparada por un botón.
