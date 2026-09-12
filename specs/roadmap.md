@@ -393,13 +393,29 @@ Lo que se perdía no era ruido:
 
 **Persistencia y rotación viven en el `docker-compose.yml`, no en el código**: el motor escribe a stdout y Docker lo persiste, pero el driver `json-file` **no rota por defecto** y un disco lleno también tumba a Postgres. Techo de 10 MB × 5 archivos ≈ más de tres meses medidos.
 
-### 13. Entidades HTML sin decodificar en el cuerpo de las noticias
+### 13. Entidades HTML sin decodificar en el cuerpo de las noticias ✅ COMPLETO (12/09/2026)
 
-Lo destapó el punto 12 en su primera corrida con logs: una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*. Medido sobre la base real: **38 de 5.390 `contenido_limpio` (0,7%) contienen entidades HTML sin decodificar; `titulo` no tiene ninguna** — o sea que el problema está en una sola de las dos vías de limpieza del cuerpo, no en la ingesta en general.
+Lo destapó el punto 12 en su primera corrida con logs: una síntesis tituló *"Reforma previsional en Entre R&iacute;os para reducir el d&eacute;ficit"*. Medido entonces sobre la base real: **38 de 5.390 `contenido_limpio` (0,7%)**, y **ningún título** — o sea que el problema estaba en una sola de las dos vías de limpieza del cuerpo.
 
-Es chico en volumen pero **sale publicado**: entra al prompt como evidencia, el modelo lo copia tal cual al título del ángulo, y de ahí va al back-end. Vale medir primero cuál de las dos vías (el `content:encoded` del feed o `trafilatura`) lo deja pasar, antes de agregar un `html.unescape` a ciegas en los dos lados.
+El punto pedía **medir cuál de las dos antes de agregar un `html.unescape` a ciegas en los dos lados**. Medido el 12/09/2026:
 
-Prioridad baja frente a los puntos 3 y 11, pero es barato y es visible para el lector final.
+| entrada | `content:encoded` (BeautifulSoup) | `trafilatura` |
+|---|---|---|
+| `&iacute;` | í | í |
+| `&#237;` | í | í |
+| **`&amp;iacute;`** | **`&iacute;`** | í |
+
+**Es la vía del feed, y la causa es el doble escapado.** BeautifulSoup decodifica **una** vez, así que un feed que escapa su propia entidad deja el texto literal — que es exactamente la forma del síntoma original. `trafilatura`, la vía de `extraer_por_url`, ya lo resolvía sola: **no se tocó**, que es lo que el punto quería evitar.
+
+El arreglo es un `unescape` después de `limpiar_html`, en un solo lado.
+
+**Y tiene un costo que quedó escrito porque es una decisión y no una sorpresa.** No se pueden tener las dos cosas: recuperar `&amp;iacute;` como `í` y preservar `&amp;nbsp;` como texto literal **son la misma operación**. Una nota que *habla* de HTML pierde su ejemplo. Se eligió decodificar por la asimetría del daño — un `&nbsp;` perdido es cosmético y rarísimo; un "Entre R&iacute;os" **sale publicado en un título** y viaja al back-end. Si algún día molesta, la salida es un desescapado acotado a los acentos del español, como el que `services/alertas` usa para el percent-encoding.
+
+Lo enseñó el test, no el razonamiento: la primera versión pedía las dos cosas y falló.
+
+**Hoy el síntoma no se reproduce** —0 entidades en 4.766 cuerpos vivos— así que esto es una guarda contra que vuelva, no una corrección de datos. Se hizo igual porque el trabajo es una línea con su test y el modo de falla es silencioso y publicado.
+
+**Nota sobre lo que NO era este punto**: el mismo día apareció una corrupción parecida en las **síntesis** —`clasificaci&#243;n`, `respald%f3`— y no venía de la ingesta. **Las nueve noticias fuente de ese cluster estaban limpias**: lo escapaba el modelo. Se arregló aparte, normalizando la respuesta al parsearla. Los dos problemas se ven igual y tienen causas distintas en puntas opuestas del pipeline.
 
 ### 14. La app de escritorio del operador — la cabina del motor
 

@@ -198,6 +198,67 @@ class TestLimpiarHtml:
         resultado = ingestion.limpiar_html("<p>Hola <b>mundo</b></p>")
         assert resultado == "Hola mundo"
 
+    @pytest.mark.parametrize(
+        "html,esperado",
+        [
+            ("<p>Entre R&iacute;os</p>", "Entre Ríos"),
+            ("<p>Entre R&#237;os</p>", "Entre Ríos"),
+            ("<p>Entre R&#xed;os</p>", "Entre Ríos"),
+        ],
+    )
+    def test_decodifica_las_tres_formas_de_entidad(self, html, esperado):
+        assert ingestion.limpiar_html(html) == esperado
+
+    def test_el_doble_escapado_tambien(self):
+        """
+        **El caso que motivó el punto 13, y la vía está medida.** Una síntesis
+        salió publicada diciendo "Reforma previsional en Entre R&iacute;os".
+
+        BeautifulSoup decodifica **una** vez, así que un feed que escapa su
+        propia entidad --manda `&amp;iacute;`-- deja `&iacute;` como texto
+        literal. Comprobado el 12/09/2026 contra las dos vías: `trafilatura`,
+        la de `extraer_por_url`, ya lo resuelve sola; ésta no lo resolvía.
+        """
+        assert ingestion.limpiar_html("<p>Entre R&amp;iacute;os</p>") == "Entre Ríos"
+
+    @pytest.mark.parametrize(
+        "html,esperado",
+        [
+            # Un `&` suelto se decodifica a `&` y ahí termina: no se rompe.
+            ("<p>Tigre &amp; Boca</p>", "Tigre & Boca"),
+            ("<p>Sube 100&#37; en el a&ntilde;o</p>", "Sube 100% en el año"),
+            # Sin nada que desescapar, el texto pasa igual.
+            ("<p>Precio: 50% off</p>", "Precio: 50% off"),
+        ],
+    )
+    def test_no_rompe_lo_que_no_es_una_entidad_escapada(self, html, esperado):
+        assert ingestion.limpiar_html(html) == esperado
+
+    def test_una_entidad_escapada_a_proposito_tambien_se_decodifica(self):
+        """
+        **El costo del arreglo, escrito para que sea una decisión y no una
+        sorpresa.**
+
+        Una nota que *habla* de HTML escribe la entidad para que se lea: manda
+        `&amp;nbsp;` porque quiere mostrar `&nbsp;`. Acá se decodifica igual y
+        queda un espacio duro — el ejemplo de esa nota se pierde.
+
+        **No se puede tener las dos cosas**: recuperar `&amp;iacute;` como `í`
+        y preservar `&amp;nbsp;` como texto es la misma operación mirada desde
+        dos lados. El primer intento de este test pedía ambas y por eso falló.
+
+        Se eligió decodificar, y el motivo es la asimetría del daño: un
+        `&nbsp;` perdido en una nota que enseña HTML es cosmético y rarísimo;
+        un "Entre R&iacute;os" **sale publicado en un título** y viaja al
+        back-end. Si algún día molesta, la salida es un desescapado acotado a
+        los acentos del español, como el que `services/alertas` usa para el
+        percent-encoding.
+        """
+        assert (
+            ingestion.limpiar_html("<p>Se escribe &amp;nbsp; en el HTML</p>")
+            == "Se escribe   en el HTML"
+        )
+
 
 class TestIngerirMedio:
     def test_crea_noticias_nuevas_y_descarta_en_vivo(self, session: Session, medio: Medio):

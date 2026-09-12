@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
+from html import unescape
+
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
@@ -49,8 +51,30 @@ def es_en_vivo(titulo: str) -> bool:
 
 
 def limpiar_html(html: str) -> str:
-    """Convierte el HTML de `content:encoded` a texto plano."""
-    return BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+    """
+    Convierte el HTML de `content:encoded` a texto plano.
+
+    **El `unescape` de atrás es por el doble escapado, y la vía está medida.**
+    Punto 13 del backlog: una síntesis salió publicada diciendo "Reforma
+    previsional en Entre R&iacute;os". El punto pedía averiguar cuál de las dos
+    vías de limpieza lo dejaba pasar antes de tocar las dos a ciegas, y el
+    12/09/2026 se comprobó que es ésta:
+
+        entrada              BeautifulSoup      trafilatura
+        `&iacute;`           í                  í
+        `&#237;`             í                  í
+        `&amp;iacute;`       **&iacute;**       í
+
+    BeautifulSoup decodifica **una** vez, así que un feed que escapa su propia
+    entidad deja el texto literal. `trafilatura` --la otra vía, la de
+    `extraer_por_url`-- ya lo resuelve solo, y por eso no se toca.
+
+    Importa poco en volumen y mucho en visibilidad: eso entra al prompt como
+    evidencia, el modelo lo copia tal cual al título del ángulo, y de ahí viaja
+    al back-end.
+    """
+    texto = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+    return unescape(texto)
 
 
 @retry(
