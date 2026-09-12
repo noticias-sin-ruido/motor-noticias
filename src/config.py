@@ -145,6 +145,23 @@ class Settings(BaseSettings):
     # pirámide invertida, el qué/quién/dónde ya está en el arranque de la nota.
     EMBEDDING_CHARS_CUERPO: int = 500
 
+    # A partir de cuántos caracteres una `<description>` deja de ser una bajada
+    # y es el cuerpo de la nota.
+    #
+    # **El número sale de medir los feeds reales, no de estimarlo** (11/09/2026).
+    # Sobre los ocho medios cargados más tres candidatos de tecnología, la
+    # mediana de `description` cuando el feed **sí** trae `content:encoded` va de
+    # 0 a 496 caracteres — son bajadas. Xataka, que no trae `content:encoded`,
+    # pone el cuerpo entero ahí: **4.943**. Entre los dos grupos hay un factor de
+    # diez y nada en el medio, así que el umbral no está peleado con ningún caso
+    # real. Se eligió 1.500 porque queda a tres veces la bajada más larga y a un
+    # tercio del cuerpo más corto.
+    #
+    # Importa que sea alto: leer una bajada de 300 caracteres como si fuera el
+    # cuerpo degradaría el embedding y la síntesis en silencio, que es peor que
+    # no ingerir la nota.
+    LARGO_MINIMO_DESCRIPTION_COMO_CUERPO: int = 1500
+
     # Similitud coseno mínima para considerar que dos noticias son el mismo hecho.
     # Deliberadamente configurable: el juez real de este valor es la calidad de las
     # síntesis de Fase 4, así que se ajusta con datos de producción sin tocar código.

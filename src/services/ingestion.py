@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from sqlmodel import Session, select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from ..config import settings
 from ..tiempo import ahora_utc
 from ..models import Medio, Noticia
 from . import alerts
@@ -96,6 +97,24 @@ def _parsear_entry(
     contenido_limpio = ""
     if content_list:
         contenido_limpio = limpiar_html(content_list[0].get("value", ""))
+
+    # **Algunos medios ponen el cuerpo entero en `<description>`**, que es el
+    # campo pensado para el resumen. Xataka es el caso que lo destapó: 4.943
+    # caracteres de nota ahí, y `content:encoded` vacío. Leer sólo el campo
+    # canónico lo daba por "feed sin cuerpo" y lo mandaba a `extraer_por_url`.
+    #
+    # **Y eso era el permiso equivocado.** Esa bandera existe para ir a buscar a
+    # la página el cuerpo que el medio *eligió no publicar*; acá el medio lo
+    # publicó, sólo que en el otro campo. Bajar la página para leer algo que ya
+    # nos entregó el feed es pedir permiso de más y trabajar de más.
+    #
+    # El largo es lo que separa un cuerpo de una bajada, y el corte está medido
+    # (ver `LARGO_MINIMO_DESCRIPTION_COMO_CUERPO`): las bajadas de los feeds
+    # reales llegan a 496 caracteres y los cuerpos arrancan en miles.
+    if not contenido_limpio:
+        posible = limpiar_html(entry.get("summary", ""))
+        if len(posible) >= settings.LARGO_MINIMO_DESCRIPTION_COMO_CUERPO:
+            contenido_limpio = posible
 
     if not contenido_limpio and not permitir_sin_cuerpo:
         return None

@@ -389,8 +389,12 @@ pub struct FeedSondeado {
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct RobotsSondeado {
     pub legible: bool,
-    pub permite_extraer: bool,
-    pub detalle: String,
+    /// **Nulo cuando el `robots.txt` no se pudo leer**: ahi no se sabe si
+    /// permite o no, y `false` seria afirmar algo que nadie comprobo.
+    pub permite_extraer: Option<bool>,
+    /// Por que no se pudo leer. **Nulo cuando si se pudo**, que es el caso
+    /// normal: no hay nada que explicar.
+    pub detalle: Option<String>,
 }
 
 /// El informe del sondeo: lo que hay del otro lado, antes de guardar nada.
@@ -797,6 +801,46 @@ mod pruebas {
             json,
             r#"{"tipo":"cortada","cluster_id":8,"motivo":"sin_material_nuevo"}"#
         );
+    }
+
+    #[test]
+    fn el_sondeo_llega_con_las_dos_formas_del_robots() {
+        // **Las dos ramas de `_sondear_robots`, y por que este test existe.**
+        // La primera version declaro `detalle: String` y `permite_extraer: bool`
+        // mirando UNA respuesta de ejemplo. El motor manda `null` en los dos,
+        // segun la rama, asi que dar de alta cualquier medio fallaba con "error
+        // decoding response body" -- el mismo sintoma que tapo el mensaje util
+        // en el bug de `detail` contra `detalle`.
+        //
+        // El contrato del lado del motor no lo caza: compara **nombres** de
+        // campos, no si pueden ser nulos.
+        let legible = r#"{"items_totales":26,"items_con_cuerpo":26,
+            "feeds":[{"url":"https://m.test/f","items":26,"con_cuerpo":26,"ventana_horas":22.3}],
+            "robots":{"legible":true,"permite_extraer":true,"crawl_delay":null,"detalle":null}}"#;
+        let s: Sondeo = serde_json::from_str(legible).unwrap();
+        assert_eq!(s.robots.permite_extraer, Some(true));
+        assert_eq!(s.robots.detalle, None);
+
+        let ilegible = r#"{"items_totales":8,"items_con_cuerpo":0,
+            "feeds":[{"url":"https://m.test/f","items":8,"con_cuerpo":0,"ventana_horas":null}],
+            "robots":{"legible":false,"permite_extraer":null,"crawl_delay":null,
+                      "detalle":"no contesto"}}"#;
+        let s: Sondeo = serde_json::from_str(ilegible).unwrap();
+        assert_eq!(s.robots.permite_extraer, None);
+        assert_eq!(s.robots.detalle.as_deref(), Some("no contesto"));
+        // Un feed sin fechas no declara ventana, y eso tampoco puede romper.
+        assert_eq!(s.feeds[0].ventana_horas, None);
+    }
+
+    #[test]
+    fn un_alta_sin_sondeo_no_rompe() {
+        // Editar solo el nombre no sondea: `sondeo` vuelve nulo a proposito.
+        let sin = r#"{"status":"ok","sondeo":null,"avisos":[],
+            "medio":{"id":1,"nombre":"M","url_base":"https://m.test","feeds_rss":[],
+                     "activo":true,"idioma":"es","pais":null,"logo_url":null,
+                     "extraer_por_url":false}}"#;
+        let r: RespuestaMedio = serde_json::from_str(sin).unwrap();
+        assert!(r.sondeo.is_none());
     }
 
     #[test]

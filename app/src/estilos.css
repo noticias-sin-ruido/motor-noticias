@@ -580,7 +580,8 @@ button.chico {
   margin: 0.9rem 0 0.2rem; flex-wrap: wrap;
 }
 .medios-controles input[type="search"],
-.medios-controles select {
+.medios-controles select,
+.medios-controles button {
   height: 2.4rem; margin: 0; font-size: 0.9rem;
 }
 /* Buscar es escribir prosa, no un dato: el mono que heredan los otros campos
@@ -614,32 +615,20 @@ button.chico {
 .medio-nota, .medio-vacio { margin: 0; font-size: 0.8rem; color: var(--tinta-tenue); }
 
 .medio-rendimiento { display: grid; gap: 0.3rem; }
+/* **Es un `<svg>` y no un `<div>`, por la CSP.** La de produccion es
+   `default-src 'self'` sin `unsafe-inline` (tauri.conf.json), asi que el
+   atributo `style` esta bloqueado y un `style={{width}}` seria una barra
+   invisible en el instalador -- invisible solo ahi, porque la CSP de desarrollo
+   SI permite inline. El `width` de un `<rect>` es un atributo de presentacion,
+   no un estilo, y la CSP no lo toca: la proporcion viaja exacta.
+
+   `display: block` y `width: 100%` no son opcionales: un `<svg>` sin dimensiones
+   cae al default del spec (300x150) en vez de ocupar su lugar como un div. */
 .barra {
-  height: 4px; background: var(--hundido); border-radius: 2px; overflow: hidden;
-  max-width: 22rem;
+  display: block; width: 100%; max-width: 22rem;
+  height: 4px; background: var(--hundido); border-radius: 2px;
 }
-.barra-relleno { display: block; height: 100%; background: var(--alerta); }
-.barra-relleno[data-proporcion="0"] { width: 0%; }
-.barra-relleno[data-proporcion="1"] { width: 5%; }
-.barra-relleno[data-proporcion="2"] { width: 10%; }
-.barra-relleno[data-proporcion="3"] { width: 15%; }
-.barra-relleno[data-proporcion="4"] { width: 20%; }
-.barra-relleno[data-proporcion="5"] { width: 25%; }
-.barra-relleno[data-proporcion="6"] { width: 30%; }
-.barra-relleno[data-proporcion="7"] { width: 35%; }
-.barra-relleno[data-proporcion="8"] { width: 40%; }
-.barra-relleno[data-proporcion="9"] { width: 45%; }
-.barra-relleno[data-proporcion="10"] { width: 50%; }
-.barra-relleno[data-proporcion="11"] { width: 55%; }
-.barra-relleno[data-proporcion="12"] { width: 60%; }
-.barra-relleno[data-proporcion="13"] { width: 65%; }
-.barra-relleno[data-proporcion="14"] { width: 70%; }
-.barra-relleno[data-proporcion="15"] { width: 75%; }
-.barra-relleno[data-proporcion="16"] { width: 80%; }
-.barra-relleno[data-proporcion="17"] { width: 85%; }
-.barra-relleno[data-proporcion="18"] { width: 90%; }
-.barra-relleno[data-proporcion="19"] { width: 95%; }
-.barra-relleno[data-proporcion="20"] { width: 100%; }
+.barra-relleno { fill: var(--alerta); }
 
 .medio-numeros { margin: 0; font-size: 0.8rem; color: var(--tinta-suave); }
 .medio-numeros b { color: var(--alerta); font-weight: 600; }

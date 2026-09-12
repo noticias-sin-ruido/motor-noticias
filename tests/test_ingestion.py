@@ -7,11 +7,13 @@ import urllib.robotparser
 from datetime import datetime
 from unittest.mock import patch
 
+import feedparser
 import httpx
 import pytest
 from sqlmodel import Session, select
 
 from src.models import Medio, Noticia
+from src.config import settings
 from src.services import extraccion, ingestion
 from tests.conftest import contar_queries
 
@@ -876,3 +878,102 @@ class TestVidaUtilDelRobotsTxt:
         assert not session.exec(
             select(Noticia).where(Noticia.medio_id == medio_extractor.id)
         ).all()
+
+
+class TestLaDescriptionComoCuerpo:
+    """
+    Algunos medios publican el cuerpo entero en `<description>`, el campo
+    pensado para el resumen. Xataka es el caso real que lo destapó: 4.943
+    caracteres de nota ahí y `content:encoded` vacío.
+
+    **Lo que estos tests protegen es el umbral**, no la lectura. Leer la
+    description es fácil; lo difícil es no confundir un cuerpo con una bajada,
+    porque tragarse una bajada de 300 caracteres como si fuera el cuerpo
+    degrada el embedding y la síntesis **en silencio** — peor que no ingerir.
+    """
+
+    def _feed(self, description: str) -> str:
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Medio</title>
+<item>
+  <title>Una nota</title>
+  <link>https://medio.test/nota</link>
+  <guid>https://medio.test/nota</guid>
+  <description><![CDATA[{description}]]></description>
+  <pubDate>Mon, 01 Sep 2026 10:00:00 GMT</pubDate>
+</item>
+</channel></rss>"""
+
+    def _parsear(self, description: str):
+        entrada = feedparser.parse(self._feed(description)).entries[0]
+        return ingestion._parsear_entry(entrada)
+
+    def test_una_description_larga_es_el_cuerpo(self):
+        cuerpo = "<p>" + ("Texto de la nota. " * 200) + "</p>"
+        datos = self._parsear(cuerpo)
+        assert datos is not None
+        assert datos["contenido_limpio"].startswith("Texto de la nota.")
+        assert len(datos["contenido_limpio"]) > 1500
+
+    def test_una_bajada_corta_no_lo_es(self):
+        """
+        Perfil manda 165 caracteres de bajada y **tiene que seguir contando
+        como feed sin cuerpo**: su nota se ingiere por `extraer_por_url` o no
+        se ingiere. Si esto se rompe, Perfil empieza a vectorizar bajadas sin
+        que nada avise.
+        """
+        assert self._parsear("Un resumen corto de la nota, como el que manda Perfil.") is None
+
+    def test_el_corte_esta_donde_dice_la_constante(self):
+        """El umbral es un valor medido, no un detalle de implementación."""
+        minimo = settings.LARGO_MINIMO_DESCRIPTION_COMO_CUERPO
+        assert self._parsear("x" * (minimo - 1)) is None
+        assert self._parsear("x" * minimo) is not None
+
+    def test_la_bajada_mas_larga_que_existe_de_verdad_sigue_sin_ser_cuerpo(self):
+        """
+        **Este test ancla el umbral a la realidad y no a la constante.**
+
+        El de arriba se mueve con `LARGO_MINIMO_DESCRIPTION_COMO_CUERPO`, así
+        que bajarla a 100 no lo rompe — comprobado por mutación, se escapó. O
+        sea que no protege el valor, sólo la coherencia interna.
+
+        Este usa los largos **medidos sobre los feeds reales** el 11/09/2026: la
+        bajada más larga de los ocho medios cargados es la de Revista Paparazzi,
+        496 caracteres. Cualquier umbral que la deje pasar como cuerpo empieza a
+        vectorizar resúmenes, y eso degrada la síntesis sin que nada avise.
+        """
+        bajada_mas_larga_real = 496
+        assert self._parsear("x" * bajada_mas_larga_real) is None
+
+    def test_content_encoded_le_gana_a_la_description(self):
+        """
+        Cuando el medio usa el campo canónico, ese manda — aunque la
+        description sea más larga. La description es el plan B, no un
+        competidor.
+        """
+        feed = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>Medio</title>
+<item>
+  <title>Una nota</title>
+  <link>https://medio.test/nota</link>
+  <guid>https://medio.test/nota</guid>
+  <content:encoded><![CDATA[<p>El cuerpo canonico.</p>]]></content:encoded>
+  <description><![CDATA[<p>{}</p>]]></description>
+</item>
+</channel></rss>""".format("Relleno larguisimo. " * 200)
+        datos = ingestion._parsear_entry(feedparser.parse(feed).entries[0])
+        assert datos["contenido_limpio"] == "El cuerpo canonico."
+
+    def test_con_extraccion_por_url_una_bajada_sigue_dejando_el_cuerpo_vacio(self):
+        """
+        Con `permitir_sin_cuerpo` el item vuelve igual, pero **sin** la bajada
+        adentro: ese vacío es el sentinela que le dice a `_completar_cuerpos`
+        que vaya a buscar el cuerpo a la página. Llenarlo con la bajada haría
+        que la extracción no corra y la nota se guarde con el resumen.
+        """
+        entrada = feedparser.parse(self._feed("Bajada corta.")).entries[0]
+        datos = ingestion._parsear_entry(entrada, permitir_sin_cuerpo=True)
+        assert datos is not None
+        assert datos["contenido_limpio"] == ""

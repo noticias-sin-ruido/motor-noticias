@@ -62,10 +62,16 @@ function InformeDeSondeo({
           </li>
         ))}
       </ul>
+      {/* **Tres estados y no dos.** `permite_extraer` es nulo cuando el
+          robots.txt no se pudo leer: ahí no se sabe, y decir "no permite"
+          sería afirmar algo que nadie comprobó. `detalle` sólo viene en ese
+          caso — pegarlo siempre imprimía "…de las páginas. null". */}
       <p className="ayuda">
-        {sondeo.robots.legible
-          ? `El robots.txt ${sondeo.robots.permite_extraer ? "permite" : "no permite"} extraer el cuerpo de las páginas. ${sondeo.robots.detalle}`
-          : "No se pudo leer el robots.txt del medio."}
+        {!sondeo.robots.legible
+          ? `No se pudo leer el robots.txt del medio${sondeo.robots.detalle ? `: ${sondeo.robots.detalle}` : "."}`
+          : sondeo.robots.permite_extraer
+            ? "El robots.txt permite ir a buscar el cuerpo a la página."
+            : "El robots.txt no permite ir a buscar el cuerpo a la página."}
       </p>
       {avisos.length > 0 && (
         <ul className="avisos">
@@ -425,7 +431,12 @@ function Rendimiento({ fila }: { fila: FilaDelPanel }) {
     return <p className="medio-vacio">Todavía no aportó material.</p>;
   }
 
-  const proporcion = fila.solo / fila.clusters;
+  // **Nada y casi-nada tienen que verse distinto.** La barra va en escalones de
+  // 5%, así que una proporción menor a 2,5% redondeaba a cero: Revista Gente,
+  // con 2 clusters sin publicar sobre 89, se dibujaba idéntica a un medio que
+  // no tiene ninguno. El texto de al lado sí lo decía, pero la barra es la
+  // pieza que se lee de un vistazo, y estaba mintiendo.
+  const pct = (fila.solo / fila.clusters) * 100;
   const temas = fila.topicos_cuando_esta_solo
     .slice(0, 3)
     .map((t) => `${t.topico} ${t.clusters}`)
@@ -433,16 +444,13 @@ function Rendimiento({ fila }: { fila: FilaDelPanel }) {
 
   return (
     <div className="medio-rendimiento">
-      <div
+      <svg
         className="barra"
         role="img"
         aria-label={`${fila.solo} de ${fila.clusters} clusters sin publicar`}
       >
-        <span
-          className="barra-relleno"
-          data-proporcion={Math.round(proporcion * 20)}
-        />
-      </div>
+        <rect className="barra-relleno" width={`${pct}%`} height="100%" />
+      </svg>
       <p className="medio-numeros">
         {fila.clusters} clusters
         {fila.solo > 0 && (
@@ -562,6 +570,17 @@ export default function Medios() {
               Ordenar por material sin publicar
             </option>
           </select>
+          {/* Los números de composición cambian con cada corrida del motor, y
+              hasta acá la única forma de releerlos era salir de la pestaña y
+              volver. */}
+          <button
+            type="button"
+            className="chico secundario"
+            onClick={() => void traer()}
+            disabled={cargando}
+          >
+            {cargando ? "Actualizando…" : "Actualizar"}
+          </button>
         </div>
 
         {error && <div className="aviso">{error}</div>}

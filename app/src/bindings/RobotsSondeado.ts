@@ -7,4 +7,14 @@
  * dar de alta un medio con robots restrictivo, pero quien decide tiene que
  * poder verlo antes de decidir.
  */
-export type RobotsSondeado = { legible: boolean, permite_extraer: boolean, detalle: string, };
+export type RobotsSondeado = { legible: boolean, 
+/**
+ * **Nulo cuando el `robots.txt` no se pudo leer**: ahi no se sabe si
+ * permite o no, y `false` seria afirmar algo que nadie comprobo.
+ */
+permite_extraer: boolean | null, 
+/**
+ * Por que no se pudo leer. **Nulo cuando si se pudo**, que es el caso
+ * normal: no hay nada que explicar.
+ */
+detalle: string | null, };
