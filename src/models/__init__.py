@@ -13,6 +13,7 @@ from .sintesis import Sintesis, SintesisNoticia
 from .publicacion_redes import PublicacionRedes
 from .modelo_ia import Adaptador, ModeloIA, ModoEstructura
 from .entrega import ConfiguracionEntrega
+from .alertas import ConfiguracionAlertas
 
 __all__ = [
     "Medio",
@@ -26,4 +27,5 @@ __all__ = [
     "Adaptador",
     "ModoEstructura",
     "ConfiguracionEntrega",
+    "ConfiguracionAlertas",
 ]

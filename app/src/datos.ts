@@ -21,6 +21,7 @@ import type { RespuestaActivarModelo } from "./bindings/RespuestaActivarModelo";
 import type { RespuestaAltaModelo } from "./bindings/RespuestaAltaModelo";
 import type { RespuestaMedios } from "./bindings/RespuestaMedios";
 import type { RespuestaMedio } from "./bindings/RespuestaMedio";
+import type { RespuestaAlertas } from "./bindings/RespuestaAlertas";
 import type { RespuestaPanel } from "./bindings/RespuestaPanel";
 import type { RespuestaEntrega } from "./bindings/RespuestaEntrega";
 import type { RespuestaModelos } from "./bindings/RespuestaModelos";
@@ -179,6 +180,27 @@ export function sintetizarCluster(
     "sintetizar_cluster",
     conOpcionales({ clusterId, forzar }, { modeloId }),
   );
+}
+
+/** A quien avisa el motor cuando algo se rompe. Exige token siempre. */
+export function verAlertas(): Promise<RespuestaAlertas> {
+  return invoke<RespuestaAlertas>("alertas_ver");
+}
+
+/** Cambia la lista de destinos. Vacia = no avisar por mail, y es valido. */
+export function cambiarAlertas(destinos: string[]): Promise<RespuestaAlertas> {
+  return invoke<RespuestaAlertas>("alertas_cambiar", { destinos });
+}
+
+/**
+ * Manda un mail de prueba.
+ *
+ * Un 200 dice que el servidor de correo **acepto** el mensaje, no que alguien
+ * lo haya recibido. Que llegue a la bandeja es lo unico que no se puede
+ * comprobar desde aca.
+ */
+export function probarAlertas(): Promise<RespuestaAlertas> {
+  return invoke<RespuestaAlertas>("alertas_probar");
 }
 
 /** El roster de medios, activos y apagados. */

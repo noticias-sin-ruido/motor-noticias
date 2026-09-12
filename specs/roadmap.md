@@ -300,17 +300,38 @@ Sobrevive todo lo demás —título, URL, fecha, medio y el `embedding`—, así
 
 Vale anotar el otro motivo por el que existe este punto, que no es técnico: reduce cuánto texto de terceros conservamos y por cuánto tiempo. Ver la revisión de términos de uso en `change_logs.md`.
 
-### 9. El mail de alertas lo elige el operador, no el `.env` del repo
+### 9. El mail de alertas lo elige el operador, no el `.env` del repo ✅ COMPLETO (12/09/2026)
 
-Hoy `ALERT_EMAIL_TO` es una variable de entorno única: quien despliegue el motor recibe las alertas en la casilla que quedó configurada al armar el contenedor, y cambiarla exige tocar el `.env` y reiniciar. Para una instancia propia alcanza; para el escenario que abren los puntos 2 y 3 —cada operador con su modelo y con su roster de medios— no, porque **las alertas son suyas: hablan de sus medios, sus feeds y sus corridas**.
+**Y encontró algo que no estaba buscando: las alertas del motor no le llegaban a nadie desde hacía meses.**
 
-**Qué se construye**: que la casilla de destino se pueda leer y cambiar en caliente, sin redeploy.
+El punto se abrió para que la casilla de destino se pudiera cambiar sin redeploy. Antes de escribir nada se revisó el estado real y apareció el hallazgo: **cero líneas de envío en todo el log del contenedor**, ni exitosas ni fallidas. El motor tiene **nueve puntos de llamada** a `enviar_alerta` —feeds caídos, síntesis vencidas, entregas agotadas, corridas largas— y ninguno llegaba. La casilla que se usaba la había deshabilitado su proveedor, y un envío fallido sólo deja un `logger.error` que nadie mira.
 
-**Los cuidados, que acá pesan más que en otros puntos**:
+Eso reordenó el punto. Lo importante no era *quién elige la casilla* sino **si el mail sale**: configurar un destino que no funciona no arregla nada, sólo mueve dónde se escribe la dirección.
 
-- **La autenticación existe desde el punto 10, pero es opcional.** Un endpoint que cambie el destino de las alertas deja que cualquiera **desvíe los avisos** —y quien los desvía, los apaga— o **los apunte a un tercero**, convirtiendo al motor en un emisor de mails no solicitados con nuestras credenciales SMTP. En un despliegue sin `API_TOKEN` eso queda abierto, así que este endpoint es candidato a exigir token **siempre**, y no solo cuando el operador lo activó.
-- **Verificar la dirección antes de usarla**, o un typo silencia las alertas sin que nadie se entere hasta que algo se rompa y no llegue el aviso.
-- Conviene decidir a la vez si el destino es **uno o varios**, y si `SMTP_*` sigue siendo del repo o también pasa al operador: hoy las credenciales de envío y la casilla de destino están en el mismo lugar, y esto las separa.
+**Qué quedó construido:**
+
+- **`ConfiguracionAlertas`**, una fila con la lista de destinos, con la misma forma que `ConfiguracionEntrega` del punto 11.
+- **`GET`/`PATCH /alertas` y `POST /alertas/probar`**, los tres con **token siempre**.
+- **`enviar_alerta` lee la fila**, con `ALERT_EMAIL_TO` como red.
+- **Tarjeta en Ajustes** que muestra *"Último envío"* **arriba de las direcciones**, porque es el dato que faltaba.
+- La migración `d4e81a37c209` **siembra desde el `.env`**, así que un despliegue existente no se queda sin avisos al actualizar.
+
+**Los tres cuidados del backlog, resueltos:**
+
+1. **Token siempre**: sí, y el motivo es más fuerte que en el punto 11. Desviar las alertas es **apagarlas** —quien las recibe deja de recibirlas y no se entera— y convierte al motor en un emisor de mails con las credenciales SMTP del operador.
+2. **Verificar la dirección**: se decidió **no** validar contra el RFC 5322. Ninguna regexp corta lo describe, y un validador que rechaza direcciones legítimas es el peor error posible acá — dejar sin avisos a quien la escribió bien. Se ataja lo que seguro no es una dirección (sin arroba, con espacios, sin punto en el dominio) y el resto lo dictamina el único juez que importa: el servidor de correo, vía el botón de probar.
+3. **`SMTP_*` no pasa al operador.** No era una pregunta abierta sino la regla del proyecto: las credenciales viven en el entorno, como `WEBHOOK_SECRET` y `ModeloIA.api_key_env`. Cifrarlas en la base se evaluó y se descartó — la clave de cifrado terminaría en el `.env` igual, o sea que mueve el problema. La división sigue la frecuencia de uso: la cuenta emisora se configura una vez al instalar, los destinatarios cambian seguido.
+
+**Dos cosas que el backlog no pedía y son las que dieron valor:**
+
+- **Varios destinos**, por el caso que ya ocurrió: si la única casilla se da de baja, te quedás ciego sin enterarte. Tope de 5 — esto son las alertas de un motor, no una lista de difusión.
+- **El botón de probar**, que es lo que convierte "hay un mail configurado" en "el mail sale". Detectó el `535 BadCredentials` **en dos segundos**. Sin él, la única forma de saberlo era esperar a que algo se rompiera y notar que no llegó el aviso — o sea, enterarse de que las alertas no andan justo cuando hacían falta.
+
+**El STARTTLS era un bloqueo real, no sólo de testing.** `alerts.py` llamaba a `smtp.starttls()` **siempre**, así que el motor no podía hablar con un servidor plano — ni un capturador de prueba ni un relay SMTP en localhost, que es una configuración normal. Ahora son tres ramas, y la del medio es la que importa: **sin TLS y con credenciales, el motor se niega a mandar**. Perder una alerta es malo; poner usuario y contraseña en claro en la red es peor y no se deshace. Cuatro mutaciones, todas cazadas.
+
+**Verificado punta a punta, y desde afuera del motor.** Con un capturador local (`docker-compose.correo-de-prueba.yml`, que va aparte para que no se arrastre a producción) se comprobó que el mensaje **llega completo** —remitente, destinatario, asunto y cuerpo— mirando el buzón, no preguntándole al motor si le fue bien.
+
+**Lo que queda afuera y no es código:** contra Gmail las credenciales siguen rechazadas. Se comprobó que la contraseña puesta **no tiene forma de contraseña de aplicación** (16 caracteres, pero no 16 letras minúsculas). Hace falta generar una en `myaccount.google.com/apppasswords`. La tarjeta de Ajustes ahora lo explica cuando una prueba falla, y aclara lo que más confunde: **el rechazo es de la cuenta que envía, no de la que recibe** — el motor se autentica antes de que el destinatario entre en juego.
 
 ### 10. Token de operador para la API ✅ COMPLETO (21/08/2026)
 

@@ -334,6 +334,38 @@ pub struct RespuestaAltaModelo {
     pub en_uso: String,
 }
 
+// --- GET /alertas, PATCH /alertas y POST /alertas/probar -------------------
+
+/// A quien avisa el motor cuando algo se rompe.
+///
+/// **`ultima_prueba_ok` es el campo que da sentido a todo esto.** Un destino
+/// configurado no dice nada: la casilla que se usaba para probar la deshabilito
+/// su proveedor y el motor siguio intentando meses contra una direccion muerta
+/// -- un envio fallido solo deja un `logger.error` que nadie mira. Esta fecha es
+/// lo unico que distingue "hay un mail puesto" de "el mail sale".
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Alertas {
+    /// Las direcciones. Vacia es un estado valido y significa "no avisar por
+    /// mail": el motor cae al log, que sigue siendo un canal.
+    pub destinos: Vec<String>,
+    pub configurado: bool,
+    /// Si el motor tiene un servidor de correo configurado. **Es un booleano y
+    /// nunca el host ni la cuenta**, misma regla que `secreto_configurado`: la
+    /// cabina necesita saber si el canal puede funcionar, no con que credencial.
+    pub smtp_configurado: bool,
+    pub actualizado_en: Option<String>,
+    /// Cuando salio un mail de prueba por ultima vez. `null` = nunca se probo.
+    pub ultima_prueba_ok: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaAlertas {
+    pub status: String,
+    pub alertas: Alertas,
+}
+
 // --- GET /medios, POST /medios, PUT /medios/{id}, PATCH /medios/{id} -------
 
 /// Un medio del roster.

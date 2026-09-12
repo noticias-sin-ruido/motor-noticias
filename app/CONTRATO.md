@@ -132,6 +132,9 @@ El test, que lee `openapi.json`, las encontró en la primera corrida.
 | `POST` | `/synthesize` | la app sintetiza **por cluster**, no en barrido |
 | `POST` | `/deliver` | la entrega al back-end la maneja el ciclo |
 | `POST` | `/purge` | **irreversible**: borra cuerpos de noticias. Fuera de la v1 a propósito |
+| `GET` | `/alertas` | a quién avisa el motor; la tarjeta de Ajustes la consume, pero no fija campos todavía |
+| `PATCH` | `/alertas` | ídem |
+| `POST` | `/alertas/probar` | manda un mail de prueba; **exige token siempre**, como las de `/entrega` |
 | `PATCH` | `/medios/{medio_id}` | la pantalla **sí** lo llama, pero no lee lo que devuelve: el toggle relee la lista entera |
 
 ## Cómo se rompe a propósito

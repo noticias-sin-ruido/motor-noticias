@@ -140,3 +140,116 @@ class TestElCooldownCuentaEntregas:
             alerts.enviar_alerta("Asunto", "Cuerpo", clave="paso:x")
             assert alerts.enviar_alerta("Asunto", "Cuerpo", clave="paso:x") is False
             assert smtp.call_count == 1
+
+
+def _smtp_falso(ofrece_starttls: bool):
+    """Un `smtplib.SMTP` de mentira que dice si ofrece STARTTLS."""
+    falso = MagicMock()
+    falso.has_extn.return_value = ofrece_starttls
+    contexto = MagicMock()
+    contexto.__enter__.return_value = falso
+    return contexto, falso
+
+
+class TestStarttlsCondicional:
+    """
+    **La rama del medio es la que importa**: sin cifrado, un `login()` manda
+    usuario y contraseña en texto plano. Antes que eso, no se manda el aviso.
+
+    El caso salió de necesitar probar el canal sin credenciales reales: un
+    capturador de correo local no ofrece STARTTLS, y la versión anterior lo
+    llamaba siempre, así que fallaba antes de empezar. Un relay SMTP en
+    localhost tiene exactamente la misma forma.
+    """
+
+    def test_si_el_servidor_lo_ofrece_se_usa(self, smtp_configurado):
+        contexto, falso = _smtp_falso(ofrece_starttls=True)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            assert alerts.enviar_alerta("a", "b", clave="k") is True
+        falso.starttls.assert_called_once()
+        falso.send_message.assert_called_once()
+
+    def test_sin_starttls_y_sin_credenciales_se_manda_igual(self, smtp_configurado):
+        """El capturador de prueba y el relay local: no hay nada que filtrar."""
+        contexto, falso = _smtp_falso(ofrece_starttls=False)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            assert alerts.enviar_alerta("a", "b", clave="k") is True
+        falso.starttls.assert_not_called()
+        falso.login.assert_not_called()
+        falso.send_message.assert_called_once()
+
+    def test_sin_starttls_y_con_credenciales_no_se_manda(
+        self, smtp_configurado, monkeypatch
+    ):
+        """
+        **La guarda.** Perder una alerta es malo; filtrar la credencial del
+        correo es peor y no se deshace.
+        """
+        monkeypatch.setattr(settings, "SMTP_USER", "cuenta@test")
+        monkeypatch.setattr(settings, "SMTP_PASSWORD", "secreta")
+        contexto, falso = _smtp_falso(ofrece_starttls=False)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            assert alerts.enviar_alerta("a", "b", clave="k") is False
+        falso.login.assert_not_called()
+        falso.send_message.assert_not_called()
+
+    def test_el_motivo_no_filtra_la_contrasena(self, smtp_configurado, monkeypatch, caplog):
+        """El log dice qué pasó y nombra el host, nunca la credencial."""
+        monkeypatch.setattr(settings, "SMTP_USER", "cuenta@test")
+        monkeypatch.setattr(settings, "SMTP_PASSWORD", "secretisima")
+        contexto, _ = _smtp_falso(ofrece_starttls=False)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            with caplog.at_level("ERROR"):
+                alerts.enviar_alerta("a", "b", clave="k")
+        registro = caplog.text
+        assert "secretisima" not in registro
+        assert "smtp.test" in registro
+
+
+class TestLosDestinosSalenDeLaFila:
+    """
+    A quién avisar lo decide la fila de configuración, no el `.env`. Punto 9.
+    """
+
+    def test_se_mandan_todos_los_destinos_en_un_mensaje(
+        self, smtp_configurado, monkeypatch
+    ):
+        monkeypatch.setattr(
+            alerts, "_destinos", lambda: ["uno@test.com", "dos@test.com"]
+        )
+        contexto, falso = _smtp_falso(ofrece_starttls=True)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            assert alerts.enviar_alerta("a", "b", clave="k") is True
+        mensaje = falso.send_message.call_args[0][0]
+        assert mensaje["To"] == "uno@test.com, dos@test.com"
+
+    def test_sin_destinos_no_se_manda_pero_el_log_lleva_todo(
+        self, smtp_configurado, monkeypatch, caplog
+    ):
+        """
+        Lista vacía es una decisión válida, no un error: el motor cae al log, y
+        **el log lleva el cuerpo entero** porque es la entrega.
+        """
+        monkeypatch.setattr(alerts, "_destinos", list)
+        with caplog.at_level("ERROR"):
+            assert alerts.enviar_alerta("Se cayó algo", "el detalle", clave="k") is False
+        assert "Se cayó algo" in caplog.text
+        assert "el detalle" in caplog.text
+
+    def test_si_la_base_no_contesta_cae_al_entorno(self, monkeypatch):
+        """
+        **El caso que más importa.** Si la base no responde, eso es justo cuando
+        hace falta avisar -- y una alerta que necesita la base para saber a
+        dónde ir se apaga exactamente cuando el problema es la base.
+        """
+        monkeypatch.setattr(settings, "ALERT_EMAIL_TO", "red@test.com")
+        # Se ejercita la función de verdad, no un doble: el `get_engine` que
+        # importa adentro explota y tiene que caer al entorno sin propagar.
+        with patch("src.database.get_engine", side_effect=RuntimeError("sin base")):
+            assert alerts._destinos() == ["red@test.com"]
+
+    def test_sin_base_y_sin_entorno_devuelve_vacio(self, monkeypatch):
+        """Y ahí `enviar_alerta` cae al log, que sigue siendo un canal."""
+        monkeypatch.setattr(settings, "ALERT_EMAIL_TO", None)
+        with patch("src.database.get_engine", side_effect=RuntimeError("sin base")):
+            assert alerts._destinos() == []

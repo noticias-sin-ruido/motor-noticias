@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as datos from "../datos";
 import * as motor from "../motor";
 import Modal from "../componentes/Modal";
+import type { Alertas } from "../bindings/Alertas";
 import type { Entrega } from "../bindings/Entrega";
 import type { Salud } from "../bindings/Salud";
 
@@ -72,7 +73,11 @@ function SaludDelMotor() {
       )}
 
       <div className="acciones">
-        <button className="chico" onClick={() => void traer()} disabled={cargando}>
+        <button
+          className="chico"
+          onClick={() => void traer()}
+          disabled={cargando}
+        >
           {cargando ? "Consultando…" : "Volver a consultar"}
         </button>
       </div>
@@ -250,9 +255,10 @@ function DestinoDeEntrega({ alCambiar }: { alCambiar: () => void }) {
           <p className="ayuda">
             Sin destino, el motor <b>no deja de trabajar</b>: las síntesis se
             acumulan guardadas y salen cuando se configure uno. Cambiar la URL{" "}
-            <b>no reenvía lo viejo</b> — el destino nuevo recibe desde la próxima
-            síntesis, porque mandar cientos de golpe a un back-end que quizá
-            recién se levanta tiene que ser una acción con su propio nombre.
+            <b>no reenvía lo viejo</b> — el destino nuevo recibe desde la
+            próxima síntesis, porque mandar cientos de golpe a un back-end que
+            quizá recién se levanta tiene que ser una acción con su propio
+            nombre.
           </p>
 
           <div className="acciones">
@@ -297,25 +303,25 @@ function DestinoDeEntrega({ alCambiar }: { alCambiar: () => void }) {
 
           {entrega.secreto_configurado ? (
             <p className="ayuda">
-              Hay un secreto configurado en el motor, pero <b>la app no puede
-              saber si es el que valida este destino</b>. Si no coinciden, cada
-              síntesis vuelve rechazada — y un rechazo <b>no se reintenta</b>:
-              cuenta el intento igual, y a los cinco barridos la síntesis se
-              abandona y ya no sale sola. Es el mismo contador que dejó 144
-              síntesis abandonadas el 8 de septiembre, ahí por un destino
-              inalcanzable.
+              Hay un secreto configurado en el motor, pero{" "}
+              <b>la app no puede saber si es el que valida este destino</b>. Si
+              no coinciden, cada síntesis vuelve rechazada — y un rechazo{" "}
+              <b>no se reintenta</b>: cuenta el intento igual, y a los cinco
+              barridos la síntesis se abandona y ya no sale sola. Es el mismo
+              contador que dejó 144 síntesis abandonadas el 8 de septiembre, ahí
+              por un destino inalcanzable.
             </p>
           ) : (
             <p className="aviso">
               <b>Falta el secreto en el motor.</b> Con un destino configurado y
-              sin secreto, la entrega no corre y sólo lo dice el log: el back-end
-              se queda vacío sin que nada avise en pantalla.
+              sin secreto, la entrega no corre y sólo lo dice el log: el
+              back-end se queda vacío sin que nada avise en pantalla.
             </p>
           )}
 
           <p className="ayuda">
-            No se configura desde acá: va en el <code>.env</code> del motor y hay
-            que <b>reiniciar el contenedor</b>. Es a propósito — la base se
+            No se configura desde acá: va en el <code>.env</code> del motor y
+            hay que <b>reiniciar el contenedor</b>. Es a propósito — la base se
             respalda y se lee desde la API, y una credencial ahí adentro se
             filtra sola.
           </p>
@@ -361,7 +367,11 @@ function DestinoDeEntrega({ alCambiar }: { alCambiar: () => void }) {
             metadatos de las nubes.
           </p>
           <div className="acciones">
-            <button className="chico" type="submit" disabled={!url.trim() || guardando}>
+            <button
+              className="chico"
+              type="submit"
+              disabled={!url.trim() || guardando}
+            >
               {guardando ? "Guardando…" : "Guardar"}
             </button>
             <button
@@ -376,6 +386,217 @@ function DestinoDeEntrega({ alCambiar }: { alCambiar: () => void }) {
             </button>
           </div>
         </form>
+      )}
+    </section>
+  );
+}
+
+/**
+ * A quién avisa el motor cuando algo se rompe.
+ *
+ * **La tarjeta existe con un botón de probar y no sólo con un campo**, y el
+ * motivo no es comodidad. El 12/09/2026 se descubrió que las nueve alertas del
+ * motor no llegaban a nadie desde hacía meses: el proveedor había deshabilitado
+ * la casilla y un envío fallido sólo deja un `logger.error` que nadie mira. Un
+ * destino configurado se ve exactamente igual que uno que anda.
+ *
+ * Por eso lo que se muestra arriba de todo no es la dirección sino **cuándo
+ * salió el último mail**.
+ */
+function AvisosPorMail() {
+  const [alertas, setAlertas] = useState<Alertas | null>(null);
+  const [editando, setEditando] = useState(false);
+  const [texto, setTexto] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [guardando, setGuardando] = useState(false);
+  const [probando, setProbando] = useState(false);
+  const [probaOk, setProbaOk] = useState(false);
+  /** La prueba falló. Distinto de `error`: acá sabemos qué revisar. */
+  const [probaFallo, setProbaFallo] = useState(false);
+
+  const traer = useCallback(async () => {
+    setError(null);
+    try {
+      setAlertas((await datos.verAlertas()).alertas);
+    } catch (e) {
+      setAlertas(null);
+      setError(datos.mensajeDeRechazo(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void traer();
+  }, [traer]);
+
+  async function guardar() {
+    setGuardando(true);
+    setError(null);
+    try {
+      const lista = texto
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      setAlertas((await datos.cambiarAlertas(lista)).alertas);
+      setEditando(false);
+    } catch (e) {
+      setError(datos.mensajeDeRechazo(e));
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  async function probar() {
+    setProbando(true);
+    setError(null);
+    setProbaOk(false);
+    setProbaFallo(false);
+    try {
+      setAlertas((await datos.probarAlertas()).alertas);
+      setProbaOk(true);
+    } catch (e) {
+      setError(datos.mensajeDeRechazo(e));
+      setProbaFallo(true);
+    } finally {
+      setProbando(false);
+    }
+  }
+
+  return (
+    <section className="tarjeta">
+      <h2>A quién avisa el motor</h2>
+
+      {error && <div className="aviso">{error}</div>}
+
+      {alertas && !editando && (
+        <>
+          <dl className="fila">
+            <dt>Destinos</dt>
+            <dd>
+              {alertas.destinos.length === 0 ? (
+                <code>ninguno · los avisos quedan sólo en el log</code>
+              ) : (
+                alertas.destinos.map((d) => (
+                  <code key={d} className="destino">
+                    {d}
+                  </code>
+                ))
+              )}
+            </dd>
+            {/* **El dato que importa, y por eso va acá y no al final.** Una
+                casilla dada de baja hace meses se ve igual que una que anda:
+                esta fecha es lo único que las distingue. */}
+            <dt>Último envío</dt>
+            <dd>
+              {alertas.ultima_prueba_ok ? (
+                alertas.ultima_prueba_ok.replace("T", " ")
+              ) : (
+                <b className="sin-probar">nunca se probó</b>
+              )}
+            </dd>
+          </dl>
+
+          {!alertas.smtp_configurado && (
+            <p className="ayuda">
+              El motor no tiene servidor de correo configurado, así que no puede
+              mandar nada. Eso va en su <code>.env</code> y hace falta
+              reiniciarlo para que lo tome.
+            </p>
+          )}
+
+          {probaOk && (
+            <p className="ayuda ok">
+              El servidor de correo aceptó el mensaje. Fijate que haya llegado a
+              la bandeja: que salga y que llegue no son lo mismo.
+            </p>
+          )}
+
+          {/* **Lo que falla acá casi nunca es el destinatario.** El motor
+              primero se autentica contra el servidor de correo y recién
+              después manda; un rechazo ocurre en el primer paso, donde la
+              dirección de destino ni participa. Sin esta ayuda, quien vea el
+              error se pone a revisar la casilla equivocada — que es
+              exactamente lo que pasó la primera vez. */}
+          {probaFallo && (
+            <div className="ayuda">
+              <p className="sin-tope">
+                <b>
+                  Lo que hay que revisar es la cuenta desde la que el motor
+                  manda
+                </b>
+                , no la que recibe: el rechazo pasa al autenticarse, antes de
+                que el destinatario entre en juego.
+              </p>
+              <p>
+                Eso vive en el <code>.env</code> del motor —
+                <code>SMTP_HOST</code>, <code>SMTP_USER</code> y{" "}
+                <code>SMTP_PASSWORD</code>— y hay que reiniciar el contenedor
+                para que lo tome. No se edita desde acá a propósito: una
+                credencial en la base se respalda, se dumpea y se filtra sola.
+              </p>
+              <p>
+                Con Gmail hace falta una <b>contraseña de aplicación</b>, no la
+                de la cuenta: son 16 letras minúsculas que se generan en{" "}
+                <code>myaccount.google.com/apppasswords</code>, con la
+                verificación en dos pasos activada.
+              </p>
+              <p>El motivo exacto del rechazo queda en el log del motor.</p>
+            </div>
+          )}
+
+          <div className="acciones">
+            <button
+              className="chico secundario"
+              onClick={() => {
+                setTexto(alertas.destinos.join("\n"));
+                setEditando(true);
+              }}
+            >
+              Cambiar
+            </button>
+            <button
+              className="chico"
+              onClick={() => void probar()}
+              disabled={probando || alertas.destinos.length === 0}
+            >
+              {probando ? "Mandando…" : "Enviar prueba"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {editando && (
+        <>
+          <label>
+            Direcciones, una por línea
+            <textarea
+              value={texto}
+              onChange={(e) => setTexto(e.target.value)}
+              rows={3}
+              placeholder="vos@ejemplo.com"
+            />
+          </label>
+          <p className="ayuda">
+            Dejarlo vacío es válido: el motor deja de mandar mails y los avisos
+            quedan en su log. Conviene más de una dirección — si la única se da
+            de baja, te quedás sin avisos sin enterarte.
+          </p>
+          <div className="acciones">
+            <button
+              className="chico secundario"
+              onClick={() => setEditando(false)}
+              disabled={guardando}
+            >
+              Cancelar
+            </button>
+            <button
+              className="chico"
+              onClick={() => void guardar()}
+              disabled={guardando}
+            >
+              {guardando ? "Guardando…" : "Guardar"}
+            </button>
+          </div>
+        </>
       )}
     </section>
   );
@@ -429,8 +650,8 @@ function TokenDelOperador({
 
       {hayToken && exigeToken === false && (
         <p className="ayuda">
-          Hay un token guardado y este motor no lo pide. No molesta: si algún día
-          la API se cierra, ya está puesto.
+          Hay un token guardado y este motor no lo pide. No molesta: si algún
+          día la API se cierra, ya está puesto.
         </p>
       )}
 
@@ -444,7 +665,11 @@ function TokenDelOperador({
 
       {hayToken && (
         <div className="acciones">
-          <button className="chico" onClick={() => void olvidar()} disabled={borrando}>
+          <button
+            className="chico"
+            onClick={() => void olvidar()}
+            disabled={borrando}
+          >
             {borrando ? "Borrando…" : "Olvidar token"}
           </button>
         </div>
@@ -476,6 +701,7 @@ export default function Ajustes({
           el motor apagado no da un error informativo, da ruido encima del
           problema que la persona vino a resolver acá. */}
       {motorListo && <DestinoDeEntrega alCambiar={alCambiarEntrega} />}
+      {motorListo && <AvisosPorMail />}
       <TokenDelOperador
         hayToken={hayToken}
         exigeToken={exigeToken}

@@ -42,6 +42,42 @@ def _en_cooldown(clave: str) -> bool:
     return ahora_utc() - anterior < timedelta(minutes=settings.ALERT_COOLDOWN_MINUTOS)
 
 
+def _destinos() -> list:
+    """
+    A quién avisar: la fila de configuración, con el `.env` como red.
+
+    **Se resuelve acá y no en los nueve puntos de llamada.** `enviar_alerta` se
+    invoca desde cinco módulos, algunos con sesión a mano y otros no; pasarles a
+    todos un parámetro nuevo para leer una fila sería mover el problema a nueve
+    lugares en vez de resolverlo en uno.
+
+    **El `.env` sigue siendo la red, y no es transición: es el caso que más
+    importa.** Si la base no responde, eso es exactamente cuando hace falta
+    avisar — y una alerta que necesita la base para saber a dónde ir se apaga
+    justo cuando el problema es la base. `ALERT_EMAIL_TO` queda como el destino
+    que funciona sin nada más.
+    """
+    try:
+        # Import adentro de la función: `alerts` lo importan módulos del
+        # pipeline, y colgarle una dependencia a la capa de base en el import
+        # de arriba haría que un problema de base rompa el módulo que existe
+        # para avisar de los problemas.
+        from ..database import get_engine
+        from .alertas import destinos_de_alerta
+        from sqlmodel import Session
+
+        with Session(get_engine()) as sesion:
+            configurados = destinos_de_alerta(sesion)
+        if configurados:
+            return configurados
+    except Exception as error:
+        # No se propaga: quedarse sin avisar porque falló leer a quién avisar
+        # es la peor forma de fallar que tiene esto.
+        logger.warning(f"No se pudieron leer los destinos de alerta: {error}")
+
+    return [settings.ALERT_EMAIL_TO] if settings.ALERT_EMAIL_TO else []
+
+
 def enviar_alerta(
     asunto: str, cuerpo: str, clave: str, ignorar_cooldown: bool = False
 ) -> bool:
@@ -65,17 +101,26 @@ def enviar_alerta(
         logger.warning(f"Alerta '{clave}' silenciada por cooldown: {asunto}")
         return False
 
-    if not settings.SMTP_HOST or not settings.ALERT_EMAIL_TO:
-        # Este log ES la entrega cuando no hay SMTP: lleva el cuerpo entero a
-        # propósito. Por eso tampoco estampa el cooldown -- silenciarlo una
-        # hora sería perder la alerta, no ahorrarse un mail.
-        logger.error(f"SMTP sin configurar, no se envió la alerta -- {asunto}: {cuerpo}")
+    destinos = _destinos()
+    if not settings.SMTP_HOST or not destinos:
+        # Este log ES la entrega cuando no hay a dónde mandar: lleva el cuerpo
+        # entero a propósito. Por eso tampoco estampa el cooldown -- silenciarlo
+        # una hora sería perder la alerta, no ahorrarse un mail.
+        #
+        # **Sin destinos es un estado válido**, no un error de configuración: el
+        # operador puede haber vaciado la lista a propósito. El log sigue siendo
+        # el canal, y sigue diciendo todo.
+        logger.error(f"Sin destino de alerta, no se envió -- {asunto}: {cuerpo}")
         return False
 
     mensaje = EmailMessage()
     mensaje["Subject"] = asunto
-    mensaje["From"] = settings.SMTP_USER or settings.ALERT_EMAIL_TO
-    mensaje["To"] = settings.ALERT_EMAIL_TO
+    mensaje["From"] = settings.SMTP_USER or destinos[0]
+    # **Todos los destinos en un solo mensaje.** Mandar uno por dirección
+    # multiplicaría los intentos contra el servidor de correo por cada alerta, y
+    # con el cooldown por clave eso no compra nada: si el SMTP rechaza, rechaza
+    # para todos.
+    mensaje["To"] = ", ".join(destinos)
     mensaje.set_content(cuerpo)
 
     try:
@@ -87,7 +132,26 @@ def enviar_alerta(
             settings.SMTP_PORT,
             timeout=settings.SMTP_TIMEOUT_SEGUNDOS,
         ) as smtp:
-            smtp.starttls()
+            # **STARTTLS si el servidor lo ofrece, y si no depende de si hay
+            # credenciales.** Antes se llamaba siempre, y eso hacía imposible
+            # hablar con un servidor plano: un relay SMTP en localhost o un
+            # capturador de correo de prueba no ofrecen TLS, y el envío fallaba
+            # antes de empezar.
+            #
+            # **La rama del medio es la que no se puede saltear**: sin cifrado,
+            # un `login()` manda usuario y contraseña en texto plano por la red.
+            # Antes que eso, no se manda el aviso -- perder una alerta es malo,
+            # filtrar la credencial del correo es peor y no se deshace.
+            smtp.ehlo()
+            if smtp.has_extn("starttls"):
+                smtp.starttls()
+                smtp.ehlo()
+            elif settings.SMTP_USER and settings.SMTP_PASSWORD:
+                raise RuntimeError(
+                    f"{settings.SMTP_HOST} no ofrece STARTTLS y hay credenciales "
+                    f"configuradas: no se mandan en texto plano."
+                )
+
             if settings.SMTP_USER and settings.SMTP_PASSWORD:
                 smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             smtp.send_message(mensaje)

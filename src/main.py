@@ -25,12 +25,26 @@ from .auth import (
 from .config import VERSION, settings
 from .database import get_engine, get_session, init_db, verificar_conexion
 from .logging_config import configurar_logging
-from .models import Adaptador, Cluster, ConfiguracionEntrega, Medio, ModeloIA
+from .models import (
+    Adaptador,
+    Cluster,
+    ConfiguracionAlertas,
+    ConfiguracionEntrega,
+    Medio,
+    ModeloIA,
+)
+from .models.alertas import MAX_LARGO_MAIL
 from .services.alerts import enviar_alerta
 from .services.corridas import (
     cerrar_corrida,
     estado_del_pipeline,
     iniciar_corrida,
+)
+from .services.alertas import (
+    DestinoInvalido as DestinoDeAlertaInvalido,
+    configuracion as configuracion_de_alertas,
+    guardar_destinos as guardar_destinos_de_alerta,
+    marcar_prueba_ok as marcar_prueba_de_alerta_ok,
 )
 from .services.panel_medios import panel_de_medios
 from .services.medios import (
@@ -1317,6 +1331,139 @@ def cambiar_entrega(datos: CambioEntrega, session: Session = Depends(get_session
             status_code=422, content={"status": "error", "detalle": str(error)}
         )
     return {"status": "ok", "entrega": _vista_entrega(fila)}
+
+
+class CambioAlertas(BaseModel):
+    """
+    La lista de destinos de alerta.
+
+    `model_config` con `extra="forbid"` por lo de siempre: un campo de más se
+    rechaza en vez de ignorarse en silencio.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # **Obligatorio y sin default**, igual que `CambioEntrega.url`: un cuerpo
+    # vacío tiene que dar 422 y no vaciar la lista de destinos. Vaciarla apaga
+    # los avisos por mail, así que tiene que costar decirlo.
+    destinos: List[
+        Annotated[str, StringConstraints(max_length=MAX_LARGO_MAIL)]
+    ] = Field(...)
+
+
+def _vista_alertas(fila: ConfiguracionAlertas) -> dict:
+    """
+    Lo que se devuelve de la configuración de alertas.
+
+    **`smtp_configurado` es un booleano y nunca el host ni el usuario.** Es la
+    misma regla que `secreto_configurado` en la entrega: la cabina necesita
+    saber si el canal puede funcionar, y para eso no hace falta el nombre del
+    servidor ni la cuenta.
+
+    **Y `ultima_prueba_ok` es el campo que da sentido a todo esto.** Un destino
+    configurado no dice nada: la casilla que se usaba para probar la deshabilitó
+    su proveedor y el motor siguió intentando meses contra una dirección muerta.
+    Esta fecha es la única que distingue "hay un mail puesto" de "el mail sale".
+    """
+    momento = fila.actualizado_en
+    prueba = fila.ultima_prueba_ok
+    return {
+        "destinos": list(fila.destinos or []),
+        "configurado": bool(fila.destinos),
+        "smtp_configurado": bool(settings.SMTP_HOST),
+        "actualizado_en": momento.isoformat(timespec="seconds") if momento else None,
+        "ultima_prueba_ok": prueba.isoformat(timespec="seconds") if prueba else None,
+    }
+
+
+@app.get("/alertas", dependencies=[Depends(exigir_token_estricto)])
+def ver_alertas(session: Session = Depends(get_session)):
+    """A quién avisa el motor cuando algo se rompe. Ver `_vista_alertas`."""
+    return {"status": "ok", "alertas": _vista_alertas(configuracion_de_alertas(session))}
+
+
+@app.patch("/alertas", dependencies=[Depends(exigir_token_estricto)])
+def cambiar_alertas(datos: CambioAlertas, session: Session = Depends(get_session)):
+    """
+    Cambia a quién se le avisa.
+
+    **Exige token siempre, aun con la API abierta**, y el motivo es más fuerte
+    que en `/entrega`: desviar las alertas es **apagarlas** —quien las recibe
+    deja de recibirlas y no se entera— y además convierte al motor en un emisor
+    de mails con las credenciales SMTP del operador.
+
+    Una lista vacía es válida y significa "no avisar por mail": el motor cae al
+    log, que es lo que `alerts.enviar_alerta` ya hace. Es una decisión, no un
+    error de configuración.
+    """
+    try:
+        fila = guardar_destinos_de_alerta(session, datos.destinos)
+    except DestinoDeAlertaInvalido as error:
+        return JSONResponse(
+            status_code=422, content={"status": "error", "detalle": str(error)}
+        )
+    return {"status": "ok", "alertas": _vista_alertas(fila)}
+
+
+@app.post("/alertas/probar", dependencies=[Depends(exigir_token_estricto)])
+def probar_alertas(session: Session = Depends(get_session)):
+    """
+    Manda un mail de prueba a los destinos configurados.
+
+    **Existe porque configurar un destino no prueba nada.** El motor tiene nueve
+    puntos de llamada a `enviar_alerta` y un envío fallido sólo deja un
+    `logger.error` que nadie mira: una casilla dada de baja se comporta igual que
+    una que anda. Sin esto, la única forma de saber si el canal funciona es
+    esperar a que algo se rompa y ver si llega el aviso — o sea, enterarse de
+    que las alertas no andan justo cuando hacían falta.
+
+    `ignorar_cooldown` porque una prueba que el cooldown silencia no es una
+    prueba: quien la aprieta está mirando y espera una respuesta ahora.
+
+    **Un 200 dice que el servidor de correo aceptó el mensaje, no que alguien lo
+    haya recibido.** Que llegue a la bandeja es lo único que no se puede
+    comprobar desde acá, y por eso la respuesta lo dice con todas las letras.
+    """
+    fila = configuracion_de_alertas(session)
+    if not fila.destinos:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "status": "error",
+                "detalle": "No hay ningún destino configurado al que mandar la prueba.",
+            },
+        )
+
+    salio = enviar_alerta(
+        asunto="Sin Ruido: prueba de alertas",
+        cuerpo=(
+            "Este mensaje lo pediste vos desde la cabina.\n\n"
+            "Si lo estás leyendo, el motor puede avisarte cuando un feed deje de "
+            "responder, cuando una síntesis venza sin publicarse o cuando la "
+            "entrega al back-end se agote.\n\n"
+            "Si no lo recibís, el aviso igual queda en el log del motor."
+        ),
+        clave="alertas:prueba",
+        ignorar_cooldown=True,
+    )
+    if not salio:
+        # El motivo concreto quedó en el log del motor, con el nombre del
+        # servidor y el error del proveedor. **No viaja acá**: es la misma regla
+        # que en el alta de modelos -- un mensaje de error del proveedor puede
+        # nombrar la cuenta o la variable de entorno.
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "detalle": (
+                    "El motor no pudo mandar el mail. El motivo quedó en su log; "
+                    "suele ser el SMTP mal configurado o la cuenta rechazada."
+                ),
+            },
+        )
+
+    fila = marcar_prueba_de_alerta_ok(session)
+    return {"status": "ok", "alertas": _vista_alertas(fila)}
 
 
 # ============================================================

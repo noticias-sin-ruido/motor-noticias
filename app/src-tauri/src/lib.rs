@@ -22,9 +22,9 @@ use api::ErrorDeApi;
 use docker::ErrorDocker;
 use motor::Estado;
 use tipos::{
-    Id, RespuestaActivarModelo, RespuestaAltaModelo, RespuestaClusters, RespuestaDetalle,
-    RespuestaEntrega, RespuestaMedio, RespuestaMedios, RespuestaModelos, RespuestaPanel,
-    RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
+    Id, RespuestaActivarModelo, RespuestaAlertas, RespuestaAltaModelo, RespuestaClusters,
+    RespuestaDetalle, RespuestaEntrega, RespuestaMedio, RespuestaMedios, RespuestaModelos,
+    RespuestaPanel, RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
 };
 
 /// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
@@ -336,6 +336,39 @@ async fn alta_modelo(
     api::post_json("/modelos", cuerpo).await
 }
 
+/// A quien avisa el motor cuando algo se rompe. Exige token **siempre**.
+#[tauri::command]
+async fn alertas_ver() -> Result<RespuestaAlertas, ErrorDeApi> {
+    api::get("/alertas", &[]).await
+}
+
+/// Cambia la lista de destinos.
+///
+/// **El motivo de exigir token es mas fuerte que en la entrega**: desviar las
+/// alertas es apagarlas --quien las recibe deja de recibirlas y no se entera--
+/// y ademas convierte al motor en un emisor de mails con las credenciales SMTP
+/// del operador.
+///
+/// Una lista vacia es valida y significa "no avisar por mail".
+#[tauri::command]
+async fn alertas_cambiar(destinos: Vec<String>) -> Result<RespuestaAlertas, ErrorDeApi> {
+    api::patch_json("/alertas", serde_json::json!({ "destinos": destinos })).await
+}
+
+/// Manda un mail de prueba.
+///
+/// **Existe porque configurar un destino no prueba nada.** Sin esto, la unica
+/// forma de saber si el canal anda es esperar a que algo se rompa y notar que
+/// no llego el aviso -- o sea, enterarse de que las alertas no funcionan justo
+/// cuando hacian falta. Medido el 12/09/2026: encontro en dos segundos que el
+/// SMTP rechazaba las credenciales **desde hacia meses**.
+///
+/// Timeout largo: del otro lado el motor abre una conexion SMTP y espera.
+#[tauri::command]
+async fn alertas_probar() -> Result<RespuestaAlertas, ErrorDeApi> {
+    api::post_json("/alertas/probar", serde_json::json!({})).await
+}
+
 /// El roster de medios, activos y apagados.
 #[tauri::command]
 async fn medios_listar() -> Result<RespuestaMedios, ErrorDeApi> {
@@ -492,6 +525,9 @@ pub fn run() {
             motor_salud,
             activar_modelo,
             alta_modelo,
+            alertas_ver,
+            alertas_cambiar,
+            alertas_probar,
             medios_listar,
             medio_activar,
             medio_alta,

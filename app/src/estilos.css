@@ -635,3 +635,17 @@ button.chico {
 .medio-numeros { margin: 0; font-size: 0.8rem; color: var(--tinta-suave); }
 .medio-numeros b { color: var(--alerta); font-weight: 600; }
 .medio-temas { color: var(--tinta-tenue); }
+
+/* --- Avisos por mail (backlog punto 9) --------------------------------- */
+
+/* Una dirección por renglón: pegadas en una línea se leen como una sola. */
+.destino { display: block; font-family: var(--mono); user-select: text; }
+
+/* **"Nunca se probó" se destaca porque es la respuesta importante.** Un destino
+   configurado que nunca mandó un mail se ve igual que uno que anda -- eso fue
+   exactamente lo que dejó al motor meses sin avisar a nadie. */
+.sin-probar { color: var(--alerta); }
+
+/* La confirmación de que el correo salió. Verde y no ámbar: es una buena
+   noticia, aunque venga con la advertencia de que salir no es llegar. */
+.ayuda.ok { color: var(--ok); }

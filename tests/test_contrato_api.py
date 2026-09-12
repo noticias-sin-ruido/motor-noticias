@@ -198,6 +198,10 @@ CONTRATO: dict[str, dict] = {
 #: un endpoint obligue a decidir si la cabina lo necesita.
 NO_CONSUMIDAS = {
     "GET /search",
+    # Las tres de alertas: la pantalla que las consume es la tarjeta de Ajustes
+    # y llega junto con esto. Se documentan igual porque el guardián de rutas
+    # obliga a decidir, que es el punto del test.
+    "GET /alertas", "PATCH /alertas", "POST /alertas/probar",
     # `PATCH /medios/{id}` sí la consume la pantalla, pero **devuelve la fila y
     # la app no lee nada de lo que devuelve**: el toggle relee la lista entera
     # después, igual que el de modelos. Fijarle campos acá sería atarse a una
