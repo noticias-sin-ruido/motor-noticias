@@ -104,6 +104,16 @@ CONTRATO: dict[str, dict] = {
             "credencial_configurada",
         }),
     },
+    "GET /eventos": {
+        "tipo": "RespuestaEventos",
+        "campos": {"status", "categorias", "eventos"},
+        "en_cada": ("eventos", "EventoRegistrado", {
+            "id", "clave", "categoria", "asunto", "mensaje",
+            "veces", "primera_vez", "ultima_vez", "terminal",
+        }),
+        # Exige token siempre, y la fixture deja la API abierta: contestaría 503.
+        "solo_forma": True,
+    },
     # --- Los medios, que la pantalla del bloque F2 consume --------------------
     "GET /medios": {
         "tipo": "RespuestaMedios",

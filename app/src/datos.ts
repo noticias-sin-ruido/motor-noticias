@@ -22,6 +22,7 @@ import type { RespuestaAltaModelo } from "./bindings/RespuestaAltaModelo";
 import type { RespuestaMedios } from "./bindings/RespuestaMedios";
 import type { RespuestaMedio } from "./bindings/RespuestaMedio";
 import type { RespuestaAlertas } from "./bindings/RespuestaAlertas";
+import type { RespuestaEventos } from "./bindings/RespuestaEventos";
 import type { RespuestaPanel } from "./bindings/RespuestaPanel";
 import type { RespuestaEntrega } from "./bindings/RespuestaEntrega";
 import type { RespuestaModelos } from "./bindings/RespuestaModelos";
@@ -180,6 +181,18 @@ export function sintetizarCluster(
     "sintetizar_cluster",
     conOpcionales({ clusterId, forzar }, { modeloId }),
   );
+}
+
+/**
+ * Lo que el motor considero digno de avisar, mas reciente primero.
+ *
+ * Una fila por clave con contador: un feed caido toda la noche aparece como
+ * «96 veces», no como 96 filas.
+ */
+export function listarEventos(
+  categoria: string | null,
+): Promise<RespuestaEventos> {
+  return invoke<RespuestaEventos>("eventos_listar", { categoria });
 }
 
 /** A quien avisa el motor cuando algo se rompe. Exige token siempre. */

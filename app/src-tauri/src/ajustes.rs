@@ -8,8 +8,8 @@
 //! casos.
 //!
 //! Se usa un JSON propio en el directorio de configuración de la app en vez de
-//! un plugin: es un campo, y una dependencia más para leer un archivo de una
-//! línea no se paga sola.
+//! un plugin: son dos campos, y una dependencia más para leer un archivo de dos
+//! líneas no se paga sola.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,23 @@ use tauri::{AppHandle, Manager};
 pub struct Ajustes {
     /// Carpeta del repo del motor, la que contiene `docker-compose.yml`.
     pub ruta_del_repo: Option<PathBuf>,
+
+    /// Hasta cuándo se revisaron los problemas, en ISO-8601.
+    ///
+    /// **Vive acá y no en el motor, y es una decisión de semántica antes que de
+    /// costo.** "¿Lo vi yo?" es del operador y de su máquina: si dos personas
+    /// usan el mismo motor desde dos instalaciones, cada una tiene su estado, y
+    /// que una lo marque como visto no puede apagarle la burbuja a la otra.
+    ///
+    /// El contador cuenta los eventos cuya `ultima_vez` es posterior a esto.
+    /// **Que un evento repetido vuelva a contar es la propiedad que se busca**,
+    /// no un efecto secundario: un feed que falló, se revisó, y volvió a fallar
+    /// mañana tiene que avisar de nuevo. Un "descartar" lo escondería.
+    ///
+    /// Se pierde al reinstalar, y ahí la burbuja muestra todo una vez. Es el
+    /// costo de que sea local, y es barato: se apaga volviendo a mirar.
+    #[serde(default)]
+    pub problemas_vistos_hasta: Option<String>,
 }
 
 type Resultado<T> = Result<T, String>;
@@ -46,8 +63,21 @@ pub fn leer(app: &AppHandle) -> Resultado<Ajustes> {
     }
 }
 
-/// Pisa los ajustes con lo que se le pase. Son un campo: no hay merge que
-/// hacer, y fingir uno seria inventar complejidad que nadie pidio.
+/// Cambia un campo dejando los demás como estaban.
+///
+/// **Existe desde que hay más de un campo, y evita una clase entera de bug.**
+/// Con `guardar` a secas, quien construye un `Ajustes` para tocar la ruta pisa
+/// en silencio lo que no nombró: guardar la carpeta del repo borraría la marca
+/// de problemas revisados. Leer-modificar-escribir en un solo lugar hace que
+/// ese error no se pueda cometer desde afuera.
+pub fn actualizar(app: &AppHandle, cambio: impl FnOnce(&mut Ajustes)) -> Resultado<()> {
+    let mut ajustes = leer(app)?;
+    cambio(&mut ajustes);
+    guardar(app, &ajustes)
+}
+
+/// Pisa los ajustes enteros con lo que se le pase. **Para cambiar un campo va
+/// `actualizar`**, que conserva el resto.
 pub fn guardar(app: &AppHandle, ajustes: &Ajustes) -> Resultado<()> {
     let ruta = archivo(app)?;
     let texto = serde_json::to_string_pretty(ajustes)

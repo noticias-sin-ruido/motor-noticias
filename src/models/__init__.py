@@ -14,6 +14,7 @@ from .publicacion_redes import PublicacionRedes
 from .modelo_ia import Adaptador, ModeloIA, ModoEstructura
 from .entrega import ConfiguracionEntrega
 from .alertas import ConfiguracionAlertas
+from .evento import Evento
 
 __all__ = [
     "Medio",
@@ -28,4 +29,5 @@ __all__ = [
     "ModoEstructura",
     "ConfiguracionEntrega",
     "ConfiguracionAlertas",
+    "Evento",
 ]

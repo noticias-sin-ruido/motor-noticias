@@ -253,3 +253,60 @@ class TestLosDestinosSalenDeLaFila:
         monkeypatch.setattr(settings, "ALERT_EMAIL_TO", None)
         with patch("src.database.get_engine", side_effect=RuntimeError("sin base")):
             assert alerts._destinos() == []
+
+
+class TestElEventoSeRegistraIgual:
+    """
+    **El orden decide si el panel sirve.** El registro va ANTES del cooldown:
+    son dos consumidores del mismo hecho con necesidades opuestas -- el mail se
+    calla para no inundar la casilla, el panel tiene que seguir contando.
+    """
+
+    def test_se_registra_aunque_el_cooldown_silencie_el_mail(
+        self, smtp_configurado, monkeypatch
+    ):
+        registrados = []
+        monkeypatch.setattr(
+            alerts.eventos,
+            "registrar_sin_romper",
+            lambda **kw: registrados.append(kw),
+        )
+        contexto, _ = _smtp_falso(ofrece_starttls=True)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            for _ in range(4):
+                alerts.enviar_alerta("Feed caído", "no respondió", clave="ingesta:TN")
+
+        # Un mail --el primero-- y cuatro eventos. Si esto se invirtiera, un
+        # feed que falló cuatro veces aparecería una sola en la pantalla.
+        assert len(registrados) == 4
+
+    def test_se_registra_aunque_el_envio_falle(self, smtp_configurado, monkeypatch):
+        """
+        **El caso real, no el hipotético.** El 12/09/2026 el SMTP rechazaba las
+        credenciales y las nueve alertas del motor no llegaban a nadie: si el
+        evento dependiera de que el mail salga, no habría quedado constancia de
+        una sola.
+        """
+        registrados = []
+        monkeypatch.setattr(
+            alerts.eventos,
+            "registrar_sin_romper",
+            lambda **kw: registrados.append(kw),
+        )
+        contexto, falso = _smtp_falso(ofrece_starttls=True)
+        falso.send_message.side_effect = OSError("535 BadCredentials")
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            assert alerts.enviar_alerta("a", "b", clave="k") is False
+        assert len(registrados) == 1
+
+    def test_el_terminal_viaja(self, smtp_configurado, monkeypatch):
+        registrados = []
+        monkeypatch.setattr(
+            alerts.eventos,
+            "registrar_sin_romper",
+            lambda **kw: registrados.append(kw),
+        )
+        contexto, _ = _smtp_falso(ofrece_starttls=True)
+        with patch.object(alerts.smtplib, "SMTP", return_value=contexto):
+            alerts.enviar_alerta("a", "b", clave="k", ignorar_cooldown=True)
+        assert registrados[0]["terminal"] is True

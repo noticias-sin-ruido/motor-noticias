@@ -713,3 +713,94 @@ Y una que no simplifica y hay que mirar de frente: **un par desparejo es un esta
 5. **El build.** Con caché caliente son 2 segundos (medido, ver el docstring de `arrancar`); después de tocar `requirements.txt` son minutos. Es lo único de la lista que ya está resuelto: el estado `reconstruyendo` existe en la interfaz desde la fase 2.
 
 **Condición para retomarlo**: que el punto 17 esté cerrado —o sea, que exista numeración, manifiesto y una lista de cambios legible— y que se haya decidido qué hacer con el backup antes de una migración disparada por un botón.
+
+
+### 19. Un panel de eventos en la cabina ✅ COMPLETO (12/09/2026)
+
+**Anotado el 12/09/2026**, y la idea es del usuario. Sale de descubrir, ese mismo día, que **las nueve alertas del motor no le llegaban a nadie desde hacía meses**: la casilla estaba deshabilitada y el único rastro de cada fallo era un `logger.error` en un log que nadie mira. Ver el punto 9.
+
+**El problema no es que falte información, es que está donde nadie la ve.** Para saber por qué algo no anda hay que hacer `docker logs` desde una terminal. Un panel no depende de SMTP, ni de Google, ni de que una casilla siga existiendo — y hoy el mail es el único canal, y falla en silencio.
+
+#### La mitad que ya está construida
+
+**`Corrida` guarda todo lo que hace falta para "una corrida empezó y terminó"**: `inicio`, `fin`, `duracion_segundos`, `utilizacion` y un `pasos` con el detalle por medio (nuevas, duplicadas, extraídas, errores). Medido el 12/09/2026: **91 corridas** desde el 06/09, 153 s de promedio.
+
+Y **`GET /pipeline?historial=` ya devuelve hasta 50**, con la última aparte. La app ya lo consume en `BarraPipeline`, pero sólo muestra la última. O sea que **esa mitad del panel no necesita una línea de motor**: es una pantalla que lista lo que el endpoint ya trae.
+
+#### La mitad que falta, y el embudo que ya existe
+
+Los **eventos** —modelo que falló, back-end que rechazó, feed caído— viven sólo en el log de Docker, que rota a los 50 MB y no se puede consultar.
+
+**Lo que abarata esto es que el embudo ya existe.** Los nueve `enviar_alerta` son exactamente los puntos donde el motor decide *"esto amerita avisar"*, y ya vienen con clave y texto:
+
+| clave | qué avisa |
+|---|---|
+| `ingesta:{medio}` | un feed dejó de responder |
+| `extraccion:{medio}` | falló bajar el cuerpo de la página |
+| `robots:{base}` | el `robots.txt` cambió y ahora bloquea |
+| `sintesis:vencidos` | clusters que vencieron sin publicarse |
+| `webhook:rechazo` | el back-end rechazó una entrega |
+| `webhook:agotadas` | síntesis abandonadas tras N intentos |
+| `pipeline:{paso}` | un paso del ciclo falló |
+| `scheduler:corrida-larga` | la corrida se pasó del intervalo |
+
+No hay que instrumentar nada: hay que hacer que esa función, además de mandar el mail, **guarde una fila**. El prefijo antes del `:` ya es una categoría natural.
+
+#### El detalle que decide si el panel sirve
+
+**El evento se guarda aunque el cooldown silencie el mail.** `enviar_alerta` calla los repetidos para no inundar la casilla — eso está bien para el mail y está **mal** para el panel: si un feed falla cuarenta veces en una hora, el panel tiene que decir cuarenta, no una.
+
+O sea que la fila se escribe **antes** de la comprobación de cooldown, y conviene que lleve un contador por clave en vez de cuarenta filas idénticas. Es el mismo dato con dos consumidores que necesitan cosas opuestas, y hay que resolverlo a propósito.
+
+#### Costos, medidos
+
+**El volumen no es un problema.** El motor loguea poquísimo: en 24 h hubo **40 líneas, y 29 eran ruido de acceso HTTP**. Los eventos que importan son unos pocos por día. Con retención de 90 días son cientos de filas, no millones.
+
+| pieza | costo |
+|---|---|
+| `enviar_alerta` persiste el evento | ~30 líneas + migración. **Es el 80% del valor** |
+| `GET /eventos` con filtro por categoría y cursor | endpoint chico, molde de `/sintesis` |
+| Pestaña con las dos listas (corridas y eventos) | una pantalla, tamaño Modelos |
+| Purga de eventos viejos | ~10 líneas, reusa `services/purga` |
+
+Del tamaño del bloque C del punto 14: uno o dos días.
+
+#### Decisiones, cerradas el 12/09/2026
+
+- **Qué se guarda: sólo lo que pasa por `enviar_alerta`.** Son eventos que alguien ya decidió que ameritan aviso, vienen con clave y texto, y no hay ruido que filtrar. Guardar el log entero convierte esto en un agregador de logs, que es otro producto.
+- **Una fila por clave, con contador**, no una por ocurrencia. Un feed caído toda la noche produciría 96 filas idénticas que tapan todo lo demás — el mismo problema que el cooldown evita en el mail. La fila lleva `veces` y `ultima_vez`, y **se escribe aunque el cooldown silencie el envío**: el mail se calla, el contador sigue subiendo. Lo que se pierde es el texto de las ocurrencias intermedias; se guarda el último, que en la práctica es el que describe el estado actual.
+- **Retención: 90 días.** Alcanza para «esto viene pasando desde el mes pasado», que es la pregunta que un panel de eventos contesta. Con el volumen medido son cientos de filas.
+- **Token siempre**, como `/entrega` y `/alertas`. Los eventos nombran medios, dicen cuándo falló qué, y son información operativa del despliegue.
+- **Cómo escribe `enviar_alerta`, que no recibe sesión.** Mismo problema y misma salida que `_destinos`: abre la suya y tolera el fallo. **Nunca puede tirar el proceso** — fallar al registrar un fallo no puede ser lo que rompa la corrida.
+- **Severidad**: los tres que pasan `ignorar_cooldown=True` son los terminales y ya se marcan solos; no hace falta un campo nuevo por ahora.
+
+#### Lo que quedó, y lo que se corrigió construyéndolo
+
+Los cuatro pasos, hechos. Y tres cosas que no estaban en el plan:
+
+- **`Problemas` terminó siendo pestaña propia, con contador**, y no una lista adentro de Actividad. El motivo es de función: separada, la pestaña puede llevar el número — y así **te enterás de que algo se rompió sin ir a buscarlo**, que es literalmente lo que este punto vino a resolver. Una lista adentro de otra pestaña no puede hacer eso.
+- **La burbuja cuenta lo que pasó desde la última revisión**, no todo. La marca de «ya lo vi» vive en el `ajustes.json` de la app y no en el motor, y eso es semántica antes que costo: *¿lo vi yo?* es del operador y de su máquina; si dos personas usan el mismo motor, que una lo marque no puede apagarle el contador a la otra. Y como se compara contra `ultima_vez`, **un evento que vuelve a ocurrir vuelve a contar** — un «descartar» escondería un problema vivo.
+- **La suite escribía en la base de producción.** `registrar_sin_romper` abre su propia sesión —tiene que hacerlo, `enviar_alerta` no recibe una— y los tests corren fuera del contenedor con el mismo `DATABASE_URL`. Había 37 filas de `paso:x` mezcladas con los eventos reales. Lo encontró mirar `GET /eventos` contra la base, no un test. Cerrado con un *fixture* autouse en `conftest`.
+
+#### Y una cadena de tres fallas de zona horaria
+
+Vale anotarla porque las tres eran el mismo problema:
+
+1. Los dos endpoints nuevos devolvían el `isoformat` **crudo** en vez de pasar por `a_local`. La regla de `src/tiempo.py` —guardar en UTC, mostrar en UTC-3 con offset— estaba escrita desde antes, con tres motivos y un incidente adentro, y se la salteó igual. La pantalla mostraba todo tres horas adelantado.
+2. Arreglar eso **rompió** una comparación escrita veinte minutos antes, que comparaba fechas **como texto**. Con el offset, `"17:16:08-03:00" > "21:00:21"` da falso siempre: la burbuja quedaba apagada para siempre, sin ruido y sin test en rojo.
+3. Y el test del arreglo destapó lo de fondo: **JavaScript interpreta un ISO sin zona como hora local**. El formato viejo ya estaba mal para cualquier consumidor — no era feo, era ambiguo.
+
+**Queda anotado y sin hacer**: `a_local` es una convención que se respeta a mano, y se violó en tres campos el mismo día. Lo que la haría cumplir es un test que recorra el `openapi.json` y verifique que todo campo de fecha trae offset, igual que el guardián que obliga a documentar cada ruta nueva.
+
+#### El orden, y por qué
+
+1. **La pestaña «Actividad» con las corridas.** No necesita una línea de motor: `GET /pipeline?historial=` ya devuelve hasta 50. Usable el mismo día.
+2. **La tabla `evento` y que `enviar_alerta` la escriba.** Migración y ~30 líneas.
+3. **`GET /eventos` y la segunda lista** en la misma pestaña.
+4. **La purga.**
+
+Se empieza por lo que **no** motivó el punto, y es a propósito: entrega algo usable antes de pagar la migración, y la pantalla que se arma en el paso 1 es la misma que recibe los eventos en el 3.
+
+#### Cuidado
+
+**Un evento no puede filtrar lo que el log sí puede decir.** El log del motor es privado y ahí van los mensajes crudos del proveedor; el panel se lee desde la cabina, que es otra superficie. Vale la misma regla que ya se aplicó dos veces: el detalle del proveedor no se echoa. Ver el punto 9 y `POST /modelos`.

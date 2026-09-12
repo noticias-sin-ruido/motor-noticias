@@ -26,6 +26,29 @@ class _DocSinEntidades:
 
 
 @pytest.fixture(autouse=True)
+def sin_escribir_eventos_de_verdad(monkeypatch):
+    """
+    Que la suite no escriba en la base real. **Pasó.**
+
+    `eventos.registrar_sin_romper` abre **su propia sesión** con `get_engine()`
+    -- tiene que hacerlo, porque `alerts.enviar_alerta` se llama desde cinco
+    módulos y no recibe una. Pero los tests corren fuera del contenedor con el
+    mismo `DATABASE_URL`, así que esa sesión apunta al Postgres de producción:
+    cada corrida de pytest dejaba filas como `paso:x` y `Se cayó algo`, con
+    contadores de 37, mezcladas con los eventos reales del motor.
+
+    Lo encontró mirar `GET /eventos` en la base real después de sembrar tres
+    eventos de prueba: había siete, y cuatro eran basura de la suite.
+
+    Los tests que **sí** quieren observar el registro lo parchean con su propio
+    doble; éste sólo evita que el resto escriba sin darse cuenta.
+    """
+    from src.services import eventos
+
+    monkeypatch.setattr(eventos, "registrar_sin_romper", lambda **kw: None)
+
+
+@pytest.fixture(autouse=True)
 def spacy_mockeado():
     """
     Ningún test carga el modelo real de spaCy.

@@ -13,6 +13,7 @@ from email.message import EmailMessage
 from typing import Dict
 
 from ..config import settings
+from . import eventos
 from ..tiempo import ahora_utc
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,16 @@ def enviar_alerta(
     Nunca propaga excepciones: si el aviso falla, el pipeline tiene que seguir.
     Fallar al avisar de un fallo no puede ser lo que tire el proceso.
     """
+    # **El evento se registra ANTES del cooldown, y ese orden es la decisión.**
+    # Son dos consumidores del mismo hecho con necesidades opuestas: el mail se
+    # calla para no inundar la casilla, el panel tiene que seguir contando. Si
+    # esto fuera después del `return`, un feed que falló cuarenta veces
+    # aparecería una sola en la pantalla -- y saber que fueron cuarenta es
+    # justamente lo que distingue un tropiezo de algo roto.
+    eventos.registrar_sin_romper(
+        clave=clave, asunto=asunto, mensaje=cuerpo, terminal=ignorar_cooldown
+    )
+
     if not ignorar_cooldown and _en_cooldown(clave):
         logger.warning(f"Alerta '{clave}' silenciada por cooldown: {asunto}")
         return False

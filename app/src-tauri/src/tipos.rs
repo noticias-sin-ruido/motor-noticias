@@ -334,6 +334,49 @@ pub struct RespuestaAltaModelo {
     pub en_uso: String,
 }
 
+// --- GET /eventos ----------------------------------------------------------
+
+/// Algo que el motor considero digno de avisar.
+///
+/// **Una fila por clave con contador, no una por ocurrencia.** Un feed caido
+/// toda la noche daria 96 filas identicas que tapan todo lo demas -- el mismo
+/// problema que el cooldown evita en el mail. Y la fila se escribe **aunque el
+/// cooldown silencie el envio**: son dos consumidores del mismo hecho con
+/// necesidades opuestas.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct EventoRegistrado {
+    pub id: Id,
+    /// La clave con la que el motor agrupa el aviso: `ingesta:La Nacion`.
+    pub clave: String,
+    /// Lo que va antes del `:`. Viene derivada del motor para poder filtrar sin
+    /// partir la clave de este lado.
+    pub categoria: String,
+    pub asunto: String,
+    pub mensaje: String,
+    /// Cuantas veces ocurrio. **Es el numero que distingue un tropiezo de algo
+    /// roto**, y el que se perderia si el evento se registrara solo cuando el
+    /// mail sale.
+    pub veces: u32,
+    /// Desde cuando viene pasando. No se pisa al repetirse.
+    pub primera_vez: String,
+    pub ultima_vez: String,
+    /// Si informa algo que ya no se puede deshacer -- una sintesis abandonada,
+    /// por ejemplo. Sale de los avisos que pasan `ignorar_cooldown`, asi que la
+    /// severidad no necesito un campo propio.
+    pub terminal: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct RespuestaEventos {
+    pub status: String,
+    /// Las categorias que existen **de verdad**, para armar el filtro con eso y
+    /// no con una lista fija que se desactualiza cuando el motor suma un aviso.
+    pub categorias: Vec<String>,
+    pub eventos: Vec<EventoRegistrado>,
+}
+
 // --- GET /alertas, PATCH /alertas y POST /alertas/probar -------------------
 
 /// A quien avisa el motor cuando algo se rompe.

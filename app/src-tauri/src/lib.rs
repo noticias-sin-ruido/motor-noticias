@@ -17,14 +17,14 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter};
 
-use ajustes::Ajustes;
 use api::ErrorDeApi;
 use docker::ErrorDocker;
 use motor::Estado;
 use tipos::{
     Id, RespuestaActivarModelo, RespuestaAlertas, RespuestaAltaModelo, RespuestaClusters,
-    RespuestaDetalle, RespuestaEntrega, RespuestaMedio, RespuestaMedios, RespuestaModelos,
-    RespuestaPanel, RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar, Salud, Sintetizado,
+    RespuestaDetalle, RespuestaEntrega, RespuestaEventos, RespuestaMedio, RespuestaMedios,
+    RespuestaModelos, RespuestaPanel, RespuestaPipeline, RespuestaSintesis, RespuestaSintetizar,
+    Salud, Sintetizado,
 };
 
 /// El canal por el que la interfaz se entera de en qué anda el motor. Se emite
@@ -54,6 +54,27 @@ fn token_borrar() -> Result<(), String> {
     secretos::borrar()
 }
 
+// --- Hasta cuándo se revisaron los problemas ------------------------------
+
+/// La marca de "ya lo vi", o `None` si nunca se miró.
+#[tauri::command]
+fn problemas_vistos_leer(app: AppHandle) -> Result<Option<String>, String> {
+    Ok(ajustes::leer(&app)?.problemas_vistos_hasta)
+}
+
+/// Marca los problemas como revisados hasta ahora.
+///
+/// **Vive en la app y no en el motor.** "¿Lo vi yo?" es del operador y de su
+/// máquina; si dos personas usan el mismo motor, que una lo marque no puede
+/// apagarle el contador a la otra.
+///
+/// El instante lo pone el front con el reloj de la máquina, que es el mismo con
+/// el que compara las fechas de los eventos.
+#[tauri::command]
+fn problemas_vistos_marcar(app: AppHandle, momento: String) -> Result<(), String> {
+    ajustes::actualizar(&app, |a| a.problemas_vistos_hasta = Some(momento))
+}
+
 // --- Dónde está el repo ---------------------------------------------------
 
 /// La ruta del repo guardada, o `None` si todavía no se configuró.
@@ -74,12 +95,9 @@ fn repo_guardar(app: AppHandle, ruta: PathBuf) -> Result<(), String> {
             ruta.display()
         ));
     }
-    ajustes::guardar(
-        &app,
-        &Ajustes {
-            ruta_del_repo: Some(ruta),
-        },
-    )
+    // `actualizar` y no `guardar`: construir un `Ajustes` acá pisaría
+    // `problemas_vistos_hasta`, que este comando no tiene por qué tocar.
+    ajustes::actualizar(&app, |a| a.ruta_del_repo = Some(ruta))
 }
 
 // --- El motor -------------------------------------------------------------
@@ -336,6 +354,21 @@ async fn alta_modelo(
     api::post_json("/modelos", cuerpo).await
 }
 
+/// Lo que el motor considero digno de avisar, mas reciente primero.
+///
+/// **Existe porque enterarse no puede depender del mail.** El 12/09/2026 se
+/// descubrio que las nueve alertas del motor no le llegaban a nadie desde hacia
+/// meses: el unico rastro de cada fallo era un `logger.error` en el log de
+/// Docker, que rota y solo se lee desde una terminal.
+#[tauri::command]
+async fn eventos_listar(categoria: Option<String>) -> Result<RespuestaEventos, ErrorDeApi> {
+    let parametros = match categoria.filter(|c| !c.is_empty()) {
+        Some(c) => vec![("categoria", c)],
+        None => vec![],
+    };
+    api::get("/eventos", &parametros).await
+}
+
 /// A quien avisa el motor cuando algo se rompe. Exige token **siempre**.
 #[tauri::command]
 async fn alertas_ver() -> Result<RespuestaAlertas, ErrorDeApi> {
@@ -517,6 +550,8 @@ pub fn run() {
             token_existe,
             token_guardar,
             token_borrar,
+            problemas_vistos_leer,
+            problemas_vistos_marcar,
             repo_leer,
             repo_guardar,
             motor_estado,
@@ -525,6 +560,7 @@ pub fn run() {
             motor_salud,
             activar_modelo,
             alta_modelo,
+            eventos_listar,
             alertas_ver,
             alertas_cambiar,
             alertas_probar,

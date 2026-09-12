@@ -30,6 +30,7 @@ from .models import (
     Cluster,
     ConfiguracionAlertas,
     ConfiguracionEntrega,
+    Evento,
     Medio,
     ModeloIA,
 )
@@ -45,6 +46,11 @@ from .services.alertas import (
     configuracion as configuracion_de_alertas,
     guardar_destinos as guardar_destinos_de_alerta,
     marcar_prueba_ok as marcar_prueba_de_alerta_ok,
+)
+from .services.eventos import (
+    categorias as categorias_de_eventos,
+    listar as listar_eventos_registrados,
+    purgar_viejos as purgar_eventos_viejos,
 )
 from .services.panel_medios import panel_de_medios
 from .services.medios import (
@@ -342,6 +348,22 @@ def _job_ingesta_programada() -> None:
         # ya purgada no vuelve a tocarse — así que corre todos los ciclos y no
         # necesita su propio disparador.
         _correr_paso(session, "purga de cuerpos", purgar_cuerpos_vencidos, pasos)
+
+        # **La purga de eventos no es un paso del ciclo, y por eso no pasa por
+        # `_correr_paso`.** Aquéllos producen o transforman material y su
+        # resultado se guarda en `Corrida.pasos`, que es lo que la pantalla de
+        # actividad muestra; esto es mantenimiento de la tabla que registra los
+        # avisos. Meterlo ahí agregaría una línea de ruido a cada corrida para
+        # decir casi siempre "0 borrados".
+        #
+        # Corre todos los ciclos porque es barato --una consulta por fecha
+        # indexada-- y borra lo que no se repite hace 90 días.
+        try:
+            purgar_eventos_viejos(session)
+        except Exception as error:
+            # Que la limpieza del registro de fallos no sea lo que tumbe la
+            # corrida. Misma regla que el resto del avisador.
+            logger.warning("No se pudieron purgar los eventos viejos: %s", error)
 
     fin = ahora_local()
     duracion = (fin - arranque).total_seconds()
@@ -905,8 +927,19 @@ def sintesis_detalle(
 
 @app.get("/pipeline")
 def pipeline(
+    # **El tope subió de 50 a 200 el 12/09/2026, y el número sale de la
+    # frecuencia del ciclo, no de una intuición.** Con `INGEST_INTERVAL_MINUTES`
+    # en 15 son 96 corridas por día, así que 50 no llegaban a cubrir doce horas:
+    # la pantalla de actividad no podía contestar "¿desde cuándo viene pasando
+    # esto?", que es para lo que existe. Con 200 son dos días.
+    #
+    # El costo es el tamaño de la respuesta: cada corrida trae su `pasos`
+    # completo, con una entrada por medio en la ingesta. No se pagina porque
+    # esta ruta no tiene cursor y agregárselo para un historial que se lee de
+    # arriba hacia abajo sería resolver un problema que no existe -- pero si la
+    # respuesta llegara a molestar, ahí sí.
     historial: int = Query(
-        5, ge=1, le=50,
+        5, ge=1, le=200,
         description="Cuántas corridas devolver en total, la última incluida",
     ),
     session: Session = Depends(get_session),
@@ -1365,8 +1398,12 @@ def _vista_alertas(fila: ConfiguracionAlertas) -> dict:
     su proveedor y el motor siguió intentando meses contra una dirección muerta.
     Esta fecha es la única que distingue "hay un mail puesto" de "el mail sale".
     """
-    momento = fila.actualizado_en
-    prueba = fila.ultima_prueba_ok
+    # **`a_local` y no el `isoformat` crudo.** La regla del proyecto es guardar
+    # en UTC y mostrar en UTC-3 con el offset explícito (ver `src/tiempo.py`);
+    # las dos primeras versiones de este endpoint la saltearon y la cabina
+    # mostraba todo tres horas adelantado.
+    momento = a_local(fila.actualizado_en)
+    prueba = a_local(fila.ultima_prueba_ok)
     return {
         "destinos": list(fila.destinos or []),
         "configurado": bool(fila.destinos),
@@ -1464,6 +1501,59 @@ def probar_alertas(session: Session = Depends(get_session)):
 
     fila = marcar_prueba_de_alerta_ok(session)
     return {"status": "ok", "alertas": _vista_alertas(fila)}
+
+
+def _vista_evento(fila: Evento) -> dict:
+    """
+    Lo que se devuelve de un evento.
+
+    **El `mensaje` viaja tal cual y eso está pensado.** Es el mismo texto que
+    `enviar_alerta` le manda al operador por mail, y ya pasó por el saneo de
+    quien lo escribió — los mensajes crudos de un proveedor no llegan hasta acá,
+    se quedan en el log. Es la misma línea que `POST /modelos`: lo que el
+    operador puede leer en su casilla lo puede leer en su cabina.
+    """
+    return {
+        "id": fila.id,
+        "clave": fila.clave,
+        "categoria": fila.categoria,
+        "asunto": fila.asunto,
+        "mensaje": fila.mensaje,
+        "veces": fila.veces,
+        # Con el offset explícito, como el resto de la API: quien lee no tiene
+        # que hacer la resta mentalmente ni adivinar la zona. Ver `tiempo.py`.
+        "primera_vez": a_local(fila.primera_vez).isoformat(timespec="seconds"),
+        "ultima_vez": a_local(fila.ultima_vez).isoformat(timespec="seconds"),
+        "terminal": fila.terminal,
+    }
+
+
+@app.get("/eventos", dependencies=[Depends(exigir_token_estricto)])
+def listar_eventos(
+    categoria: Optional[str] = Query(None, description="ingesta | webhook | sintesis…"),
+    limite: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session),
+):
+    """
+    Lo que el motor consideró digno de avisar, más reciente primero.
+
+    **Exige token siempre**, como `/entrega` y `/alertas`: los eventos nombran
+    medios, dicen cuándo falló qué, y son información operativa del despliegue.
+
+    **Una fila por clave con un contador, no una por ocurrencia.** Un feed caído
+    toda la noche daría 96 filas idénticas que tapan todo lo demás — el mismo
+    problema que el cooldown evita en el mail. Ver `models/evento.py`.
+
+    `categorias` viaja en la respuesta para que la cabina arme el filtro con lo
+    que existe de verdad, en vez de con una lista fija que se desactualiza cuando
+    el motor suma un aviso nuevo.
+    """
+    filas = listar_eventos_registrados(session, categoria=categoria, limite=limite)
+    return {
+        "status": "ok",
+        "categorias": categorias_de_eventos(session),
+        "eventos": [_vista_evento(f) for f in filas],
+    }
 
 
 # ============================================================

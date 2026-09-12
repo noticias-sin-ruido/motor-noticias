@@ -82,7 +82,7 @@ Seis notas sobre casos que no son obvios:
   dos columnas y exigirlos todos ataría la app a que nadie agregue una columna
   nunca.
 
-### Seis rutas que el contrato vigila pero no invoca
+### Siete rutas que el contrato vigila pero no invoca
 
 `GET`/`PATCH /entrega` y `PATCH`/`POST /modelos` llevan `solo_forma` en el
 diccionario. El guardián de deriva **sí** las cubre —renombrar un campo de esas
@@ -95,7 +95,8 @@ tiene su motivo:
   suite no sale a la red ni mockea proveedores: eso es trabajo de
   `tests/test_modelos.py`;
 - `POST`/`PUT /medios` **sondean los feeds** por el mismo motivo, y su red la
-  mockea `tests/test_medios.py`.
+  mockea `tests/test_medios.py`;
+- `GET /eventos` **exige token siempre**, como las de `/entrega`.
 
 ### Lo que el contrato NO cubre, y no puede
 

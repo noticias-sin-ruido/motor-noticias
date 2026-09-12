@@ -649,3 +649,99 @@ button.chico {
 /* La confirmación de que el correo salió. Verde y no ámbar: es una buena
    noticia, aunque venga con la advertencia de que salir no es llegar. */
 .ayuda.ok { color: var(--ok); }
+
+/* --- La actividad del motor (backlog punto 19) ------------------------- */
+
+/* **`center` y no `flex-start`.** El título más su bajada miden dos renglones y
+   el control de al lado uno solo: alineados arriba, el control quedaba pegado al
+   título y con un hueco debajo. Centrado, el bloque de texto y el control
+   comparten eje. */
+.actividad-cabecera { display: flex; align-items: center; gap: 1rem; }
+.actividad-cabecera h2 { margin-bottom: 0.2rem; }
+.actividad-cabecera button,
+.actividad-cabecera select { margin-left: auto; flex: 0 0 auto; width: auto; margin-bottom: 0; }
+
+/* El día como encabezado, y la hora sola en cada fila. Antes cada una repetía
+   la fecha completa: veinticinco veces lo mismo, con cuatro dígitos distintos
+   perdidos al final. */
+.actividad-dia { margin-top: 1.1rem; }
+.actividad-dia h3 {
+  margin: 0 0 0.2rem; font-size: 0.78rem; font-weight: 600;
+  color: var(--tinta-tenue); text-transform: capitalize;
+}
+
+.lista-corridas { list-style: none; margin: 0; padding: 0; }
+
+/* **Tres columnas fijas y no texto corrido.** El ancho de la primera y la
+   tercera está declarado para que la vista se recorra en vertical: la hora
+   siempre empieza donde empezó la de arriba, y la duración termina alineada.
+   Con `flex` y texto corrido, cada fila arrancaba en un lugar distinto. */
+/* **El filete lo llevan TODAS, y por eso las horas alinean.** La primera
+   versión se lo ponía sólo a las que fallaron, con su `padding-left`: esas
+   filas quedaban corridas medio rem respecto del resto y la columna de la hora
+   se rompía justo donde uno recorre con la vista. */
+.lista-corridas .corrida {
+  display: grid; grid-template-columns: 3.2rem 1fr 4.5rem;
+  gap: 0.8rem; align-items: baseline;
+  padding: 0.4rem 0 0.4rem 0.5rem; border-top: 1px solid var(--filete);
+  border-left: 2px solid var(--filete);
+  font-size: 0.82rem;
+}
+.corrida-hora { font-family: var(--mono); color: var(--tinta-tenue); }
+.corrida-hizo { color: var(--tinta-suave); overflow-wrap: anywhere; }
+/* Sin novedades es lo normal, no un problema: se atenúa para que las corridas
+   que hicieron algo salten a la vista al recorrer la lista. */
+.corrida-hizo em { color: var(--tinta-tenue); font-style: italic; }
+.corrida-duracion {
+  font-family: var(--mono); color: var(--tinta-tenue); text-align: right;
+  white-space: nowrap;
+}
+
+/* Lo que falló va aparte de lo que se produjo, y con color: en la primera
+   versión un «5 fallaron» quedaba en el medio de una tira de texto, entre dos
+   números buenos, y se perdía. */
+.corrida-fallo { color: var(--alerta); font-weight: 600; }
+/* El color dice qué pasó, y el gris de arriba es el default: una corrida sin
+   novedades corrió bien pero no hizo nada, y pintarla de verde sería celebrar
+   un no-evento. Verde queda reservado para las que produjeron algo. */
+.lista-corridas .corrida.hizo-algo { border-left-color: var(--ok); }
+.lista-corridas .corrida.con-falla { border-left-color: var(--alerta); }
+
+/* Los eventos: qué se rompió. Comparte el filete de color con las corridas
+   --misma pantalla, mismo vocabulario visual-- pero acá el default es ámbar,
+   porque una fila en esta lista ya significa que algo salió mal. */
+.lista-eventos { list-style: none; margin: 0.9rem 0 0; padding: 0; }
+.lista-eventos .evento {
+  padding: 0.6rem 0 0.6rem 0.5rem;
+  border-top: 1px solid var(--filete);
+  border-left: 2px solid var(--alerta);
+  display: grid; gap: 0.15rem;
+}
+/* Terminal: informa algo que ya no se puede deshacer. Rojo y no ámbar, que es
+   la distinción que el motor ya hacía con `ignorar_cooldown`. */
+.lista-eventos .evento.terminal { border-left-color: var(--error); }
+
+.evento-cabeza { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.evento-cabeza b { font-size: 0.88rem; }
+/* El contador es lo que distingue un tropiezo de algo roto: se destaca. */
+.evento-veces {
+  font-family: var(--mono); font-size: 0.78rem; font-weight: 600;
+  color: var(--alerta);
+}
+.evento-cuando {
+  margin-left: auto; font-family: var(--mono); font-size: 0.78rem;
+  color: var(--tinta-tenue); white-space: nowrap;
+}
+.evento-mensaje { margin: 0; font-size: 0.82rem; color: var(--tinta-suave); overflow-wrap: anywhere; }
+.evento-clave { margin: 0; font-size: 0.75rem; color: var(--tinta-tenue); }
+.evento-clave code { font-family: var(--mono); }
+
+/* El contador de la pestaña Problemas. **Es la razón de que Problemas sea una
+   pestaña y no una lista adentro de Actividad**: enterarse de que algo se rompió
+   no debería exigir ir a mirar. */
+.pestana-cuenta {
+  margin-left: 0.4rem; padding: 0.05rem 0.35rem;
+  background: var(--alerta); color: var(--sobre-marca);
+  border-radius: 999px; font-size: 0.7rem; font-weight: 700;
+  font-family: var(--mono);
+}

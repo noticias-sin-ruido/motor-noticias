@@ -154,6 +154,22 @@ export function alPedirSalida(fn: (pedido: PedidoDeSalida) => void): Promise<() 
   return listen<PedidoDeSalida>("pedido-de-salida", (e) => fn(e.payload));
 }
 
+/**
+ * Hasta cuándo se revisaron los problemas, o `null` si nunca.
+ *
+ * **Vive en la app y no en el motor**: «¿lo vi yo?» es del operador y de su
+ * máquina. Si dos personas usan el mismo motor desde dos instalaciones, que una
+ * lo marque no puede apagarle el contador a la otra.
+ */
+export function problemasVistosLeer(): Promise<string | null> {
+  return invoke<string | null>("problemas_vistos_leer");
+}
+
+/** Marca los problemas como revisados hasta ese instante. */
+export function problemasVistosMarcar(momento: string): Promise<void> {
+  return invoke("problemas_vistos_marcar", { momento });
+}
+
 export function repoLeer(): Promise<string | null> {
   return invoke<string | null>("repo_leer");
 }
