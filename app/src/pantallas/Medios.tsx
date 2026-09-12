@@ -195,11 +195,48 @@ function ConfirmarDominio({
   );
 }
 
+/**
+ * La casilla que deja que el motor vaya a la página a buscar el cuerpo.
+ *
+ * **Es una decisión del operador y no del motor, y por eso es una casilla y no
+ * algo que el sondeo prenda solo.** El feed es lo que el medio eligió publicar;
+ * ir a la página a buscar lo que dejó afuera es otra cosa, y quien acepta los
+ * términos del medio es quien la usa, no nosotros.
+ *
+ * Sin esto en la interfaz, un medio como Clarín se da de alta, queda activo,
+ * pide el feed cada quince minutos y **guarda cero** sin que nada lo diga.
+ */
+function CasillaExtraer({
+  valor,
+  alCambiar,
+}: {
+  valor: boolean;
+  alCambiar: (v: boolean) => void;
+}) {
+  return (
+    <label className={valor ? "casilla casilla-encendida" : "casilla"}>
+      <input
+        type="checkbox"
+        checked={valor}
+        onChange={(e) => alCambiar(e.target.checked)}
+      />
+      <span>
+        <b>Ir a buscar el cuerpo a la página del medio.</b> Hace falta cuando el
+        feed trae sólo el titular y la bajada: sin esto, el motor descarta esas
+        notas y el medio no aporta nada. Actívalo si el sondeo te avisa que
+        ningún item trae el cuerpo — y revisá antes las condiciones de uso del
+        medio, porque estarías leyendo lo que eligió no publicar en su feed.
+      </span>
+    </label>
+  );
+}
+
 /** El formulario de alta, con su advertencia previa. */
 function Alta({ alAlta }: { alAlta: () => void }) {
   const [nombre, setNombre] = useState("");
   const [urlBase, setUrlBase] = useState("");
   const [feeds, setFeeds] = useState("");
+  const [extraerPorUrl, setExtraerPorUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
   const [advirtiendo, setAdvirtiendo] = useState(false);
@@ -220,11 +257,13 @@ function Alta({ alAlta }: { alAlta: () => void }) {
         nombre: nombre.trim(),
         urlBase: urlBase.trim(),
         feedsRss: aLista(feeds),
+        extraerPorUrl,
       });
       if (r.sondeo) setSondeo({ sondeo: r.sondeo, avisos: r.avisos });
       setNombre("");
       setUrlBase("");
       setFeeds("");
+      setExtraerPorUrl(false);
       alAlta();
     } catch (e) {
       setError(datos.mensajeDeRechazo(e));
@@ -274,6 +313,8 @@ function Alta({ alAlta }: { alAlta: () => void }) {
         />
       </label>
 
+      <CasillaExtraer valor={extraerPorUrl} alCambiar={setExtraerPorUrl} />
+
       {error && <div className="aviso">{error}</div>}
       {sondeo && (
         <InformeDeSondeo sondeo={sondeo.sondeo} avisos={sondeo.avisos} />
@@ -309,6 +350,7 @@ function Editar({
   const [nombre, setNombre] = useState(medio.nombre);
   const [urlBase, setUrlBase] = useState(medio.url_base);
   const [feeds, setFeeds] = useState(medio.feeds_rss.join("\n"));
+  const [extraerPorUrl, setExtraerPorUrl] = useState(medio.extraer_por_url);
   const [error, setError] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
   const [porConfirmar, setPorConfirmar] = useState<string[] | null>(null);
@@ -322,6 +364,7 @@ function Editar({
         nombre: nombre.trim(),
         urlBase: urlBase.trim(),
         feedsRss: aLista(feeds),
+        extraerPorUrl,
         confirmarDominioNuevo: confirmando,
       });
       setPorConfirmar(null);
@@ -364,6 +407,8 @@ function Editar({
           rows={3}
         />
       </label>
+
+      <CasillaExtraer valor={extraerPorUrl} alCambiar={setExtraerPorUrl} />
 
       {error && <div className="aviso">{error}</div>}
       <p className="ayuda">

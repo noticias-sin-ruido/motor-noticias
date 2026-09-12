@@ -1313,6 +1313,35 @@ class TestEditarMedio:
     def test_un_medio_que_no_existe_da_404(self, client, red):
         assert client.put("/medios/9999", json=ALTA).status_code == 404
 
+    def test_se_puede_prender_extraer_por_url_al_editar(self, client, red):
+        """
+        **El caso que motivó esto.** Clarín no publica el cuerpo en su feed, así
+        que sin esta bandera se da de alta, queda activo, pide el feed cada
+        quince minutos y guarda cero -- medido: 10 items descartados por
+        corrida, sin que nada lo diga.
+
+        La bandera entra por herencia de `AltaMedio`, y un docstring afirmaba lo
+        contrario. El test existe para que la afirmación no vuelva a divergir
+        del código.
+        """
+        medio = self._dar_de_alta(client)
+        assert medio["extraer_por_url"] is False
+        respuesta = client.put(
+            f"/medios/{medio['id']}", json={**ALTA, "extraer_por_url": True}
+        )
+        assert respuesta.status_code == 200
+        assert respuesta.json()["medio"]["extraer_por_url"] is True
+        assert client.get("/medios").json()["medios"][0]["extraer_por_url"] is True
+
+    def test_se_puede_apagar_de_nuevo(self, client, red):
+        """Una decisión del operador que no se puede revertir no es una decisión."""
+        medio = client.post(
+            "/medios", json={**ALTA, "extraer_por_url": True}
+        ).json()["medio"]
+        assert medio["extraer_por_url"] is True
+        r = client.put(f"/medios/{medio['id']}", json={**ALTA, "extraer_por_url": False})
+        assert r.json()["medio"]["extraer_por_url"] is False
+
     def test_no_deja_tocar_activo_por_esta_puerta(self, client, red):
         """
         `activo` tiene su propio PATCH, con la garantía de que apagar no

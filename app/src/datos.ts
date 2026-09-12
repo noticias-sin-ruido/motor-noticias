@@ -208,11 +208,13 @@ export function altaMedio(datos: {
   nombre: string;
   urlBase: string;
   feedsRss: string[];
+  extraerPorUrl: boolean;
 }): Promise<RespuestaMedio> {
   return invoke<RespuestaMedio>("medio_alta", {
     nombre: datos.nombre,
     urlBase: datos.urlBase,
     feedsRss: datos.feedsRss,
+    extraerPorUrl: datos.extraerPorUrl,
   });
 }
 
@@ -241,6 +243,7 @@ export function editarMedio(datos: {
   nombre: string;
   urlBase: string;
   feedsRss: string[];
+  extraerPorUrl: boolean;
   confirmarDominioNuevo: boolean;
 }): Promise<RespuestaMedio> {
   return invoke<RespuestaMedio>("medio_editar", {
@@ -248,6 +251,7 @@ export function editarMedio(datos: {
     nombre: datos.nombre,
     urlBase: datos.urlBase,
     feedsRss: datos.feedsRss,
+    extraerPorUrl: datos.extraerPorUrl,
     confirmarDominioNuevo: datos.confirmarDominioNuevo,
   });
 }

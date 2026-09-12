@@ -1432,8 +1432,10 @@ class CambioDeMedio(AltaMedio):
 
     Hereda de `AltaMedio` a propósito y no repite los campos: si mañana el alta
     suma uno, editar lo sigue solo. Lo que **no** entra es `activo` —tiene su
-    propio `PATCH`, con su propia semántica— ni `extraer_por_url`, que es una
-    decisión aparte del operador (punto 3 del backlog) y no un dato del medio.
+    propio `PATCH`, con su propia semántica. `extraer_por_url` **sí** entra, por
+    herencia y a propósito: es una decisión del operador, y si no se pudiera
+    cambiar después, un medio dado de alta sin la bandera quedaría sin ingerir
+    para siempre sin forma de arreglarlo.
     """
 
     # Default `False` y no `None`: no confirmar es el estado normal, y el que

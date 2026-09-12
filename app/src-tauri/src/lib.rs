@@ -362,6 +362,12 @@ async fn medio_activar(medio_id: Id, activo: bool) -> Result<serde_json::Value, 
 /// Da de alta un medio. El motor **sondea los feeds antes de guardar**, asi que
 /// un 422 aca significa "ese feed no sirve" y trae cual y por que.
 ///
+/// **`extraer_por_url` viaja aunque sea `false`.** Es la bandera que deja que el
+/// motor vaya a la pagina del articulo a buscar el cuerpo que el medio no puso
+/// en su feed. Sin ella en la interfaz, un medio como Clarin se da de alta,
+/// queda activo, pide el feed cada quince minutos y **guarda cero** sin que
+/// nada lo diga -- medido: 10 items descartados por corrida.
+///
 /// Nace activo, a diferencia del alta de modelos: los medios conviven y el
 /// clustering necesita varios. Darlo de alta para despues acordarse de prenderlo
 /// seria una ceremonia sin contenido.
@@ -370,6 +376,7 @@ async fn medio_alta(
     nombre: String,
     url_base: String,
     feeds_rss: Vec<String>,
+    extraer_por_url: bool,
 ) -> Result<RespuestaMedio, ErrorDeApi> {
     api::post_json(
         "/medios",
@@ -377,6 +384,7 @@ async fn medio_alta(
             "nombre": nombre,
             "url_base": url_base,
             "feeds_rss": feeds_rss,
+            "extraer_por_url": extraer_por_url,
         }),
     )
     .await
@@ -412,6 +420,7 @@ async fn medio_editar(
     nombre: String,
     url_base: String,
     feeds_rss: Vec<String>,
+    extraer_por_url: bool,
     confirmar_dominio_nuevo: bool,
 ) -> Result<RespuestaMedio, ErrorDeApi> {
     api::put_json(
@@ -420,6 +429,7 @@ async fn medio_editar(
             "nombre": nombre,
             "url_base": url_base,
             "feeds_rss": feeds_rss,
+            "extraer_por_url": extraer_por_url,
             "confirmar_dominio_nuevo": confirmar_dominio_nuevo,
         }),
     )

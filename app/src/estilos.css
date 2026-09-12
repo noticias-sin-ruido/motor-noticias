@@ -513,9 +513,11 @@ button.chico {
 .ta-acciones { display: flex; align-items: center; gap: 0.6rem; margin-top: auto; flex: none; }
 .ta-id { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--tinta-tenue); font-variant-numeric: tabular-nums; }
 
-.feed-pie { display: flex; align-items: center; gap: 1rem; padding-top: 0.4rem; }
+/* El pie de paginado, compartido por el feed y la lista de trabajo. Una sola
+   regla y no una copia por pantalla: dos copias se desincronizan. */
+.feed-pie, .paginado { display: flex; align-items: center; gap: 1rem; padding-top: 0.4rem; }
 .feed-cuenta { font-size: 0.78rem; color: var(--tinta-tenue); }
-.feed-pie button { margin-left: auto; }
+.feed-pie button, .paginado button { margin-left: auto; }
 
 /* --- El detalle de un angulo ---------------------------------------------- */
 
