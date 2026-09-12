@@ -142,7 +142,15 @@ Lista viva de límites conocidos del stack actual. No son bugs ni deuda técnica
 7. ~~**Migraciones con Alembic sin implementar**~~ ✅ **RESUELTO**: Alembic configurado, migración inicial aplicada y base real marcada con `alembic stamp head` sin perder las noticias ya ingeridas. `init_db()` dejó de usar `create_all()` y ahora solo habilita la extensión y verifica que el esquema esté migrado. Ver `conventions.md`, "BD y migraciones".
 8. ~~**El pipeline se auto-repara pero es mudo**~~ ✅ **RESUELTO**: `services/alerts.py` avisa por mail ante el fallo de cualquier paso, con cooldown para no inundar la casilla, y en el scheduler cada paso corre aislado (la fusión es la única que corta la cadena, para no publicar duplicados). La contingencia de fondo sigue siendo la idempotencia de todos los pasos: un crash a mitad se recupera solo en la corrida siguiente. Queda pendiente el logging estructurado y las métricas, que cubre Monitoring en Fase 5.
 
-9. **`agrupar_pendientes` es cuadrático** (queda fuera de Fase 5 a propósito — es volumen de noticias, no deployment): compara cada noticia suelta contra todas las demás de la ventana. Medido: 3,6 s con ~200 sueltas; proyectado, ~14 s con 400 y cerca de un minuto con 800. Con 7 medios y ventana de 12 h no se llega ni cerca, pero es el primer lugar que se va a poner lento al sumar medios. La salida sería acotar los candidatos con el KNN de pgvector en vez de comparar contra todo (ver punto 3, que hoy es el único motivo por el que el índice no hace falta).
+9. **`agrupar_pendientes` es cuadrático, pero acotado por diseño** (no es deployment, es volumen de noticias): compara cada noticia suelta contra todas las demás **de la ventana abierta**. **Medido el 12/09/2026 con doce medios: 1,33 s** sobre un ciclo de 900 s — el 0,15%.
+
+   La proyección vieja de este punto —"~14 s con 400 sueltas, cerca de un minuto con 800"— **no se va a cumplir, y conviene no repetirla**: asumía que la n crece con la base. No crece. Hay 6.980 noticias sueltas y el agrupamiento evalúa **369**, porque sólo mira `HORAS_CLUSTER_ABIERTO`.
+
+   **El driver tampoco es la cantidad de medios sino cuántas noticias no matchean con nada**: `_mejor_match` compara primero contra los centroides y **sale temprano** si alguno pasa el umbral, así que una noticia que encuentra su cluster nunca toca el loop caro. Sumar medios que cubren los mismos hechos **abarata** el agrupamiento.
+
+   Disparador para volver a medir: **más de ~1.000 «sin match» por corrida** (hoy 369), o **ampliar `HORAS_CLUSTER_ABIERTO`**, que cuadruplica el trabajo al duplicarse sin que nadie sume un medio.
+
+   Y la salida no es el KNN de pgvector, o no primero: el escalón barato es **no recomparar pares ya comparados** —las mismas huérfanas se comparan entre sí hasta 48 veces en las 12 h de la ventana— y ése **no cuesta exactitud**, a diferencia del índice aproximado. Ver el punto 4 del backlog en `roadmap.md`.
 
 10. **Los eventos de varios días generan clusters sucesivos** (Fase 4): un cluster cierra a las 12 h de creado, así que la cobertura del día siguiente arma uno nuevo, y la fusión solo toca clusters abiertos. Una historia larga (la muerte de Jorge Messi cubrió varios días) produce un segundo conjunto de publicaciones. En parte es correcto —el velorio es otro hecho— pero puede haber solapamiento. Revisar con síntesis reales a la vista.
 

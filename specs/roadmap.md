@@ -235,11 +235,45 @@ Después se atacaron **los catorce endpoints**, no solo los nuevos, y de ahí sa
 
 Ver `change_logs.md`, "Backlog punto 3".
 
-### 4. `agrupar_pendientes` cuadrático + índice de pgvector — el primer síntoma real al sumar medios
+### 4. `agrupar_pendientes` cuadrático — diferido, con el disparador medido
 
-`tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta; medido: 3,6 s con ~200 sueltas, proyectado ~14 s con 400 y cerca de un minuto con 800. Con 7 medios no se nota. La salida es acotar candidatos con el índice HNSW/IVFFlat de pgvector (hoy inexistente a propósito, porque nada lo necesita) en vez de comparar contra todos — los dos puntos van juntos porque uno es la causa y el otro la solución.
+`tech_stack.md`, puntos 9 y 3. Compara cada noticia suelta contra todas las demás de la ventana abierta.
 
-**No se implementa todavía.** Se vigila el tiempo de la corrida de agrupamiento (ya logueado) a medida que se sumen medios vía el punto 1, y se ataca cuando el número se acerque a los segundos que empiezan a competir con el ciclo de 15 minutos del scheduler — no antes.
+**Medido el 12/09/2026, con doce medios cargados —Infobae incluido, que entró con 95 noticias de una—: 1,33 s.** Sobre un ciclo de 900 s, eso es el **0,15%**. No hay nada que hacer.
+
+#### Lo que la medición corrigió de este punto
+
+Este punto estuvo mal escrito desde el principio en tres cosas, y conviene dejarlas corregidas para no volver a plantearlas.
+
+**1. El disparador no es sumar medios.** La proyección original —"~14 s con 400 sueltas, cerca de un minuto con 800"— asumía que la n crece con la base. No crece: hay **6.980 noticias sueltas** y el agrupamiento evalúa **369**, porque sólo mira la ventana de `HORAS_CLUSTER_ABIERTO`. Es un **cuadrático acotado por diseño**, y esos 800 nunca iban a llegar.
+
+**2. El driver es cuántas no matchean, no cuántas hay.** `_mejor_match` compara primero contra los centroides de los clusters abiertos y **sale por un `return` temprano** si alguno supera el umbral; sólo si ninguno pasa recorre las sueltas. O sea que una noticia que encuentra su cluster cuesta O(clusters) y se va; la huérfana paga el loop completo.
+
+Eso invierte la intuición: **sumar medios que cubren los mismos hechos abarata el agrupamiento** —más salidas tempranas— y sumar medios de nicho lo encarece. El 12/09 fue el peor caso posible: 369 evaluadas, **369 sin match**, ninguna por el camino barato.
+
+**3. La salida no es el índice, o no primero.** Esas huérfanas se reevalúan en cada corrida a propósito —una nota que hoy no matcheó puede matchear cuando otro medio cubra el hecho— pero con la ventana en 12 h eso son **48 corridas**: la misma huérfana contra las mismas huérfanas, ~68.000 productos punto por vuelta. El escalón más barato es **no recomparar pares que ya se compararon y no cambiaron**, y **no cuesta exactitud**.
+
+El índice HNSW/IVFFlat es el último escalón, no el primero, y **tiene dos costos que este punto no nombraba.**
+
+El primero: **crear el índice no acelera nada por sí solo.** El punto 3 de `tech_stack.md` ya lo decía y los dos puntos nunca se cruzaron — *"el clustering ni siquiera usa el KNN de la base: compara centroides en memoria"*. Para que el índice sirva acá habría que **reescribir `agrupar_pendientes` para que consulte la base** en vez de comparar en memoria, que es bastante más que un `CREATE INDEX`. Hoy el único consumidor real del KNN es `GET /search`.
+
+El segundo: **es aproximado.** Cambia exactitud por velocidad, y acá perder un match no es lentitud — es una síntesis que no se publica y nadie se entera. Cuando llegue el momento hay que medir cuántos matches se pierden, no sólo cuánto acelera.
+
+#### Los escalones, en orden
+
+| paso | qué cuesta | qué pierde |
+|---|---|---|
+| 1. No recomparar pares ya comparados | memoria de pares | **nada** |
+| 2. Achicar `HORAS_CLUSTER_ABIERTO` | una constante | semántica del producto |
+| 3. Índice aproximado de pgvector | migración + calibración | **exactitud** |
+
+**Un condicional por volumen —"con pocos datos exacto, con muchos aproximado"— se evaluó y se descarta.** El patrón sirve cuando los dos caminos dan el mismo resultado y uno es más rápido; acá el rápido es aproximado, así que el condicional diría "con mucha carga me permito perder matches". Y además deja un segundo camino que casi nunca se ejercita, o sea que se pudre sin que nadie lo note. El escalón 1 no lo necesita —si es gratis se hace siempre— y el 3 no se quiere ni con volumen.
+
+#### Cuándo se vuelve a mirar
+
+**Cuando una corrida pase de ~1.000 «sin match».** Hoy son 369. Es el número que hay que vigilar, y ya sale en el log de cada corrida.
+
+**Y un segundo disparador que no tiene que ver con medios: ampliar `HORAS_CLUSTER_ABIERTO`.** Duplicar la ventana cuadruplica el trabajo, y eso puede pasar sin sumar un solo medio — es el cambio que dispara esto sin que nadie lo relacione con el rendimiento.
 
 ### 5. Eventos de varios días generan clusters sucesivos — decisión de producto, no de escala técnica
 
