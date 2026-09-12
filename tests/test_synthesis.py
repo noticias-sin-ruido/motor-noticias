@@ -1769,3 +1769,130 @@ class TestLaCadenaConTraduccionRealDeExcepciones:
             synthesis.llamar_modelo("un prompt", modelo)
 
         assert "anthropic" in str(capturado.value)
+
+
+class TestNormalizarEscapesDelModelo:
+    """
+    El modelo devuelve los acentos escapados, a veces.
+
+    **Los casos no son inventados**: salen de síntesis que se publicaron de
+    verdad. La 654 (12/09/2026) tituló un resumen con `clasificaci&#243;n` y la
+    552 (09/09) con `respald%f3`. Las noticias fuente de esos clusters estaban
+    limpias -- verificado sobre las nueve del cluster 915 -- así que el escape
+    lo puso el modelo, no la ingesta.
+    """
+
+    def test_entidades_html_decimales(self):
+        # Síntesis 654, tal como salió publicada.
+        crudo = "Colapinto avanz&#243; a la Q3 y finaliz&#243; en la novena posici&#243;n."
+        assert synthesis.normalizar_escapes(crudo) == (
+            "Colapinto avanzó a la Q3 y finalizó en la novena posición."
+        )
+
+    def test_percent_encoding_latin1(self):
+        # Síntesis 552 y 551, tal como salieron publicadas.
+        crudo = "El bloque respald%f3 la postura y la oposici%f3n reunir%eda el qu%f3rum"
+        assert synthesis.normalizar_escapes(crudo) == (
+            "El bloque respaldó la postura y la oposición reuniría el quórum"
+        )
+
+    def test_las_otras_dos_formas_de_entidad(self):
+        assert synthesis.normalizar_escapes("Espa&ntilde;a") == "España"
+        assert synthesis.normalizar_escapes("Espa&#xf1;a") == "España"
+
+    def test_es_idempotente(self):
+        """
+        Aplicarlo dos veces no puede cambiar nada: el mismo texto pasa por acá
+        cada vez que se reintenta una síntesis.
+        """
+        una = synthesis.normalizar_escapes("la clasificaci&#243;n")
+        assert synthesis.normalizar_escapes(una) == una
+
+    @pytest.mark.parametrize(
+        "intacto",
+        [
+            # **El caso que justifica no usar `unquote` genérico.** Aquel
+            # transforma cualquier `%` seguido de dos dígitos hex.
+            "Subió 50%ed más que el año pasado",
+            "100% de aumento en la tarifa",
+            "Tigre & Boca empataron 1 a 1",
+            "El acuerdo Mercosur-UE al 30%",
+        ],
+    )
+    def test_no_toca_lo_que_no_es_un_escape(self, intacto):
+        assert synthesis.normalizar_escapes(intacto) == intacto
+
+    def test_lo_que_perdio_el_acento_no_se_puede_recuperar(self):
+        """
+        La síntesis 514 salió con "presento" y "actualizacion": ahí el acento
+        **no está escapado, no existe**. No hay nada que desescapar, y esta
+        función no puede ni debe adivinarlo. Queda como trabajo del prompt.
+        """
+        perdido = "Fiat presento la actualizacion del modelo"
+        assert synthesis.normalizar_escapes(perdido) == perdido
+
+
+class TestElEsquemaNormalizaAlParsear:
+    """
+    La normalización va en el borde --al parsear-- y no antes de persistir,
+    porque hay dos cosas río abajo que leen estos textos.
+    """
+
+    def _angulo(self, **cambios) -> dict:
+        base = {
+            "titulo_angulo": "Un título",
+            "resumen_neutro": "Un resumen.",
+            "puntos_clave": ["Uno."],
+            "topicos": ["deportes"],
+            "relevancia_social": False,
+            "comparativa_enfoques": [
+                {"medio": "TN", "destaco": "a", "omitio": "b", "cita": "c"}
+            ],
+            "notas": [1],
+        }
+        base.update(cambios)
+        return base
+
+    def test_desescapa_los_campos_de_texto(self):
+        a = synthesis.AnguloGenerado(
+            **self._angulo(
+                titulo_angulo="Gran Premio de Espa&#241;a",
+                resumen_neutro="Colapinto clasific%f3 noveno.",
+            )
+        )
+        assert a.titulo_angulo == "Gran Premio de España"
+        assert a.resumen_neutro == "Colapinto clasificó noveno."
+
+    def test_desescapa_dentro_de_las_listas(self):
+        a = synthesis.AnguloGenerado(
+            **self._angulo(puntos_clave=["Finaliz&#243; noveno.", "Gasly qued%f3 fuera."])
+        )
+        assert a.puntos_clave == ["Finalizó noveno.", "Gasly quedó fuera."]
+
+    def test_desescapa_el_nombre_del_medio_y_por_eso_matchea(self):
+        """
+        **Razón 1 de que vaya en el borde.** `_comparativa_validada` matchea los
+        nombres con `_sin_acentos`; un "La Naci&#243;n" no matchea con "La
+        Nación" y el enfoque de ese medio se descartaba **en silencio**.
+        """
+        a = synthesis.AnguloGenerado(
+            **self._angulo(
+                comparativa_enfoques=[
+                    {"medio": "La Naci&#243;n", "destaco": "a", "omitio": "b", "cita": "c"}
+                ]
+            )
+        )
+        assert a.comparativa_enfoques[0].medio == "La Nación"
+        validada = synthesis._comparativa_validada(a.comparativa_enfoques, ["La Nación"])
+        assert "La Nación" in validada
+
+    def test_el_copy_de_redes_se_pesa_ya_desescapado(self):
+        """
+        **Razón 2.** `&#243;` pesa 6 caracteres y `ó` pesa 1, así que pesar antes
+        de desescapar recortaría un tuit que en realidad entra.
+        """
+        a = synthesis.AnguloGenerado(
+            **self._angulo(relevancia_social=True, resumen_redes="Clasific&#243; noveno")
+        )
+        assert a.resumen_redes == "Clasificó noveno"
+        assert synthesis.peso_x(a.resumen_redes) == len("Clasificó noveno")

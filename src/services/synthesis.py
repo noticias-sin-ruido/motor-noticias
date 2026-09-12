@@ -13,12 +13,14 @@ de la denunciante" de "omitió Instagram", y esa distinción es criterio.
 
 Ver specs/change_logs.md, Fase 4, para el detalle de las decisiones.
 """
+import html
 import logging
+import re
 import unicodedata
 from datetime import timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, Field as PydanticField, field_validator
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from tenacity import (
@@ -157,20 +159,122 @@ class SintesisFallida(Exception):
     """
 
 
+# --- Lo que el modelo escapa y nosotros tenemos que desescapar --------------
+
+# Los acentos del español en Latin-1, que es como el modelo los escapa cuando
+# los escapa. **Es un mapa acotado y no `urllib.parse.unquote`, a propósito**:
+# `unquote` transforma cualquier `%` seguido de dos dígitos hex, así que un
+# texto con "50%ed" se convertiría en "50í". Improbable en prosa, pero es una
+# puerta que no hace falta abrir. Esto dice lo que realmente hace -- arreglar
+# una malformación conocida -- en vez de "decodificar URLs", que no es lo que
+# está pasando.
+_ESCAPES_LATIN1 = {
+    "%e1": "á", "%e9": "é", "%ed": "í", "%f3": "ó", "%fa": "ú",
+    "%f1": "ñ", "%fc": "ü",
+    "%c1": "Á", "%c9": "É", "%cd": "Í", "%d3": "Ó", "%da": "Ú",
+    "%d1": "Ñ", "%dc": "Ü",
+    "%bf": "¿", "%a1": "¡", "%b0": "°", "%aa": "ª", "%ba": "º",
+}
+
+# **El `%` no puede venir después de un dígito, y eso lo decidió un test.**
+# La primera versión reemplazaba el escape en cualquier posición, y con eso
+# "Subió 50%ed más que el año pasado" se convertía en "Subió 50í más" -- que es
+# exactamente el falso positivo que el mapa acotado venía a evitar. Lo agarró
+# `test_no_toca_lo_que_no_es_un_escape`, no una hipótesis.
+#
+# La regla sale de mirar qué precede a cada cosa: un porcentaje **siempre** va
+# después de un dígito ("50%", "3,5%"), y un acento escapado va después de una
+# letra ("respald%f3") o abre la frase ("%bfQué"). Nunca después de un número.
+_PORCENTAJE_ESCAPADO = re.compile(
+    "(?<![0-9])(?:" + "|".join(re.escape(e) for e in _ESCAPES_LATIN1) + ")",
+    re.IGNORECASE,
+)
+
+
+def normalizar_escapes(texto: str) -> str:
+    """
+    Devuelve el texto con los acentos que el modelo escapó, desescapados.
+
+    **El problema es del modelo, no de la ingesta, y eso está medido.** Una
+    síntesis del 12/09/2026 salió publicada con "Franco Colapinto logr3 el
+    noveno puesto en la clasificaci&#243;n del Gran Premio de Espa&#241;a", y
+    **las nueve noticias fuente de ese cluster estaban limpias**: ninguna tenía
+    una sola entidad. Lo mismo con "respald%f3 la postura" del 09/09.
+
+    Tres esquemas distintos aparecieron en tres semanas -- entidades HTML,
+    percent-encoding, y acentos directamente ausentes -- y hasta **conviviendo
+    en la misma oración**: `logr3` roto al lado de `qued&#243;` y `largar&#225;`
+    intactos. Esa inconsistencia es lo que descarta que sea un saneador nuestro:
+    un saneador es determinista.
+
+    Los acentos que faltan del todo (el tercer caso) **no se arreglan acá**: esa
+    información ya no está, no hay nada que desescapar. Eso es trabajo del
+    prompt.
+    """
+    original = texto
+    texto = _PORCENTAJE_ESCAPADO.sub(
+        lambda m: _ESCAPES_LATIN1[m.group(0).lower()], texto
+    )
+    # `html.unescape` cubre las tres formas de entidad -- `&#243;`, `&#xf3;` y
+    # `&oacute;` -- y es idempotente sobre texto ya limpio.
+    texto = html.unescape(texto)
+
+    if texto != original:
+        # **Se avisa aunque se arregle.** Corregir en silencio es cómo un
+        # proveedor empeora sin que nadie se entere; el log es lo que deja
+        # medir si esto crece o desaparece.
+        logger.warning(
+            "El modelo devolvió texto escapado y se normalizó: %r -> %r",
+            original[:80],
+            texto[:80],
+        )
+    return texto
+
+
+class _TextoNormalizado(BaseModel):
+    """
+    Base de los modelos de la respuesta: **desescapa cada string al parsear.**
+
+    Va acá y no en `_persistir`, y no es una preferencia de estilo -- hay dos
+    cosas río abajo que leen estos textos antes de que se persistan:
+
+    1. **`ajustar_a_tweet` cuenta caracteres.** `&#243;` pesa 6 y `ó` pesa 1, así
+       que normalizar después de esa cuenta rompe la garantía de los 280: un
+       tuit que entra se recortaría igual.
+    2. **`_comparativa_validada` matchea nombres de medios** con `_sin_acentos`.
+       Un `"La Naci&#243;n"` no matchea con `"La Nación"`, y el enfoque de ese
+       medio **se descarta en silencio**.
+
+    O sea que normalizar en el borde arregla dos cosas que no estábamos
+    buscando. Ese es el motivo de que sea acá.
+    """
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _desescapar(cls, valor):
+        if isinstance(valor, str):
+            return normalizar_escapes(valor)
+        if isinstance(valor, list):
+            return [
+                normalizar_escapes(v) if isinstance(v, str) else v for v in valor
+            ]
+        return valor
+
+
 # --- Esquema de la respuesta del modelo -------------------------------------
 # Se le pasa al proveedor como esquema estructurado para que devuelva JSON
 # válido por construcción, en vez de pedírselo en prosa y parsear a la
 # esperanza. Cada adaptador lo envuelve como su protocolo lo pida.
 
 
-class EnfoqueMedio(BaseModel):
+class EnfoqueMedio(_TextoNormalizado):
     medio: str
     destaco: str
     omitio: str
     cita: str = PydanticField(description="Frase del cuerpo que respalda lo anterior")
 
 
-class AnguloGenerado(BaseModel):
+class AnguloGenerado(_TextoNormalizado):
     id_existente: Optional[int] = PydanticField(
         default=None,
         description="Id del ángulo ya publicado que este actualiza; null si es nuevo",
