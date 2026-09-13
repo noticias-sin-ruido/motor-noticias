@@ -2,16 +2,52 @@
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-794%20passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
+![Tests](https://img.shields.io/badge/tests-950%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 
 **Lee las noticias de varios medios, detecta cuáles cubren el mismo hecho y escribe una síntesis neutral que compara cómo lo contó cada uno.**
 
 El problema no es la falta de información, es el ruido: siete medios publican la misma noticia y ninguno dice exactamente lo mismo. Este motor agrupa esa cobertura por similitud semántica, separa el hecho en sus distintos ángulos y produce, para cada uno, un resumen objetivo más una **comparativa explícita de qué destacó, qué omitió y qué citó cada medio**. La salida se entrega a un back-end por webhook firmado, con tópicos, subtópicos y copy listo para publicar en redes.
 
 Proyecto propio, listo para desplegar, con la entrega al back-end verificada punta a punta contra un receptor real.
+
+**Desde la 1.2.0 viene con una aplicación de escritorio** —la *cabina*— que lo prende, lo apaga y lo opera sin tocar un archivo de configuración. Es opcional: el motor es una API y se puede usar entera con `curl`. Ver [las dos formas de usarlo](#las-dos-formas-de-usarlo).
+
+---
+
+## Índice
+
+**Ver de qué se trata**
+· [Cómo funciona](#el-pipeline)
+· [Un ejemplo real](#qué-produce-un-ejemplo-real)
+· [Qué se prueba sin credenciales](#qué-se-puede-probar-sin-ninguna-credencial)
+
+**Ponerlo a andar**
+· [Las dos formas de usarlo](#las-dos-formas-de-usarlo)
+· [Con Docker](#1-con-docker--el-camino-corto)
+· [Con la cabina](#2-con-la-cabina--la-app-de-escritorio)
+· [Sin Docker](#3-sin-docker--para-desarrollar-el-motor)
+· [Actualizar](#actualizar-una-instalación-que-ya-anda)
+
+**Operarlo**
+· [Elegir los medios](#los-medios-los-elegís-vos)
+· [Elegir el modelo de IA](#qué-proveedores-entran)
+· [Los 27 endpoints](#api)
+· [Token de operador](#token-de-operador)
+· [Los logs](#los-logs)
+
+**Entender cómo está hecho**
+· [Decisiones de ingeniería](#decisiones-de-ingeniería)
+· [Tests y calidad](#tests-y-calidad)
+· [Stack](#stack)
+· [Toda la documentación](#documentación)
+
+**Lo demás**
+· [Estado y qué trajo la 1.2.0](#estado)
+· [A quién le confiás tu credencial de IA](#a-quién-le-confiás-tu-credencial-de-ia)
+· [Licencia](#licencia)
 
 ---
 
@@ -106,14 +142,154 @@ El contrato completo del payload, con la firma HMAC y la semántica de reintento
 
 ---
 
-## Inicio rápido
+## Las dos formas de usarlo
 
-**Requisitos:** Python 3.12+ y Docker.
+El motor es **una API HTTP y nada más**: no necesita la cabina para funcionar, y
+un despliegue en un servidor probablemente no la use nunca. La cabina es una
+ventana que habla con esa misma API.
+
+| | **Sólo el motor** | **Motor + cabina** |
+|---|---|---|
+| Qué es | Contenedores y `curl` | Una app de escritorio |
+| Corre en | Linux, macOS, Windows | **Sólo Windows** |
+| Hace falta | Docker | Docker Desktop, y clonar el repo |
+| Para | Un servidor, un VPS, automatizar | Operar a mano, mirar qué pasa |
+| Configurar un medio | `POST /medios` con un JSON | Un formulario que te muestra el sondeo |
+| Ver qué se rompió | `docker logs` | Una pestaña con un contador |
+
+**Las dos hablan con el mismo motor y hacen lo mismo.** No hay nada que la
+cabina pueda y la API no: la ventana no tiene lógica propia, sólo llama a los
+mismos 27 endpoints.
+
+### Cuándo conviene cada una
+
+**Sólo el motor** si lo vas a dejar corriendo en un servidor, si no usás Windows,
+o si lo que querés es que produzca y entregue sin que nadie mire.
+
+**Con la cabina** si lo vas a operar vos: decidir qué medios entran, qué modelo
+sintetiza, mirar por qué una síntesis no salió. Todo eso se puede hacer con
+`curl`, pero leer el sondeo de un feed en un formulario es distinto a leerlo en
+un JSON de sesenta líneas.
+
+**La cabina no empaqueta el motor: lo maneja.** Necesita el repo clonado en la
+máquina, porque lo que hace es correr `docker compose` contra él. Si no tenés el
+repo, no tenés motor — con cabina o sin ella.
+
+---
+
+## Ponerlo a andar
+
+Tres caminos según para qué. Los tres arrancan igual: **clonar el repo y crear
+el `.env`.**
 
 ```bash
 git clone https://github.com/noticias-sin-ruido/motor-noticias.git
 cd motor-noticias
+cp .env.example .env          # Windows: copy .env.example .env
+```
 
+El `.env` de ejemplo **anda tal cual** y no es opcional: el `docker-compose.yml`
+lo exige con `env_file`, así que sin él los contenedores no arrancan. Sus
+credenciales de base son las mismas que las del compose.
+
+Trae `DATABASE_URL` apuntando a `localhost`, que es lo correcto para correr el
+motor **fuera** del contenedor; adentro, el compose la pisa con `db` — el nombre
+del servicio en su red. No hay que tocarla en ninguno de los dos casos.
+
+Lo único que hay que completar es la credencial del modelo de IA, y sólo cuando
+quieras sintetizar.
+
+---
+
+### 1. Con Docker — el camino corto
+
+Es el recomendado para probarlo y para desplegarlo. **No hace falta Python
+instalado**: todo corre adentro del contenedor.
+
+```bash
+docker compose up -d
+```
+
+Eso levanta Postgres con pgvector, **aplica las migraciones solo** y deja la API
+en `http://localhost:8000`. Comprobalo:
+
+```bash
+curl localhost:8000/          # {"status":"ok","database":"ok","version":"1.2.0",...}
+```
+
+Y ya podés traer noticias de verdad:
+
+```bash
+curl -X POST localhost:8000/ingest
+curl -X POST localhost:8000/vectorize
+curl -X POST localhost:8000/cluster
+curl "localhost:8000/clusters?limite=5"
+```
+
+> La primera vectorización **baja el modelo de embeddings desde HuggingFace**
+> (458 MB, sin cuenta ni token). Tarda unos minutos; las siguientes no.
+
+**El scheduler ya está corriendo**: cada 15 minutos repite ese ciclo solo. Los
+`POST` de arriba son el disparo manual del mismo paso.
+
+Sin medios cargados no va a traer nada — ver [Los medios los elegís
+vos](#los-medios-los-elegís-vos). Para arrancar con siete de ejemplo:
+
+```bash
+docker compose exec app python scripts/seed_medios.py
+```
+
+---
+
+### 2. Con la cabina — la app de escritorio
+
+**Sólo Windows**, y necesita el repo clonado (paso de arriba) más **Docker
+Desktop corriendo**. La app no trae el motor adentro: lo levanta desde esa
+carpeta.
+
+1. **Bajá el instalador** de la [última
+   Release](https://github.com/noticias-sin-ruido/motor-noticias/releases) —
+   `Sin Ruido_<versión>_x64-setup.exe`.
+2. **Windows va a mostrar "Windows protegió su PC"**, porque el instalador no
+   está firmado. *Más información → Ejecutar de todas formas*. Firmar un binario
+   cuesta cientos de dólares al año y este es un proyecto propio; el aviso es el
+   precio de no pagarlo.
+3. Instala **por usuario**, así que no pide permisos de administrador.
+4. Al abrirla por primera vez te pide **la carpeta del repo** — la del `git
+   clone` de arriba, la que tiene el `docker-compose.yml`. Comprueba que lo sea
+   antes de aceptarla.
+5. Si el motor tiene `API_TOKEN` definido, te lo pide una vez y lo guarda en el
+   **Credential Manager de Windows**. Si no lo tiene, no te lo pide: eso lo
+   decide el motor, no la app.
+
+Después de eso, **la app levanta y apaga el motor sola**. Muestra en qué anda
+mientras arranca (`reconstruyendo → arrancando → migrando → listo`) y tiene siete
+pestañas: la lista de trabajo, el feed de lectura, los medios, los modelos, la
+actividad, los problemas y los ajustes.
+
+**Al cerrar te pregunta qué hacer con el motor**: detenerlo o dejarlo corriendo.
+Es una elección explícita y no un efecto de dónde hiciste clic.
+
+Detalle completo en [app/README.md](app/README.md).
+
+#### Compilarla en vez de bajarla
+
+```powershell
+cd app
+npm install
+npm run tauri build     # deja el .exe en src-tauri/target/release/bundle/nsis/
+```
+
+Hace falta Node y la toolchain de Rust con MSVC. Para desarrollarla,
+`npm run tauri dev`.
+
+---
+
+### 3. Sin Docker — para desarrollar el motor
+
+Si vas a tocar el código del motor, conviene correrlo fuera del contenedor.
+
+```bash
 python -m venv .venv
 source .venv/bin/activate                   # Linux / macOS
 # .venv\Scripts\activate                    # Windows
@@ -121,20 +297,35 @@ source .venv/bin/activate                   # Linux / macOS
 pip install -r requirements.txt -r requirements-dev.txt
 python -m spacy download es_core_news_md    # el modelo NO viene con la librería
 
-docker compose up -d db                     # Postgres 16 + pgvector
-cp .env.example .env                        # (Windows: copy .env.example .env)
-                                            # anda tal cual: sus credenciales
-                                            # coinciden con las del compose
-
-alembic upgrade head                        # crea el esquema (obligatorio)
-python scripts/seed_medios.py               # opcional: 7 medios de ejemplo
-                                            # (el roster se maneja por POST /medios)
+docker compose up -d db                     # sólo Postgres
+alembic upgrade head                        # las migraciones a mano
 uvicorn src.main:app --reload
 ```
 
-Chequeo rápido: `python scripts/verify_setup.py`. Guía paso a paso con queries de verificación: [specs/validacion_manual.md](specs/validacion_manual.md).
+Chequeo rápido: `python scripts/verify_setup.py`. Guía paso a paso con queries
+de verificación: [specs/validacion_manual.md](specs/validacion_manual.md).
 
-> La primera llamada a `/vectorize` baja el modelo de embeddings desde HuggingFace (**458 MB**, sin token ni cuenta). Tarda; las siguientes no.
+---
+
+### Actualizar una instalación que ya anda
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+**El `--build` no es opcional.** Sin él, código nuevo con una migración nueva
+deja la base adelantada respecto de la imagen: el `alembic upgrade head` del
+arranque no encuentra la revisión y el contenedor entra en bucle de reinicio. Con
+la caché caliente cuesta dos segundos.
+
+Con la cabina es lo mismo pero sin escribir nada: `git pull` y reabrir la app,
+que reconstruye al arrancar.
+
+**Antes de actualizar, mirá el [CHANGELOG.md](CHANGELOG.md).** Si una versión
+pide tocar el `.env` está avisado ahí — la 1.1.0 lo pedía, la 1.2.0 no.
+
+---
 
 ### Qué se puede probar sin ninguna credencial
 
@@ -180,7 +371,7 @@ Es la **única** credencial que hay que conseguir: el webhook y el SMTP son opci
 
 ## API
 
-Diecinueve endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos.
+Veintisiete endpoints. Los `POST` del pipeline son disparo manual de cada paso, que además corre solo cada 15 minutos. **Es la misma API que usa la cabina**: la ventana no tiene lógica propia.
 
 | Método | Ruta | Qué hace |
 |---|---|---|
@@ -202,7 +393,17 @@ Diecinueve endpoints. Los `POST` del pipeline son disparo manual de cada paso, q
 | `PATCH` | `/modelos/{id}` | Prende o apaga un modelo. Acepta `?activo=`. **Prender uno apaga a los demás** — pero apagar no lo saca de la cadena de fallback si tiene credencial propia |
 | `GET` | `/medios` | Los medios cargados, activos y deshabilitados |
 | `POST` | `/medios` | Da de alta un medio **después de sondear sus feeds**. Nace habilitado |
+| `PUT` | `/medios/{id}` | Cambia sus datos. Re-sondea si cambian las URLs, y **exige confirmar** si apuntan a un dominio que ese medio no tenía |
 | `PATCH` | `/medios/{id}` | Habilita o deshabilita un medio. Acepta `?activo=`. **Deshabilitar no borra** |
+| `GET` | `/medios/panel` | Con quién se junta cada medio, y en cuántos clusters queda **solo** — material que no se llega a publicar |
+| `GET` | `/entrega` | A dónde se entregan las síntesis. **Exige token siempre** |
+| `PATCH` | `/entrega` | Cambia el destino. `null` lo desconfigura y la entrega deja de correr |
+| `GET` | `/alertas` | A quién avisa el motor, y cuándo salió el último mail |
+| `PATCH` | `/alertas` | Cambia los destinos. Lista vacía = no avisar por mail |
+| `POST` | `/alertas/probar` | Manda un mail de prueba. **Un destino configurado no garantiza que salga** |
+| `GET` | `/eventos` | Lo que se rompió, una fila por problema con cuántas veces ocurrió |
+
+**Las de `/entrega`, `/alertas` y `/eventos` exigen token siempre**, aun con la API abierta: desviar la entrega o las alertas es redirigir el producto y apagar los avisos, y los eventos son información operativa del despliegue.
 
 Documentación interactiva en `/docs` (OpenAPI, la genera FastAPI).
 
@@ -382,17 +583,20 @@ Lo que sigue está **medido contra datos reales**, no estimado. El razonamiento 
 ## Tests y calidad
 
 ```bash
-pytest                                            # 794 tests
+pytest                                            # 950 tests del motor
 pytest --cov=src --cov-report=term-missing        # cobertura
 ruff check src/ tests/ scripts/ alembic/          # lint
 alembic check                                     # drift modelo ↔ esquema
+
+cd app && npm run build                           # tipos y bundle del front
+cd app/src-tauri && cargo test                    # 86 tests de la cabina
 ```
 
-**794 tests, 96% de cobertura**, corriendo sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
+**950 tests del motor con 95% de cobertura, más 86 de la cabina.** Los del motor corren sobre SQLite en memoria: la suite no necesita Postgres, ni el modelo de spaCy, ni credencial de IA, ni red. Todo lo externo está mockeado en la frontera.
 
 **Los arreglos se verifican rompiéndolos a propósito.** No alcanza con que un test pase: se muta el código para que la protección falle y se confirma que algún test lo agarra. Encontró tests que probaban nada — uno miraba el código fuente buscando `echo=False` y daba positivo por el **comentario** que explicaba la regla, no por el código; otro comparaba la hora del log contra "ahora" y pasaba en cualquier máquina que ya estuviera en UTC-3, que es justo el único entorno donde no importa.
 
-El CI tiene **dos jobs con objetivos distintos**: uno corre los tests con umbral de cobertura del 80%, y otro levanta un **Postgres + pgvector real** solo para aplicar las migraciones de Alembic. Están separados a propósito: sumar Postgres al job de tests no habría agregado cobertura real, pero que una migración rompa contra una base con datos ya pasó una vez.
+El CI del motor tiene **dos jobs con objetivos distintos**: uno corre los tests con umbral de cobertura del 80%, y otro levanta un **Postgres + pgvector real** solo para aplicar las migraciones de Alembic. La cabina tiene el suyo, en Windows —`keyring` no compila en Linux—, y un tercer job que **arma el instalador y sólo se dispara al taguear**. Están separados a propósito: sumar Postgres al job de tests no habría agregado cobertura real, pero que una migración rompa contra una base con datos ya pasó una vez.
 
 ---
 
@@ -406,16 +610,19 @@ El CI tiene **dos jobs con objetivos distintos**: uno corre los tests con umbral
 | IA | **El proveedor lo elige el operador** — adaptador nativo de Gemini, o cualquiera que hable el protocolo de OpenAI |
 | Ingesta | feedparser · BeautifulSoup · httpx · tenacity · trafilatura (cuerpo por URL) |
 | Infra | Docker Compose · APScheduler · GitHub Actions |
+| Cabina | Tauri 2 · React · TypeScript en `strict` · Rust (todo el HTTP sale de acá, el token nunca entra al webview) |
 
 ```
 src/
 ├── main.py              # API, scheduler y pipeline encadenado
-├── config.py            # settings tipadas (pydantic-settings)
+├── config.py            # settings tipadas, y VERSION: el número de todo el producto
 ├── database.py          # engine, pool y healthcheck
 ├── auth.py              # token de operador, opcional y con aviso al arrancar
 ├── logging_config.py    # el único lugar donde se configura la salida de logs
-├── tiempo.py            # se guarda en UTC, se muestra en UTC-3
-├── models/              # Medio · Noticia · Cluster · Sintesis · PublicacionRedes · ModeloIA
+├── tiempo.py            # se guarda en UTC, se muestra en UTC-3 con el offset
+├── models/              # Medio · Noticia · Cluster · Sintesis · PublicacionRedes
+│                        # ModeloIA · Corrida · ConfiguracionEntrega
+│                        # ConfiguracionAlertas · Evento
 └── services/
     ├── ingestion.py     # RSS → limpieza → dedup
     ├── extraccion.py    # cuerpo desde la URL, con robots.txt y piso de caracteres
@@ -424,15 +631,29 @@ src/
     ├── categorias.py    # notas sin hecho (horóscopo, opinión): no se agrupan
     ├── preprocessing.py # evidencia para el prompt (TF-IDF + NER)
     ├── synthesis.py     # ángulos, tópicos y copy de redes
-    ├── medios.py        # alta de medios: sondeo del feed + validacion de destino
+    ├── medios.py        # alta de medios: sondeo del feed + validación de destino
+    ├── panel_medios.py  # con quién se junta cada medio, y cuándo queda solo
     ├── modelos.py       # alta, sondeo y exclusividad del modelo activo
     ├── proveedores/     # adaptadores: gemini nativo · openai_compatible
     ├── topicos.py       # taxonomía cerrada + sección declarada por el medio
+    ├── entrega.py       # a dónde se entrega: la fila, no el .env
     ├── webhook_delivery.py  # payload, firma HMAC y reintentos
-    ├── alerts.py        # avisos por mail ante fallo de cualquier paso
+    ├── alerts.py        # el envío del aviso por mail
+    ├── alertas.py       # a quién se le avisa: la fila, no el .env
+    ├── eventos.py       # lo que se rompió, para que se pueda ver sin un log
+    ├── corridas.py      # qué hizo cada ciclo
     ├── search.py        # búsqueda semántica y listado
     └── purga.py         # borra el cuerpo de las noticias huérfanas vencidas
+
+app/                     # la cabina (ver app/README.md)
+├── src/                 # React: siete pantallas y un solo módulo que cruza el puente
+└── src-tauri/           # Rust: HTTP, Docker, el almacén de credenciales y la bandeja
 ```
+
+**`alerts.py` y `alertas.py` no son lo mismo, y el nombre parecido es
+incómodo**: el primero manda el mail, el segundo guarda a quién mandárselo.
+Están separados porque el envío tiene que seguir funcionando aunque la base no
+responda — que es justo cuando más hace falta avisar.
 
 ---
 
@@ -444,48 +665,63 @@ El *por qué* de cada decisión está escrito, no solo el *qué*:
 |---|---|
 | [specs/mission.md](specs/mission.md) | Qué es el proyecto, para quién, y qué NO hace |
 | [specs/conventions.md](specs/conventions.md) | Cómo se escribe código acá |
-| [specs/roadmap.md](specs/roadmap.md) | Las 5 fases, estado y backlog priorizado |
+| [specs/roadmap.md](specs/roadmap.md) | Las fases del motor, la app, y el backlog priorizado |
 | [specs/change_logs.md](specs/change_logs.md) | Decisiones de diseño: qué se evaluó, qué se descartó y por qué |
 | [specs/tech_stack.md](specs/tech_stack.md) | Stack y puntos de quiebre de escalabilidad a vigilar |
 | [specs/webhook_contract.md](specs/webhook_contract.md) | Contrato de entrega: payload, firma y reintentos |
 | [specs/validacion_manual.md](specs/validacion_manual.md) | Validación manual contra Postgres real |
+| [CHANGELOG.md](CHANGELOG.md) | Qué cambió en cada versión, para quien **usa** el motor |
+| [app/README.md](app/README.md) | La cabina: cómo está armada, la CSP, el instalador |
+| [app/CONTRATO.md](app/CONTRATO.md) | Qué campos de la API consume la cabina, y qué la rompe si cambian |
+
+**`CHANGELOG.md` y `specs/change_logs.md` no son el mismo documento.** El primero
+dice qué cambió para quien lo usa; el segundo, qué se evaluó y qué se descartó al
+construirlo. Dos lectores distintos.
 
 ---
 
 ## Estado
 
-**Versión 1.1.0.** Las 5 fases completas y la entrega al back-end verificada punta a punta contra un receptor real.
+**Versión 1.2.0.** Las cinco fases del motor completas, la entrega al back-end
+verificada punta a punta contra un receptor real, y una **aplicación de
+escritorio** que lo opera.
 
-### Qué trajo la 1.1.0
+### Qué trajo la 1.2.0
 
 | | |
 |---|---|
-| **Segunda vía de ingesta** | El cuerpo se extrae desde la URL cuando el RSS solo trae un copete, respetando `robots.txt` y con un piso de caracteres que detecta un rediseño del medio. Entró **Perfil**; Clarín quedó afuera por sus términos de uso, no por falta de herramienta |
-| **El motor de IA se desacopló** | La síntesis ya no está atada a Gemini. El modelo, su temperatura y su nivel de razonamiento viven en la base y se administran por API, así que cambiarlos no exige redeployar. Entra cualquier proveedor que hable el protocolo de OpenAI, incluido uno local |
-| **Token de operador** | `API_TOKEN` opcional para cerrar los endpoints, y el `docker-compose.yml` ligando a `127.0.0.1` en vez de a `0.0.0.0` |
-| **Logs de verdad** | El motor emitía en `INFO` y nada llegaba a ningún lado. Ahora cada corrida deja qué hizo cada paso, cuántos tokens costó y qué porcentaje del ciclo consumió |
+| **La cabina** | Una app de escritorio que prende y apaga el motor, y lo opera sin tocar un archivo. Siete pestañas: trabajo, feed, medios, modelos, actividad, problemas y ajustes |
+| **Lo que antes era `.env` ahora se configura en caliente** | El destino de entrega y los destinatarios de las alertas viven en la base y se cambian sin redeployar. Las **credenciales** siguen en el entorno a propósito |
+| **Un panel de lo que se rompió** | El motor tiene nueve puntos donde avisa, y hasta ahora el único canal era un mail. Ahora quedan registrados y se ven en una pestaña, con un contador que dice cuántas veces pasó cada cosa |
+| **Los medios se administran desde la ventana** | Alta con el sondeo del feed a la vista, edición con re-sondeo, y un panel que muestra cuánto material de cada medio **no llega a publicarse** por falta de una segunda voz |
 
-**El contrato con el back-end no se movió**: el payload sigue en su versión `1` y ningún consumidor necesita cambiar nada.
+**El contrato con el back-end no se movió**: el payload sigue en su versión `1`.
 
-### ⚠️ Si venís de la 1.0, leé esto antes de actualizar
+### Al actualizar desde la 1.1.0
 
-La 1.1.0 es retrocompatible para quien *consume* el motor, pero **rompe la configuración de quien lo despliega**. Son dos pasos y los dos son manuales a propósito:
+**No hay que tocar nada.** Las dos migraciones —el destino de entrega y los
+destinatarios de alertas— **se siembran solas** desde las variables que ya tenías
+en el `.env`, así que un despliegue existente sigue funcionando igual. Después
+esas dos cosas se configuran desde la app.
 
-**1. Renombrá la credencial.** `GEMINI_API_KEY` ya no se lee — pasó a `MODELO_API_KEY`, mismo valor. `GEMINI_MODEL`, `GEMINI_TEMPERATURA` y `GEMINI_THINKING_LEVEL` tampoco existen más: eso ahora vive en la tabla `modelo_ia`.
+Si venís de la **1.0**, mirá el [CHANGELOG.md](CHANGELOG.md): la 1.1.0 sí pedía
+dos pasos manuales.
 
-**2. Prendé el modelo, o la síntesis no corre.** La migración crea sola la fila equivalente a lo que tenías en el `.env`, pero **la deja apagada**:
+### Lo que la 1.2.0 **no** hace
 
-```bash
-alembic upgrade head
-curl http://localhost:8000/modelos                      # mirá cuál creó
-curl -X PATCH "http://localhost:8000/modelos/1?activo=true"   # sondea al proveedor y la activa
-```
-
-Que ninguna migración elija proveedor por vos es la decisión, no un olvido: el motor le manda los cuerpos de los artículos a quien esté activo, y eso no lo puede decidir un `alembic upgrade`. Mientras no haya ninguno prendido la síntesis no corre y **el motor lo avisa en cada corrida** — con los logs de esta misma versión, que es donde se ve.
+- **El instalador no está firmado.** Windows va a mostrar "Windows protegió su
+  PC" la primera vez. Un certificado son cientos de dólares al año.
+- **No se actualiza sola.** Motor y app se numeran juntos, y un updater sólo
+  podría entregar la ventana — el motor lo construye Docker desde el repo. Se
+  actualiza con `git pull`, que es dos palabras.
+- **La cabina es sólo Windows.** El motor no: corre donde corra Docker.
 
 ### Qué sigue
 
-El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md). El alta de medios por API ya está (arriba); lo próximo es que la URL del webhook deje de estar en el `.env`.
+El backlog priorizado está en [specs/roadmap.md](specs/roadmap.md). Lo próximo es
+que un back-end caído deje de costar material: hoy una síntesis se abandona
+después de cinco intentos fallidos, y **un servidor caído una hora cuesta
+publicaciones de forma permanente**.
 
 ---
 
