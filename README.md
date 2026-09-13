@@ -1,4 +1,7 @@
-# 🤫 Sin Ruido — Motor de noticias
+<h1>
+  <img src="app/public/isotipo.svg" alt="" width="32" align="middle">
+  Sin Ruido — Motor de noticias
+</h1>
 
 [![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
