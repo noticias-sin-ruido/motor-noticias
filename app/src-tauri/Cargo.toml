@@ -1,6 +1,6 @@
 [package]
 name = "cabina"
-version = "0.1.0"
+version = "1.2.0"
 description = "La cabina del motor de Sin Ruido"
 authors = ["Fernando Garcia"]
 edition = "2021"

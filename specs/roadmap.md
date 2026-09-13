@@ -451,7 +451,7 @@ Lo enseñó el test, no el razonamiento: la primera versión pedía las dos cosa
 
 **Nota sobre lo que NO era este punto**: el mismo día apareció una corrupción parecida en las **síntesis** —`clasificaci&#243;n`, `respald%f3`— y no venía de la ingesta. **Las nueve noticias fuente de ese cluster estaban limpias**: lo escapaba el modelo. Se arregló aparte, normalizando la respuesta al parsearla. Los dos problemas se ven igual y tienen causas distintas en puntas opuestas del pipeline.
 
-### 14. La app de escritorio del operador — la cabina del motor
+### 14. La app de escritorio del operador — la cabina del motor ✅ COMPLETO (12/09/2026)
 
 **Diseñada el 06/09/2026** en una sesión de grillado completa. **Fases 0 a 3 construidas el 06/09/2026** — ver el estado abajo. Las decisiones, con lo que se evaluó y se descartó, están en `change_logs.md`.
 
@@ -506,7 +506,7 @@ Auditada contra siete puntos, la app cubría tres (leer clusters sin sintetizar,
 > entrega al back-end quedó probada punta a punta: **569 síntesis, cero
 > pendientes**. Todo el detalle en `change_logs.md`.
 >
-> **Quedan el bloque F —los medios— y la fase 9**, el empaquetado. Ver abajo.
+> **El punto 14 está cerrado entero** (12/09/2026): las nueve fases, el bloque F de los medios, y el instalador.
 
 - [x] **Bloque B · configuración y credenciales** ✅ (09/09/2026) (puntos 1 y 7 del checklist) — "Olvidar token" pasó a llamar a `token_borrar`, que estaba en Rust desde la fase 1 sin que lo llamara nadie: antes sólo ponía en `false` un estado de React y la credencial se quedaba viva. Pantalla de Ajustes nueva, que **funciona con el motor apagado** porque es donde se arregla que el motor no arranque. La ruta del repo se revalida al usarla y no sólo al guardarla, con categoría propia (`RutaInvalida`). Y el orden del arranque se invirtió: primero la carpeta, después el token y sólo si el motor lo exige.
 - [x] **Bloque C · modelos** ✅ (09/09/2026) (punto 5) — pestaña propia con lista, activar/apagar (`PATCH`) y alta (`POST`). Relee la lista entera al activar, porque prender uno apaga a los demás del lado del motor. El aviso dice que la credencial va al `.env` y hay que reiniciar el contenedor, y **no dice cuál variable**: esa regla se cerró después de una fuga.
@@ -556,9 +556,31 @@ Tópico de los 130 clusters solos: **sociedad 28, economía 26, deportes 20, int
 
 - **Clarín queda apagado: se desactivó por su política de RSS**, no por accidente. O sea que **no es el generalista que el panel pide**, aunque los números lo señalen: la restricción es de política y no de datos. Si hace falta un medio de prueba para ejercitar la pantalla, conviene uno sin ese problema —o un feed de prueba— antes que prender justo el que está apagado por ese motivo, porque prenderlo es ingerir bajo la política que lo apagó.
 
-#### Fase 9 — el empaquetado. DECIDIDA el 10/09/2026, sin updater y sin firma
+#### Fase 9 — el empaquetado ✅ COMPLETA (12/09/2026)
 
-**Se retoma el viernes 11/09/2026.** El plan de tareas está abajo; la decisión que lo ordena, primero.
+**El instalador existe**: `Sin Ruido_1.2.0_x64-setup.exe`, 1,8 MB, NSIS, instalación por usuario. Compilado, instalado y abierto — y con eso el punto 14 queda cerrado entero.
+
+**Las cinco tareas:**
+
+1. **El número unificado en 1.2.0.** Una constante en `src/config.py` y tres archivos que la copian (`package.json`, `tauri.conf.json`, `Cargo.toml`). Es 1.2.0 y no 2.0.0 por el criterio de la 1.1.0: para quien consume el motor no cambió nada, y esta vez **tampoco hay paso manual** al actualizar.
+2. **`CHANGELOG.md` en la raíz**, escrito para el operador. No es `specs/change_logs.md`, que es el registro de decisiones y tiene otro lector.
+3. **El bundle NSIS**, en español y sin selector de idioma.
+4. **`app/README.md`**: cómo se actualiza una instalación, y qué esperar del instalador.
+5. **El job de CI**, disparado sólo por tag, con `needs: verificar` y una validación de que el tag, `package.json` y `src/config.py` digan lo mismo.
+
+**Comprobado en el ejecutable instalado, que es lo único que vale:** las siete pestañas andan, encontró la carpeta del repo sola, levantó los contenedores desde cero y no pidió token. Eso valida la **CSP de producción**, que no existe en desarrollo — y en particular la decisión de dibujar la barra de proporción con un `<svg>` en vez de un `style` en línea, que hasta ese momento era una hipótesis.
+
+**Tres cosas que aparecieron empaquetando:**
+
+- **El User-Agent de la ingesta decía `SinRuido/1.1` a mano**, cuando el motor ya iba en 1.1.0: ya estaba desactualizado y al subir se habría quedado más atrás sin avisar. Es un dato que sale a la red con nuestra identidad. Los dos User-Agent salen ahora de `config.VERSION`.
+- **El glob del artefacto no habría matcheado nada.** El tag es `v1.2.0` y Tauri nombra el archivo `..._1.2.0_...`, sin la `v`. Habría fallado en el último paso, **después de compilar en release**. Se comprobó simulando el glob contra el archivo real.
+- **El `productName` llevaba un em dash** y viajaba al nombre del instalador. PowerShell lo muestra como guión común, así que quien lee la ruta en una consola no encuentra el archivo — pasó de verdad. Pasó a ser `Sin Ruido` a secas.
+
+**Sobre SmartScreen**: no apareció al instalar, y **no significa que no vaya a aparecer**. El aviso lo dispara el *Mark-of-the-Web*, que Windows le pone a lo que se baja de internet; un binario compilado en la misma máquina no lo tiene (comprobado: el archivo sólo tiene el stream `:$DATA`). Quien lo baje de una Release **sí lo va a ver**, y está explicado en `app/README.md`.
+
+---
+
+*Lo que sigue es la decisión del 10/09/2026 que ordenó esta fase, que quedó ejecutada arriba.*
 
 **El updater no entra, y el motivo no es el costo.** Motor y app son **una unidad con un solo número de versión** (punto 17, decisión 3): la app no aplica sobre ninguna otra cosa que el motor, y enriquecerla hasta volverla un producto de lectura sería duplicar lo que el equipo de back-end ya construye. De ahí sale el argumento que cierra la discusión, en tres pasos:
 

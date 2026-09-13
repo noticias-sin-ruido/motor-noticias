@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import httpx
 import trafilatura
 
-from ..config import settings
+from ..config import VERSION, settings
 from . import alerts
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 # `ingestion.USER_AGENT`), pero declarando lo que esto realmente hace: pedir
 # páginas de artículo, no feeds. A propósito NO imitamos un navegador.
 USER_AGENT = (
-    "SinRuido/1.1 (+https://github.com/noticias-sin-ruido/motor-noticias) article-fetcher"
+    f"SinRuido/{VERSION} (+https://github.com/noticias-sin-ruido/motor-noticias) "
+    f"article-fetcher"
 )
 
 # `robots.txt` ya consultados en esta corrida, por dominio. Sin esto se pediría

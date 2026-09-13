@@ -7,13 +7,18 @@ name: Cabina
 # app ni siquiera compilaría. Y la app es Windows-only por decisión del punto 14
 # del backlog, no por accidente.
 #
-# **No arma el instalador.** Eso se le suma en la fase 9 como job aparte, que
-# corra sólo en `main` o al taguear: `tauri build` compila en release y tardaría
-# mucho más que los checks, en cada push, para producir un artefacto que
-# todavía no se distribuye.
+# **El instalador lo arma un job aparte, y sólo al taguear.** `tauri build`
+# compila en release: hacerlo en cada push costaría mucho más que los checks para
+# producir un artefacto que nadie va a bajar. Un tag es una decisión explícita de
+# publicar, y es la única señal que lo dispara.
 
 on:
   push:
+    # Los tags entran acá para que el job del instalador tenga con qué
+    # dispararse. **Los `paths` de abajo no se les aplican**: un tag suele
+    # apuntar a un commit que no tocó `app/`, y con el filtro el push del tag no
+    # dispararía nada. GitHub evalúa `branches` y `tags` por separado.
+    tags: ['v*']
     branches: [main, mejoras-post-1.0]
     # Anidado dentro de cada evento: como hermano de `push`, GitHub lo ignora
     # en silencio y el workflow correría siempre creyendo estar filtrado.
@@ -88,3 +93,77 @@ jobs:
       # de `tipos.rs` y no commiteó los bindings regenerados.
       - name: Los bindings están al día
         run: npm run bindings:check
+
+  instalador:
+    name: Armar el instalador (Windows)
+    # **Sólo al taguear.** Ver la nota de arriba: un tag es la decisión de
+    # publicar, y `tauri build` es demasiado caro para cada push.
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Que no se publique un instalador de un árbol que no pasa los checks.
+    needs: verificar
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      # **El número del tag y el de la app tienen que coincidir.** Motor y app
+      # se numeran juntos desde la 1.2.0, y un instalador que dice ser otra
+      # versión que su tag es exactamente el par desparejo que esa decisión
+      # existe para evitar. Falla acá, antes de compilar veinte minutos.
+      - name: El tag coincide con la versión de la app
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app=$(node -p "require('./package.json').version")
+          motor=$(grep -oP 'VERSION = "\K[^"]+' ../src/config.py)
+          echo "tag=$tag  app=$app  motor=$motor"
+          if [ "$tag" != "$app" ] || [ "$tag" != "$motor" ]; then
+            echo "::error::El tag ($tag), package.json ($app) y src/config.py ($motor) no coinciden."
+            exit 1
+          fi
+          # **Sin la `v`, que es como Tauri nombra el archivo.** El tag es
+          # `v1.2.0` y el instalador sale como `..._1.2.0_x64-setup.exe`: usar
+          # `github.ref_name` crudo en el glob de abajo no matchearia nada, y eso
+          # falla recien en el ultimo paso, despues de compilar en release.
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      - name: Instalar dependencias del front
+        run: npm ci
+
+      # **Sin firma de código, a propósito.** Un certificado son cientos de
+      # dólares al año y el gasto es un límite duro del proyecto; el costo es el
+      # aviso "Windows protegió su PC" en la primera instalación, explicado en
+      # `app/README.md`.
+      #
+      # **Y sin updater**: motor y app se numeran juntos, así que una versión
+      # nueva incluye al motor -- y el updater sólo puede entregar el `.exe` de
+      # la ventana. Entregaría medio producto. Ver el punto 17 del backlog.
+      - name: Compilar el instalador
+        run: npm run tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cabina-${{ github.ref_name }}-nsis
+          # **El glob lleva la version y no es `*.exe`.** El directorio del
+          # bundle acumula compilaciones viejas: en local quedo un `_0.1.0_`
+          # conviviendo con el nuevo, y con el comodin el artefacto tendria dos
+          # instaladores y quien lo baje puede agarrar el que no es.
+          # `if-no-files-found: error` cierra el otro lado: si el nombre cambia,
+          # esto falla en vez de subir un zip vacio.
+          path: app/src-tauri/target/release/bundle/nsis/*_${{ env.VERSION }}_*-setup.exe
+          if-no-files-found: error

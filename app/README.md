@@ -222,6 +222,56 @@ escrito entero acá abajo para no tener que reconstruirlo de memoria.
    y en desarrollo se ven bien: es la clase de rotura que sólo aparece en el
    ejecutable. Los anchos y estados van por clase.
 
+## El `productName` no lleva guión largo, y no es capricho
+
+Es **`Sin Ruido`** a secas, y de ahí sale el nombre del instalador
+(`Sin Ruido_1.2.0_x64-setup.exe`). La primera versión decía
+`Sin Ruido — Cabina`, con un em dash, y el carácter viajaba al nombre del
+archivo.
+
+**El problema no es estético: PowerShell muestra el em dash como un guión
+común.** Quien lee la ruta en una consola y después la busca, no la encuentra —
+pasó al probar el primer instalador. Sumado a que no se puede tipear y a que
+rompe globs en scripts, un archivo que la gente baja y hace doble clic no puede
+tener caracteres que sólo se copian y pegan.
+
+El **título de la ventana** sí lo conserva (`Sin Ruido — Cabina del motor`):
+ahí es texto que se muestra, nunca se tipea ni se busca.
+
+Y "Cabina" salió del nombre del producto a propósito: es como le decimos al
+repo, no como lo conoce quien lo instala. Para esa persona esto **es** Sin
+Ruido, y es lo que va a buscar en el menú Inicio. La idea sobrevive en el
+`shortDescription`.
+
+## Cómo se actualiza una instalación
+
+**Traer el repo y volver a abrir la app.** No hay más.
+
+```powershell
+cd <carpeta del motor>
+git pull
+```
+
+Al arrancar, la app corre `docker compose up -d --build`, que reconstruye la
+imagen si el código cambió, y el contenedor aplica las migraciones antes de
+levantar uvicorn. Los estados se ven en la barra:
+`reconstruyendo → arrancando → migrando → listo`.
+
+**El `--build` no es paranoia.** Sin él, traer código con una migración nueva
+deja la base adelantada respecto de la imagen: el `alembic upgrade head` del
+arranque no encuentra la revisión y el contenedor entra en bucle de reinicio.
+Desde la ventana eso se ve como "el motor no responde", sin ninguna pista. Ya
+pasó una vez. Con la caché caliente cuesta 2 segundos.
+
+**Antes de actualizar, mirar el [`CHANGELOG.md`](../CHANGELOG.md) de la raíz.**
+Si una versión pide tocar el `.env`, está avisado ahí con todas las letras —la
+1.1.0 lo pidió—. Sin ese paso el motor arranca pero no sintetiza.
+
+**La app no actualiza el motor sola, y es deliberado.** Actualizarlo *es* correr
+Alembic contra la base del operador, y eso no tiene vuelta atrás como sí la
+tiene reinstalar un `.exe`. Es el punto 18 del backlog, con sus cinco
+dificultades escritas.
+
 ## Docker Desktop tiene que estar corriendo
 
 La app **detecta** que no lo está y lo dice —"Docker Desktop no está corriendo"—
@@ -331,5 +381,17 @@ una fila, creciendo con el histórico. Ahora `GET /clusters` trae
 `cantidad_sintesis`: **14 ms en un pedido**, y constante. Ver el punto 14 de
 `specs/roadmap.md`.
 
-Lo que **todavía no hace**: el instalador (fase 9). Las dos pantallas, el ícono
-de la bandeja, los ajustes, los modelos y la entrega ya están.
+**Fase 9 — el instalador.** `npm run tauri build` deja un `.exe` NSIS en
+`src-tauri/target/release/bundle/nsis/`. Instala **por usuario** y no en
+`Archivos de programa`, así que no pide permisos de administrador.
+
+**Sin firma de código**, que son cientos de dólares al año: Windows va a mostrar
+"Windows protegió su PC" en la primera instalación, y hay que apretar
+*Más información → Ejecutar de todas formas*. Es un clic, y sacarlo se pospone
+hasta que haya a quién repartirle.
+
+**Y sin updater, que no es un olvido.** Motor y app se numeran juntos, así que
+cualquier versión nueva incluye al motor — y el updater de Tauri sólo puede
+entregar el `.exe` de la ventana, no el motor, que Docker construye desde la
+carpeta del repo. Entregaría medio producto y dejaría el par desparejo. Ver el
+punto 17 del backlog.

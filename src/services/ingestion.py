@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 from sqlmodel import Session, select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ..config import settings
+from ..config import VERSION, settings
 from ..tiempo import ahora_utc
 from ..models import Medio, Noticia
 from . import alerts
@@ -31,7 +31,14 @@ REQUEST_TIMEOUT_SECONDS = 15
 # User-Agent por defecto de httpx: es la práctica estándar para un lector de
 # feeds, y algunos medios (ej. Paparazzi) rechazan con 403 a los clientes que
 # no se identifican. A propósito NO imitamos un navegador -- ver specs/.
-USER_AGENT = "SinRuido/1.1 (+https://github.com/noticias-sin-ruido/motor-noticias) feed-reader"
+# **La versión sale de `config.VERSION` y no va escrita acá.** Estaba en `1.1`
+# a mano mientras el motor ya iba por 1.1.0, y al subir a 1.2.0 se habría
+# quedado atrás sin que nada avisara: es un dato que sale a la red con nuestra
+# identidad, y un medio que quiera hablarnos por la versión leería una vieja.
+USER_AGENT = (
+    f"SinRuido/{VERSION} (+https://github.com/noticias-sin-ruido/motor-noticias) "
+    f"feed-reader"
+)
 
 # Heurístico genérico para detectar notas "en vivo" / minuto a minuto por el
 # título (case-insensitive). Confirmado empíricamente para La Nación ("en

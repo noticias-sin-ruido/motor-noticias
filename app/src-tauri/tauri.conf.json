@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Sin Ruido — Cabina",
-  "version": "0.1.0",
+  "productName": "Sin Ruido",
+  "version": "1.2.0",
   "identifier": "ar.sinruido.cabina",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,13 +26,24 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "Sin Ruido",
+    "shortDescription": "La cabina del motor de noticias",
+    "longDescription": "Prende, apaga y opera el motor de Sin Ruido: los medios que lee, con qué modelo sintetiza, a dónde entrega y qué viene haciendo.",
+    "licenseFile": "../../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "languages": ["Spanish"],
+        "displayLanguageSelector": false,
+        "installMode": "currentUser"
+      }
+    }
   }
 }

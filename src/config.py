@@ -7,11 +7,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # sean el mismo par -- desde la 1.2.0 viajan juntos y un par desparejo es un
 # estado invalido, no una molestia.
 #
+# **Motor y app se numeran juntos desde la 1.2.0**, y este es el numero de los
+# dos: `app/package.json`, `tauri.conf.json` y `Cargo.toml` lo copian. No son dos
+# productos -- la cabina no aplica sobre ninguna otra cosa que el motor -- asi
+# que una version nueva incluye a los dos y un par desparejo es un estado
+# invalido. Ver el punto 17 del backlog.
+#
 # **Es una constante de modulo y NO un campo de Settings, a proposito.** Un
 # `Settings` se lee del entorno, asi que la version seria algo que el despliegue
 # puede sobrescribir: un motor podria decir que es otro del que es, y lo unico
 # que este numero tiene que hacer es no mentir. No se configura, se compila.
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 class Settings(BaseSettings):
