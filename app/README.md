@@ -243,6 +243,12 @@ repo, no como lo conoce quien lo instala. Para esa persona esto **es** Sin
 Ruido, y es lo que va a buscar en el menú Inicio. La idea sobrevive en el
 `shortDescription`.
 
+**Y una vuelta de tuerca más: GitHub renombra el adjunto.** Al subirlo a una
+Release cambia los espacios por puntos, así que el archivo que baja un tercero
+se llama `Sin.Ruido_1.2.0_x64-setup.exe` y no `Sin Ruido_1.2.0_x64-setup.exe`.
+Son el mismo binario, pero la documentación tenía que decir el nombre que la
+persona va a ver, no el que produce `tauri build`.
+
 ## Cómo se actualiza una instalación
 
 **Traer el repo y volver a abrir la app.** No hay más.

@@ -102,6 +102,10 @@ jobs:
     # Que no se publique un instalador de un árbol que no pasa los checks.
     needs: verificar
     runs-on: windows-latest
+    # Acotado a este job a proposito: `verificar` sigue en solo lectura. Es lo
+    # unico que necesita `gh release create`.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: app
@@ -167,3 +171,31 @@ jobs:
           # esto falla en vez de subir un zip vacio.
           path: app/src-tauri/target/release/bundle/nsis/*_${{ env.VERSION }}_*-setup.exe
           if-no-files-found: error
+
+      # **La Release la publica `gh`, no una action de terceros.** Este job
+      # tiene `contents: write`: darselo a codigo externo es superficie de
+      # cadena de suministro que no hace falta: `gh` ya viene en el runner.
+      #
+      # El artefacto de arriba se deja igual. Es la red: si esto falla, el
+      # instalador ya esta compilado y se publica a mano sin recompilar.
+      - name: Publicar la Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # **El cuerpo sale del mensaje del tag anotado.** Ahi ya se escribe
+          # que trae la version; tener el texto en dos lugares los desincroniza.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true
+          titulo=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")
+          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notas.md"
+
+          # **El pie vive en un archivo del repo y no en un heredoc aca.**
+          # `cat` copia bytes: escribir texto acentuado en un heredoc dentro de
+          # un runner de Windows es exactamente como se corrompen los acentos, y
+          # no hay forma de verificarlo sin publicar. De paso, cambiar el texto
+          # no obliga a tocar el YAML.
+          cat ../.github/pie-de-release.md >> "$RUNNER_TEMP/notas.md"
+
+          exe=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.exe)
+          echo "publicando $exe"
+          gh release create "$GITHUB_REF_NAME" "$exe" --title "${titulo:-$GITHUB_REF_NAME}" --notes-file "$RUNNER_TEMP/notas.md"

@@ -255,7 +255,10 @@ carpeta.
 
 1. **Bajá el instalador** de la [última
    Release](https://github.com/noticias-sin-ruido/motor-noticias/releases) —
-   `Sin Ruido_<versión>_x64-setup.exe`.
+   `Sin.Ruido_<versión>_x64-setup.exe`. **GitHub cambia los espacios por
+   puntos** en los adjuntos de una Release: compilado en tu máquina el archivo
+   se llama `Sin Ruido_...` y bajado de la Release, `Sin.Ruido_...`. Es el
+   mismo instalador.
 2. **Windows va a mostrar "Windows protegió su PC"**, porque el instalador no
    está firmado. *Más información → Ejecutar de todas formas*. Firmar un binario
    cuesta cientos de dólares al año y este es un proyecto propio; el aviso es el
