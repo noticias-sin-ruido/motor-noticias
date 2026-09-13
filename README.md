@@ -1,14 +1,17 @@
-<h1>
-  <img src="app/public/isotipo.svg" alt="" width="32" align="middle">
-  Sin Ruido — Motor de noticias
-</h1>
+<p align="center">
+  <img src="app/public/isotipo.svg" alt="" width="128">
+</p>
 
-[![CI](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg)](https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-950%20passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+<h1 align="center">Sin Ruido &mdash; Motor de noticias</h1>
+
+<p align="center">
+  <a href="https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml"><img src="https://github.com/noticias-sin-ruido/motor-noticias/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/tests-950%20passing-brightgreen" alt="950 tests">
+  <img src="https://img.shields.io/badge/coverage-95%25-brightgreen" alt="95% de cobertura">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
+  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="version 1.2.0">
+</p>
 
 **Lee las noticias de varios medios, detecta cuáles cubren el mismo hecho y escribe una síntesis neutral que compara cómo lo contó cada uno.**
 
