@@ -17,7 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # `Settings` se lee del entorno, asi que la version seria algo que el despliegue
 # puede sobrescribir: un motor podria decir que es otro del que es, y lo unico
 # que este numero tiene que hacer es no mentir. No se configura, se compila.
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 
 class Settings(BaseSettings):

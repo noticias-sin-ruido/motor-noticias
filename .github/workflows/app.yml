@@ -134,12 +134,21 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           app=$(node -p "require('./package.json').version")
-          motor=$(grep -oP 'VERSION = "\K[^"]+' ../src/config.py)
-          echo "tag=$tag  app=$app  motor=$motor"
-          if [ "$tag" != "$app" ] || [ "$tag" != "$motor" ]; then
-            echo "::error::El tag ($tag), package.json ($app) y src/config.py ($motor) no coinciden."
-            exit 1
-          fi
+          # `sed` y no `grep -oP`: el PCRE de grep depende del locale y no se
+          # puede ensayar en cualquier maquina antes de pushear el tag.
+          motor=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' ../src/config.py)
+          # Los cuatro, no tres: `Cargo.toml` y `tauri.conf.json` tambien
+          # declaran la version, y hasta la 1.2.1 no los miraba nadie. Un par
+          # desparejo es un estado invalido, no una molestia.
+          tauri=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "tag=$tag  package.json=$app  config.py=$motor  tauri.conf=$tauri  Cargo.toml=$cargo"
+          for par in "package.json:$app" "src/config.py:$motor" "tauri.conf.json:$tauri" "Cargo.toml:$cargo"; do
+            if [ "$tag" != "${par#*:}" ]; then
+              echo "::error::El tag ($tag) no coincide con ${par%%:*} (${par#*:})."
+              exit 1
+            fi
+          done
           # **Sin la `v`, que es como Tauri nombra el archivo.** El tag es
           # `v1.2.0` y el instalador sale como `..._1.2.0_x64-setup.exe`: usar
           # `github.ref_name` crudo en el glob de abajo no matchearia nada, y eso

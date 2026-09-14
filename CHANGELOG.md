@@ -13,6 +13,31 @@ lectores distintos y no conviene mezclarlos.
 
 ---
 
+## 1.2.1 — Un back-end caído ya no cuesta material
+
+**No hay que tocar nada** para actualizar.
+
+- **Si el back-end no responde, las síntesis ya no se descartan.** Antes, 75
+  minutos sin poder entregar —cinco intentos, uno cada 15 minutos— sacaban una
+  síntesis de la cola **para siempre**, y sólo volvía con un disparo manual.
+  Ahora se quedan esperando y salen solas cuando el back-end vuelve.
+- **La pestaña Problemas lo muestra** mientras pasa, con el contador de cuántas
+  corridas seguidas lleva sin poder entregar.
+- **Y sale un mail, una sola vez por episodio**: a la hora de empezar la caída, y
+  no uno por hora hasta que alguien lo resuelva.
+- **Un `POST /deliver` con el back-end caído ya no se cuelga.** Cortaba a los 60
+  segundos porque intentaba una por una contra un servidor que no contestaba;
+  ahora corta en la primera.
+
+Lo que **no** cambió: un rechazo del back-end —un 4xx— sigue agotando los
+intentos y avisando. Ahí el problema es de esa síntesis y no de la conexión, así
+que insistir no lo arregla.
+
+> Si tenés un destino de entrega configurado y usás el back-end de Sin Ruido,
+> avisale al equipo que lo mantiene: el motor ahora reintenta indefinidamente en
+> vez de rendirse a los 75 minutos. Para ellos no cambia nada de lo que tienen
+> que hacer.
+
 ## 1.2.0 — La cabina
 
 La primera versión con **aplicación de escritorio**. Hasta acá el motor se

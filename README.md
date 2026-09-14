@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/tests-950%20passing-brightgreen" alt="950 tests">
   <img src="https://img.shields.io/badge/coverage-95%25-brightgreen" alt="95% de cobertura">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
-  <img src="https://img.shields.io/badge/version-1.2.0-blue" alt="version 1.2.0">
+  <img src="https://img.shields.io/badge/version-1.2.1-blue" alt="version 1.2.1">
 </p>
 
 **Lee las noticias de varios medios, detecta cuáles cubren el mismo hecho y escribe una síntesis neutral que compara cómo lo contó cada uno.**
@@ -220,7 +220,7 @@ Eso levanta Postgres con pgvector, **aplica las migraciones solo** y deja la API
 en `http://localhost:8000`. Comprobalo:
 
 ```bash
-curl localhost:8000/          # {"status":"ok","database":"ok","version":"1.2.0",...}
+curl localhost:8000/          # {"status":"ok","database":"ok","version":"1.2.1",...}
 ```
 
 Y ya podés traer noticias de verdad:
@@ -332,7 +332,8 @@ Con la cabina es lo mismo pero sin escribir nada: `git pull` y reabrir la app,
 que reconstruye al arrancar.
 
 **Antes de actualizar, mirá el [CHANGELOG.md](CHANGELOG.md).** Si una versión
-pide tocar el `.env` está avisado ahí — la 1.1.0 lo pedía, la 1.2.0 no.
+pide tocar el `.env` está avisado ahí — la 1.1.0 lo pedía; la 1.2.0 y la
+1.2.1, no.
 
 ---
 
@@ -691,7 +692,7 @@ construirlo. Dos lectores distintos.
 
 ## Estado
 
-**Versión 1.2.0.** Las cinco fases del motor completas, la entrega al back-end
+**Versión 1.2.1.** Las cinco fases del motor completas, la entrega al back-end
 verificada punta a punta contra un receptor real, y una **aplicación de
 escritorio** que lo opera.
 

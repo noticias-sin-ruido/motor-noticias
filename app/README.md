@@ -225,7 +225,7 @@ escrito entero acá abajo para no tener que reconstruirlo de memoria.
 ## El `productName` no lleva guión largo, y no es capricho
 
 Es **`Sin Ruido`** a secas, y de ahí sale el nombre del instalador
-(`Sin Ruido_1.2.0_x64-setup.exe`). La primera versión decía
+(`Sin Ruido_<versión>_x64-setup.exe`). La primera versión decía
 `Sin Ruido — Cabina`, con un em dash, y el carácter viajaba al nombre del
 archivo.
 
@@ -245,7 +245,7 @@ Ruido, y es lo que va a buscar en el menú Inicio. La idea sobrevive en el
 
 **Y una vuelta de tuerca más: GitHub renombra el adjunto.** Al subirlo a una
 Release cambia los espacios por puntos, así que el archivo que baja un tercero
-se llama `Sin.Ruido_1.2.0_x64-setup.exe` y no `Sin Ruido_1.2.0_x64-setup.exe`.
+se llama `Sin.Ruido_<versión>_x64-setup.exe` y no `Sin Ruido_<versión>_...`.
 Son el mismo binario, pero la documentación tenía que decir el nombre que la
 persona va a ver, no el que produce `tauri build`.
 
