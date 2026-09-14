@@ -691,7 +691,97 @@ Escuchar es el modo natural de consumir noticias mientras se hace otra cosa —m
 - **Esto no reemplaza un lector de pantalla.** Es una función de consumo, no de accesibilidad: quien usa NVDA o Narrador ya tiene el texto, y agregar una segunda voz encima estorba. Los dos usos conviven pero no son el mismo.
 - **Empezar y cortar tienen que ser evidentes.** Una voz que arranca sola, o que no se puede parar rápido, es peor que no tenerla.
 
-### 16. Un back-end caído no puede costar material — separar "no está" de "no le gusta"
+### 16. Un back-end caído no puede costar material ✅ COMPLETO (13/09/2026)
+
+**El invariante que quedó establecido:** `intentos_envio` sólo avanza cuando el
+back-end dijo algo **sobre esa síntesis** — un 2xx o un rechazo por contrato.
+
+Lo que se construyó:
+
+- **`BackendNoDisponible`**, una excepción nueva para lo que no es un veredicto
+  sobre el contenido: conexión rechazada, timeout, cualquier 5xx, y los 4xx
+  pasajeros (408, 425, 429). El contrato ya agrupaba esos casos en una sola fila
+  de su tabla de reintentos; esto sólo les puso nombre.
+- **El contador dejó de avanzar** en ese caso, y la fila no se toca.
+- **El barrido corta en la primera** en vez de intentar las otras 31 contra un
+  servidor que no contesta. De paso muere el cuelgue de 60 s de `POST /deliver`.
+- **El aviso, una vez por episodio.** La racha se lee de `Corrida.pasos`, que ya
+  guardaba las stats del paso de entrega: **sin estado nuevo, sin migración y sin
+  contador que resetear**, porque una entrega exitosa corta la racha sola. El
+  mail sale cuando la racha *iguala* `WEBHOOK_CORRIDAS_ANTES_DE_AVISAR` (4, o sea
+  una hora), no cuando la supera. Y el evento queda en el panel de Problemas en
+  cada corrida, que es el canal que sí vimos funcionar.
+- **`PASO_ENTREGA`** pasó a ser una constante importada por `main.py`: eran dos
+  literales iguales, y renombrar uno habría dejado la racha contando cero en
+  silencio.
+
+**Verificación.** 960 tests en verde y ruff limpio. **Cinco mutaciones, cinco
+cazadas, cero escapes**: contar el intento igual, sacar el corte, avisar con `>=`
+en vez de igualdad, que un 4xx deje de contar, y tratar un 429 como rechazo del
+contenido. El test que codifica el punto simula **diez barridos** con el back-end
+caído —150 minutos, el doble del umbral viejo— y afirma que nada salió de la cola.
+
+**Dos tests existentes afirmaban lo contrario y se invirtieron con su docstring**,
+no sólo con su assert: `test_cuenta_el_intento_aunque_falle` y el del barrido.
+Y `test_avisa_cuando_una_sintesis_agota_los_intentos` pasó a agotar con un 4xx,
+porque una caída ya no puede llevar nada al tope — que es exactamente el cambio.
+
+**Queda pendiente y no es código:** `specs/webhook_contract.md` documenta hoy
+"hasta 5 corridas" (línea 256) y promete el disparo manual (262). Las dos dejan de
+ser exactas. **La enmienda está redactada y no se aplicó**: ese documento es
+compartido con el otro equipo y no se toca sin avisarles.
+
+---
+
+#### Cómo se llegó acá
+
+
+**Es lo único que le queda al motor.** El 4, el 5 y el 7 están diferidos con su
+disparador medido; el 6 quedó cerrado en la práctica; el 15 es una función nueva y
+no deuda; lo que falta del 17 es de la app; y el 18 murió con la decisión de
+numerar motor y app como una unidad.
+
+**Se difirió y se revirtió el mismo día. Vale la pena por qué.**
+
+El diferimiento se apoyó en que la salida gratis alcanzaba: dejar el destino de
+entrega sin configurar cuando el back-end no está. Es cierto que funciona —se hizo
+el 08/09 y frenó la pérdida en el acto— pero **depende de acordarse**, y lo que
+evita es una pérdida silenciosa y permanente. Una noche con el destino puesto y el
+back-end apagado quema todo lo generado en esas horas, sin error, sin aviso y sin
+vuelta atrás salvo un `POST /deliver?forzar=true` a mano.
+
+Confiar en la memoria del operador para eso contradice la tesis del punto 14: la
+app existe para que el operador no tenga que acordarse.
+
+**Y el disparador se cumplió sin necesidad de medirlo.** Pedía saber si el
+despliegue iba a tener un destino configurado de forma permanente con caídas
+largas del back-end. Se dijo que la prueba punta a punta lo contestaría; lo
+contestó el operador directamente: **el back-end no va a estar levantado siempre.**
+Con ese modo de operación, las dos condiciones se cumplen desde el primer día.
+
+**Una corrección de calibración, anotada a propósito.** Al repasar el backlog antes
+de cerrar la fase 9, este punto se describió como "el único con un costo corriendo".
+Era falso: el costo corriente era cero desde la mitigación del 08/09. La urgencia
+venía de la memoria del diagnóstico y no de los números del momento. La conclusión
+—que hay que hacerlo— resultó correcta, pero por un motivo distinto del que se
+alegó, y eso también cuenta como error.
+
+#### Dos cosas del back-end que el diseño tiene que tener en cuenta
+
+Leídas de su `HANDOFF.md` el 13/09/2026, y **acotan qué significa cada categoría**:
+
+- **Responde `202` antes de procesar.** Graba el payload crudo en su `IngestLog` y
+  recién ahí acusa recibo, así que **un fallo de procesamiento nunca quema un
+  intento**: la fila queda de su lado y es reprocesable a mano. Para que este punto
+  muerda, el back-end tiene que estar *inalcanzable*, no fallando.
+- **Cuando falla de verdad, ya responde con los códigos correctos.** `500` si no
+  pudo grabar el `IngestLog`, `503` si le falta el `WEBHOOK_SECRET`, `400` sólo para
+  payload inválido y `401` para firma. O sea que el 4xx que hoy corta para siempre
+  **es efectivamente información sobre esa síntesis**, y esa mitad del diseño no
+  hay que tocarla.
+
+#### El diseño
+
 
 **El motor tiene que servir sin back-end**, y esa es la decisión de arquitectura que ordena este punto: el sistema va a vivir en un sitio y el motor en otro, así que la entrega es un extra que ocurre **sólo si hay webhook configurado**, no una dependencia. Un back-end apagado es un estado normal, no un incidente.
 
@@ -719,7 +809,12 @@ Se descartó **subir `WEBHOOK_MAX_INTENTOS`**: es una línea, pero deja el mismo
 **Cuidados:**
 
 - **El aviso tiene que seguir sirviendo.** Si nada agota nunca por caída, el mail de "síntesis sin entregar" deja de dispararse; hace falta que alguien avise que hace N corridas que no se entrega nada, sin mandar un mail por hora. `alerts.enviar_alerta` ya tiene cooldown por clave.
-- **Las 124 quemadas se recuperan con `POST /deliver?forzar=true`** cuando haya back-end real. Es seguro: el contrato con el otro equipo dice que el receptor hace *upsert* por `sintesis.id`, así que reenviar no duplica.
+- **Las 124 quemadas ya se recuperaron** con `POST /deliver?forzar=true` el
+  09/09, minutos antes de limpiar el destino. Comprobado contra la base el
+  13/09: **cero filas con `intentos_envio >= 5` sin entregar**. Las 144 que
+  faltan entregar tienen `intentos_envio = 0` — nunca se intentaron, porque no
+  hay destino — así que salen solas por el camino normal cuando se configure
+  uno. No hace falta `forzar`. Es seguro: el contrato con el otro equipo dice que el receptor hace *upsert* por `sintesis.id`, así que reenviar no duplica.
 - **`specs/webhook_contract.md` no se toca**: esto no cambia el payload ni la firma, sólo cuándo se reintenta.
 
 

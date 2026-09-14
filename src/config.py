@@ -334,6 +334,16 @@ class Settings(BaseSettings):
     # las vuelve a incluir cuando el problema del otro lado está resuelto.
     WEBHOOK_MAX_INTENTOS: int = 5
 
+    # Cuántas corridas seguidas sin poder alcanzar al back-end antes de mandar
+    # un mail. Cuatro son una hora con el ciclo de 15 minutos: suficiente para
+    # no avisar por un parpadeo, poco para enterarse la misma mañana.
+    #
+    # **El aviso sale una sola vez por episodio** porque se compara por
+    # igualdad, no por "mayor o igual": la racha crece de a uno por corrida, así
+    # que toca este número exactamente una vez. Y se reinicia sola con la
+    # primera entrega exitosa, sin estado que resetear. Punto 16 del backlog.
+    WEBHOOK_CORRIDAS_ANTES_DE_AVISAR: int = 4
+
     # --- Base de datos (Fase 5) ---
     # Ver specs/tech_stack.md, punto 2 de Escalabilidad. Quedaba sin definir a
     # propósito hasta fijar el despliegue real: el valor correcto depende de

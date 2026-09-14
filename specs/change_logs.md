@@ -3671,3 +3671,83 @@ Para la prueba del motor sin `API_TOKEN` hice `cp .env .env.respaldo-prueba5` an
 Lo levantó el usuario, no yo. Quedó una regla —**los `.env` y los archivos con secretos los maneja él**; yo puedo leer la forma de un valor, nunca editarlos ni copiarlos— y el arreglo estructural para que no dependa de la disciplina: `.gitignore` pasó a `.env.*` con `!.env.example`, comprobado contra los cinco casos.
 
 De paso quedó una forma de trabajo mejor para lo que sí puedo hacer: cuando hizo falta el token para llamar a `/deliver`, el pedido salió **desde adentro del contenedor**, donde el entorno ya está cargado. El secreto nunca pasó por mi lado.
+
+### Un back-end caído no puede costar material: el contador medía otra cosa (13/09/2026)
+
+Punto 16 del backlog, el último trabajo pendiente del motor.
+
+**El defecto, en una frase: `intentos_envio` medía la cosa equivocada.** El campo
+está pensado para decir "cuántas veces le ofrecimos esta síntesis al back-end y la
+rechazó" — información sobre la fila, que justifica dejar de insistir. Pero el
+`+= 1` estaba **antes** del POST y el `finally` comiteaba igual, así que lo que
+contaba en la práctica era **cuántos barridos corrieron sin nadie del otro lado**.
+Eso no dice nada de la síntesis: dice algo de la red.
+
+Con `WEBHOOK_MAX_INTENTOS = 5` y el ciclo de 15 minutos, **75 minutos de back-end
+inalcanzable descartaban material de forma permanente**. Medido el 08/09 con el
+back-end apagado desde el 06/09: 0 entregadas en 10 corridas, 40 quemadas en esas
+10, 124 acumuladas.
+
+#### Se difirió y se revirtió el mismo día
+
+Vale anotarlo porque el error fue de razonamiento, no de código.
+
+**Se difirió** con el argumento de que la salida gratis alcanzaba: dejar el destino
+sin configurar mientras el back-end no esté. Funciona —se hizo el 08/09 y frenó la
+pérdida en el acto— pero **depende de acordarse todas las veces**, y lo que evita
+es una pérdida silenciosa y permanente. El usuario lo señaló: confiar en la memoria
+del operador para eso contradice la tesis del punto 14, que es que el operador no
+tenga que acordarse.
+
+**Y el disparador se cumplió sin medirlo.** El diferimiento pedía saber si el
+despliegue tendría un destino permanente con caídas largas. Se dijo que la prueba
+punta a punta lo contestaría; lo contestó el usuario directamente: el back-end no
+va a estar levantado siempre.
+
+**Una calibración mal hecha, anotada a propósito.** Al repasar el backlog antes de
+cerrar la fase 9 este punto se describió como "el único con un costo corriendo".
+Era falso: el costo corriente era cero desde la mitigación del 08/09. La urgencia
+venía de la memoria del diagnóstico y no de los números del momento. La conclusión
+resultó correcta, pero por un motivo distinto del que se alegó.
+
+#### Lo que se evaluó y se descartó
+
+**Subir `WEBHOOK_MAX_INTENTOS`.** Una línea, pero deja el mismo diseño contra el
+reloj: el contador sigue siendo por síntesis, así que una caída de tres días quema
+todo igual, sólo que más tarde.
+
+**Un interruptor con estado** que saltee el barrido entero durante N minutos tras
+una caída. Se descartó por el corte por barrido: la sonda de cada 15 minutos **es**
+cómo el motor se entera de que el back-end volvió, y un interruptor resuelve un
+costo que no existe.
+
+**Resetear el contador `veces` del evento** para saber cuándo empieza un episodio.
+Se descartó porque destruiría el valor del panel de Problemas, que es justamente
+"esto viene pasando desde el mes pasado". La salida fue leer la racha de
+`Corrida.pasos`, que ya guardaba las stats del paso de entrega: **cero estado
+nuevo, cero migración, y se reinicia sola** con la primera entrega exitosa.
+
+**Avisar sólo por evento, sin mail** (opción A de dos que se plantearon). El
+argumento era que el mail es el único canal del proyecto que nunca vimos entregar
+—falta la contraseña de aplicación de Gmail—, así que diseñar una política fina
+encima de un transporte no verificado es invertir en el lado equivocado. El usuario
+eligió B: evento **y** mail, una vez por episodio. Se hizo con la comparación por
+igualdad (`==`, no `>=`), que limita a uno sin necesitar estado.
+
+#### Dos cosas del back-end que acotaron el diseño
+
+Leídas de su `HANDOFF.md`, y cambian qué entra en cada categoría:
+
+- **Responde `202` antes de procesar**, grabando el payload crudo en su
+  `IngestLog`. Un fallo de procesamiento **nunca quema un intento**: para que este
+  punto muerda, el back-end tiene que estar inalcanzable, no fallando.
+- **Sus códigos de error ya son los correctos** (`500` si no pudo grabar, `503` si
+  le falta el secreto, `400` sólo para payload inválido). O sea que el 4xx que corta
+  para siempre **sí** es información sobre esa síntesis, y esa mitad no se tocó.
+
+#### Lo que queda, y no es código
+
+`specs/webhook_contract.md:256` documenta "hasta 5 corridas" y la 262 promete el
+disparo manual. Las dos dejan de ser exactas — el cambio favorece al otro equipo,
+pero el documento deja de decir la verdad. **La enmienda está redactada y no se
+aplicó**: es un documento compartido y avisar es del usuario.

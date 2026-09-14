@@ -16,6 +16,36 @@ from ..tiempo import ahora_utc, iso_local
 
 logger = logging.getLogger(__name__)
 
+# El nombre con el que el paso de entrega se guarda en `Corrida.pasos`. Vive acá
+# y `main.py` lo importa: si fueran dos literales, renombrar uno dejaría la
+# racha de abajo contando siempre cero, en silencio.
+PASO_ENTREGA = "entrega al backend"
+
+
+def corridas_seguidas_sin_backend(session: Session, tope: int = 20) -> int:
+    """
+    Cuántas de las últimas corridas terminaron sin poder alcanzar al back-end.
+
+    **Se corta en la primera que no lo reporta**, así que una entrega exitosa
+    reinicia la cuenta sola. Eso es lo que permite avisar una vez por episodio
+    sin guardar estado nuevo ni resetear un contador: la racha ya está escrita
+    en el historial de corridas.
+
+    El `tope` acota la consulta; una racha más larga que eso ya avisó hace rato.
+    """
+    filas = session.exec(
+        select(Corrida).order_by(Corrida.inicio.desc()).limit(tope)
+    ).all()
+
+    seguidas = 0
+    for corrida in filas:
+        paso = (corrida.pasos or {}).get(PASO_ENTREGA)
+        if isinstance(paso, dict) and paso.get("backend_no_disponible"):
+            seguidas += 1
+        else:
+            break
+    return seguidas
+
 
 def iniciar_corrida(session: Session) -> Optional[int]:
     """

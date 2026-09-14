@@ -43,6 +43,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from ..config import settings
 from ..tiempo import ahora_utc
 from ..models import Medio, Sintesis
+from . import corridas, eventos
 from .alerts import enviar_alerta
 from .clustering import ESTADO_ABIERTO
 from .entrega import DestinoInvalido, url_de_entrega, validar_url_de_entrega
@@ -69,6 +70,22 @@ class EntregaRechazada(Exception):
     No se reintenta: el mismo cuerpo va a dar el mismo rechazo. Un 4xx acá
     significa que el contrato se rompió (un campo que cambió de forma, una firma
     que no valida), y eso se arregla con una corrección, no con insistir.
+    """
+
+
+class BackendNoDisponible(Exception):
+    """
+    No se pudo alcanzar al back-end: no contestó, o contestó que no puede.
+
+    **No es información sobre la síntesis que se estaba entregando**, así que no
+    cuenta un intento contra ella. Entran acá la conexión rechazada, el timeout,
+    cualquier 5xx —"no puedo aceptar nada ahora"— y los 4xx pasajeros (408, 425,
+    429): un receptor que pide que pares tampoco está diciendo nada del
+    contenido, y seguir con las otras treinta es lo contrario de lo que
+    corresponde.
+
+    El contrato ya agrupaba estos casos en una sola fila de su tabla de
+    reintentos; esto sólo les pone nombre. Punto 16 del backlog.
     """
 
 
@@ -279,10 +296,16 @@ def entregar_sintesis(
     es lo que necesita quien entrega una sola síntesis; el barrido lo resuelve
     una vez y lo pasa, para que todas las de una corrida vayan al mismo lado.
 
-    El `finally` es la parte que importa: si el contador solo avanzara con el
-    éxito, un back-end permanentemente caído nunca alcanzaría
-    `WEBHOOK_MAX_INTENTOS` y el barrido lo reintentaría cada 15 minutos para
-    siempre, sin que nadie se entere.
+    **`intentos_envio` sólo avanza cuando el back-end dijo algo sobre esta
+    síntesis**: un 2xx o un rechazo por contrato. Si no contestó, el intento no
+    se cuenta y la fila queda intacta.
+
+    Hasta el punto 16 se contaba siempre, con el argumento de que un back-end
+    caído tenía que alcanzar el tope alguna vez. El efecto real era otro: cinco
+    barridos de 15 minutos son 75 minutos, y pasado ese punto la síntesis salía
+    de `sintesis_pendientes` y no se reintentaba nunca más. Un back-end caído
+    una hora y cuarto costaba material de forma permanente, que es justo lo que
+    "el motor sirve sin back-end" dice que no puede pasar.
     """
     destino = url or url_de_entrega(session)
     if not destino:
@@ -308,15 +331,24 @@ def entregar_sintesis(
         HEADER_FIRMA: firmar(cuerpo, timestamp),
     }
 
-    sintesis.intentos_envio += 1
     try:
         codigo = _postear(destino, cuerpo, headers)
-        sintesis.enviado_backend = True
-        sintesis.fecha_envio = ahora_utc()
-        return codigo
-    finally:
+    except httpx.HTTPError as error:
+        # No contestó. La fila no se toca: ni el contador ni nada.
+        raise BackendNoDisponible(f"{destino} no respondió: {error}") from error
+    except EntregaRechazada:
+        # Contestó, y dijo que no. Eso sí es un veredicto sobre esta síntesis.
+        sintesis.intentos_envio += 1
         session.add(sintesis)
         session.commit()
+        raise
+
+    sintesis.intentos_envio += 1
+    sintesis.enviado_backend = True
+    sintesis.fecha_envio = ahora_utc()
+    session.add(sintesis)
+    session.commit()
+    return codigo
 
 
 def sintesis_pendientes(session: Session, forzar: bool = False) -> List[Sintesis]:
@@ -411,6 +443,9 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
         "entregadas": 0,
         "rechazadas": 0,
         "fallidas": 0,
+        # Si el barrido cortó porque no había nadie del otro lado. Va a
+        # `Corrida.pasos`, y de ahí sale la racha que decide el aviso.
+        "backend_no_disponible": False,
         # Las que cruzaron el tope EN ESTA CORRIDA: son las que disparan aviso.
         "agotadas": 0,
         # Cuántas hay trabadas en total. Es visibilidad operativa y no genera
@@ -458,6 +493,44 @@ def entregar_pendientes(session: Session, forzar: bool = False) -> dict:
                     ),
                     clave="webhook:rechazo",
                 )
+            except BackendNoDisponible as error:
+                # **Se corta acá.** Intentar las otras contra un servidor que no
+                # contesta no puede salir bien, y era lo que hacía que
+                # `POST /deliver` colgara 60 segundos. Quedan todas pendientes,
+                # con su contador sin tocar, para el barrido siguiente.
+                stats["backend_no_disponible"] = True
+                logger.warning("El back-end no está respondiendo: %s", error)
+
+                eventos.registrar_sin_romper(
+                    clave="entrega:backend_no_disponible",
+                    asunto="El back-end no responde",
+                    mensaje=(
+                        f"{error}. Las síntesis quedan pendientes y se "
+                        "reintentan solas en la corrida siguiente."
+                    ),
+                )
+
+                # Igualdad y no ">=": la racha sube de a uno por corrida, así que
+                # esto es verdadero exactamente una vez por episodio. Se reinicia
+                # sola con la primera entrega exitosa.
+                seguidas = corridas.corridas_seguidas_sin_backend(session) + 1
+                if seguidas == settings.WEBHOOK_CORRIDAS_ANTES_DE_AVISAR:
+                    enviar_alerta(
+                        asunto="[Sin Ruido] El back-end no responde",
+                        cuerpo=(
+                            f"Van {seguidas} corridas seguidas sin poder "
+                            f"entregar. Hay {stats['pendientes']} síntesis "
+                            "esperando. "
+                            "No se pierde nada: se reintentan solas cuando "
+                            "vuelva. Este aviso sale una vez por episodio."
+                        ),
+                        clave="webhook:backend_caido",
+                        # El cooldown acá sólo podría tragarse el único aviso
+                        # del episodio; la igualdad de arriba ya limita a uno.
+                        ignorar_cooldown=True,
+                    )
+                break
+
             except Exception as error:
                 stats["fallidas"] += 1
                 logger.warning(f"No se pudo entregar la síntesis {sintesis_id}: {error}")

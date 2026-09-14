@@ -37,6 +37,7 @@ from .models import (
 from .models.alertas import MAX_LARGO_MAIL
 from .services.alerts import enviar_alerta
 from .services.corridas import (
+    PASO_ENTREGA,
     cerrar_corrida,
     estado_del_pipeline,
     iniciar_corrida,
@@ -341,7 +342,7 @@ def _job_ingesta_programada() -> None:
         # no un envío de lo recién generado: lo que quedó sin entregar de
         # corridas anteriores no tiene por qué esperar a que se arregle la
         # fusión. Por lo mismo tampoco necesita un job de reintento aparte.
-        _correr_paso(session, "entrega al backend", entregar_pendientes, pasos)
+        _correr_paso(session, PASO_ENTREGA, entregar_pendientes, pasos)
 
         # Al final a propósito: nada de lo que hizo esta corrida depende de que
         # la purga haya pasado antes. Idempotente como el resto — una noticia

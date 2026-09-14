@@ -19,10 +19,12 @@ import pytest
 from sqlmodel import Session
 
 from src.config import settings
+from src.tiempo import ahora_utc
 from src.models import Cluster, Medio, Noticia, PublicacionRedes, Sintesis
-from src.services import webhook_delivery
+from src.services import eventos, webhook_delivery
 from src.services.entrega import guardar_url
 from src.services.webhook_delivery import (
+    BackendNoDisponible,
     EntregaRechazada,
     construir_payload,
     entregar_pendientes,
@@ -52,6 +54,23 @@ def webhook_configurado(session: Session):
     with patch.object(settings, "WEBHOOK_SECRET", SECRETO):
         webhook_delivery.enviar_alerta = MagicMock(return_value=True)
         yield
+
+
+@pytest.fixture
+def sin_espera():
+    """
+    Saca la espera creciente de `tenacity` entre reintentos.
+
+    Un `ConnectError` dispara 3 intentos con esperas de 2 y 4 segundos: seis por
+    test, y el de los diez barridos serían sesenta. **No mockea lo que se
+    prueba** — los tres intentos siguen ocurriendo, sólo se les saca el reloj.
+    """
+    from tenacity import wait_none
+
+    original = webhook_delivery._postear.retry.wait
+    webhook_delivery._postear.retry.wait = wait_none()
+    yield
+    webhook_delivery._postear.retry.wait = original
 
 
 @pytest.fixture
@@ -314,17 +333,34 @@ class TestEntrega:
         enviado = int(post.call_args.kwargs["headers"][webhook_delivery.HEADER_TIMESTAMP])
         assert antes <= enviado <= despues
 
-    def test_cuenta_el_intento_aunque_falle(self, session: Session, sintesis: Sintesis):
+    def test_no_cuenta_el_intento_si_el_backend_no_esta(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
         """
-        Si el contador solo avanzara con el éxito, un backend caído nunca
-        alcanzaría el tope y se reintentaría para siempre.
+        Que nadie conteste no es información sobre esta síntesis.
+
+        Este test afirmaba lo contrario hasta el punto 16 del backlog: se contaba
+        el intento para que un back-end caído alcanzara el tope. El efecto real
+        era que 75 minutos de caída (5 barridos de 15) descartaban material de
+        forma permanente. `intentos_envio` mide rechazos del contenido, no
+        barridos que corrieron sin nadie del otro lado.
         """
         with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
-            with pytest.raises(httpx.HTTPError):
+            with pytest.raises(BackendNoDisponible):
+                entregar_sintesis(session, sintesis)
+
+        assert sintesis.intentos_envio == 0
+        assert sintesis.enviado_backend is False
+
+    def test_un_rechazo_del_contenido_si_cuenta(
+        self, session: Session, sintesis: Sintesis
+    ):
+        """La otra mitad del punto 16: un 4xx sí dice algo sobre esta fila."""
+        with patch("httpx.post", return_value=respuesta_mock(422, "campo faltante")):
+            with pytest.raises(EntregaRechazada):
                 entregar_sintesis(session, sintesis)
 
         assert sintesis.intentos_envio == 1
-        assert sintesis.enviado_backend is False
 
     def test_un_4xx_no_se_reintenta(self, session: Session, sintesis: Sintesis):
         with patch("httpx.post", return_value=respuesta_mock(422, "campo faltante")) as post:
@@ -388,16 +424,17 @@ class TestBarrido:
         assert stats["entregadas"] == 1
 
     def test_un_backend_caido_deja_todo_pendiente_sin_romper(
-        self, session: Session, sintesis: Sintesis
+        self, session: Session, sintesis: Sintesis, sin_espera: None
     ):
-        """El barrido de la corrida siguiente lo reintenta solo."""
+        """El barrido de la corrida siguiente lo reintenta solo, indefinidamente."""
         with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
             stats = entregar_pendientes(session)
 
-        assert stats["fallidas"] == 1
         assert stats["entregadas"] == 0
+        assert stats["backend_no_disponible"] is True
         assert sintesis.enviado_backend is False
-        assert sintesis.intentos_envio == 1
+        # No cuenta: el contador es sobre rechazos, no sobre caídas.
+        assert sintesis.intentos_envio == 0
 
     def test_deja_de_tomar_las_que_agotaron_los_intentos(
         self, session: Session, sintesis: Sintesis
@@ -429,12 +466,18 @@ class TestBarrido:
     def test_avisa_cuando_una_sintesis_agota_los_intentos(
         self, session: Session, sintesis: Sintesis
     ):
-        """Justo al cruzar el tope, que es cuando hay algo nuevo que contar."""
+        """
+        Justo al cruzar el tope, que es cuando hay algo nuevo que contar.
+
+        **Agota con un 4xx y no con una caída.** Desde el punto 16 una caída no
+        cuenta intento, así que ya no puede llevar nada al tope: lo único que
+        agota es un rechazo del contenido, que es lo que el contador mide.
+        """
         sintesis.intentos_envio = settings.WEBHOOK_MAX_INTENTOS - 1
         session.add(sintesis)
         session.commit()
 
-        with patch("httpx.post", side_effect=httpx.ConnectError("caído")):
+        with patch("httpx.post", return_value=respuesta_mock(422, "campo faltante")):
             stats = entregar_pendientes(session)
 
         assert stats["agotadas"] == 1
@@ -581,3 +624,189 @@ class TestResincronizacion:
 
         assert post.call_count == 1
         assert stats["entregadas"] == 1
+
+
+class TestBackendNoDisponible:
+    """
+    Punto 16: separar "el back-end no está" de "esta síntesis no le gusta".
+
+    Lo primero es información sobre la red y no puede costar material; lo
+    segundo es información sobre la fila y sí tiene que agotar.
+    """
+
+    def test_un_5xx_no_cuenta_intento(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """Un 5xx es "no puedo aceptar nada ahora", no "esta síntesis está mal"."""
+        with patch("httpx.post", return_value=respuesta_mock(503)):
+            with pytest.raises(BackendNoDisponible):
+                entregar_sintesis(session, sintesis)
+
+        assert sintesis.intentos_envio == 0
+
+    def test_un_429_no_cuenta_intento(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """
+        Está, pero pide que pares. Insistir con las otras 31 es lo contrario de
+        lo que corresponde, y del contenido no dice nada.
+        """
+        with patch("httpx.post", return_value=respuesta_mock(429)):
+            with pytest.raises(BackendNoDisponible):
+                entregar_sintesis(session, sintesis)
+
+        assert sintesis.intentos_envio == 0
+
+    def test_el_barrido_corta_en_la_primera(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """
+        No tiene sentido intentar las otras contra un servidor que no contesta.
+        Es lo que hacía que `POST /deliver` colgara 60 segundos.
+        """
+        for i in range(4):
+            session.add(
+                Sintesis(
+                    cluster_id=sintesis.cluster_id,
+                    titulo_angulo=f"Ángulo {i}",
+                    resumen_neutro="x",
+                )
+            )
+        session.commit()
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")) as post:
+            stats = entregar_pendientes(session)
+
+        # Los 3 intentos de tenacity sobre UNA sola síntesis, no sobre las cinco.
+        assert post.call_count == 3
+        assert stats["backend_no_disponible"] is True
+
+    def test_un_4xx_no_corta_el_barrido(self, session: Session, sintesis: Sintesis):
+        """Un rechazo del contenido es de esa fila sola: las demás siguen."""
+        otra = Sintesis(
+            cluster_id=sintesis.cluster_id, titulo_angulo="Otra", resumen_neutro="x"
+        )
+        session.add(otra)
+        session.commit()
+
+        with patch(
+            "httpx.post",
+            side_effect=[respuesta_mock(422, "error"), respuesta_mock(200)],
+        ):
+            stats = entregar_pendientes(session)
+
+        assert stats["rechazadas"] == 1
+        assert stats["entregadas"] == 1
+        assert stats["backend_no_disponible"] is False
+
+    def test_diez_barridos_con_el_backend_caido_no_queman_nada(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """
+        **El test que codifica el punto 16.**
+
+        Con `WEBHOOK_MAX_INTENTOS = 5`, el código anterior sacaba esta síntesis
+        del barrido en la quinta corrida y no la reintentaba nunca más. Diez
+        barridos son 150 minutos de caída: el doble del umbral viejo.
+        """
+        with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
+            for _ in range(10):
+                entregar_pendientes(session)
+
+        session.refresh(sintesis)
+        assert sintesis.intentos_envio == 0
+        assert sintesis.enviado_backend is False
+        # Lo que importa: sigue estando en la cola del barrido siguiente.
+        assert sintesis.id in [s.id for s in sintesis_pendientes(session)]
+
+    def test_deja_registrado_el_evento(
+        self, session: Session, sintesis: Sintesis, sin_espera: None, monkeypatch
+    ):
+        """
+        El panel de Problemas es el canal que sabemos que funciona.
+
+        Se verifica la llamada y no la fila: `conftest` neutraliza
+        `registrar_sin_romper` a propósito, porque abre su propia sesión y
+        escribiría en la base real desde la suite.
+        """
+        registrados = []
+        monkeypatch.setattr(
+            eventos, "registrar_sin_romper", lambda **kw: registrados.append(kw)
+        )
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
+            entregar_pendientes(session)
+
+        assert [r["clave"] for r in registrados] == ["entrega:backend_no_disponible"]
+
+    def _corrida_caida(self, session: Session) -> None:
+        """Una corrida ya cerrada que reportó no haber alcanzado al back-end."""
+        from src.models import Corrida
+        from src.services.corridas import PASO_ENTREGA
+
+        session.add(
+            Corrida(
+                fin=ahora_utc(),
+                pasos={PASO_ENTREGA: {"backend_no_disponible": True}},
+            )
+        )
+        session.commit()
+
+    def test_avisa_al_alcanzar_el_umbral_y_no_antes(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """
+        La racha se lee del historial de corridas, así que no hace falta estado
+        nuevo: con tres caídas previas, ésta es la cuarta y toca el umbral.
+        """
+        for _ in range(settings.WEBHOOK_CORRIDAS_ANTES_DE_AVISAR - 1):
+            self._corrida_caida(session)
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
+            entregar_pendientes(session)
+
+        claves = [
+            llamada.kwargs.get("clave")
+            for llamada in webhook_delivery.enviar_alerta.call_args_list
+        ]
+        assert "webhook:backend_caido" in claves
+
+    def test_no_avisa_dos_veces_en_el_mismo_episodio(
+        self, session: Session, sintesis: Sintesis, sin_espera: None
+    ):
+        """
+        **El punto de la opción B.** Con la racha ya pasada del umbral, la
+        corrida siguiente registra el evento pero no vuelve a mandar mail: se
+        compara por igualdad, no por "mayor o igual".
+        """
+        for _ in range(settings.WEBHOOK_CORRIDAS_ANTES_DE_AVISAR + 2):
+            self._corrida_caida(session)
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("sin conexión")):
+            entregar_pendientes(session)
+
+        claves = [
+            llamada.kwargs.get("clave")
+            for llamada in webhook_delivery.enviar_alerta.call_args_list
+        ]
+        assert "webhook:backend_caido" not in claves
+
+    def test_una_entrega_exitosa_reinicia_la_racha(self, session: Session):
+        """
+        Sin esto haría falta resetear un contador a mano. La racha se corta en
+        la primera corrida que no reportó caída, así que se reinicia sola.
+        """
+        from src.models import Corrida
+        from src.services import corridas
+        from src.services.corridas import PASO_ENTREGA
+
+        for _ in range(3):
+            self._corrida_caida(session)
+        session.add(
+            Corrida(fin=ahora_utc(), pasos={PASO_ENTREGA: {"entregadas": 2}})
+        )
+        session.commit()
+        for _ in range(2):
+            self._corrida_caida(session)
+
+        assert corridas.corridas_seguidas_sin_backend(session) == 2
